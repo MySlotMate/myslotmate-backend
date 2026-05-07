@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"myslotmate-backend/internal/lib/recurrence"
 	"myslotmate-backend/internal/models"
 	"strings"
 	"time"
@@ -11,6 +12,30 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
+
+// applyRecurrence rolls a past recurring event's `time` (and `end_time`) forward
+// to the next future occurrence so the frontend's "hide if past" filter still
+// shows it. Non-recurring events and recurring events whose stored time is
+// already in the future are left untouched.
+func applyRecurrence(e *models.Event) {
+	if e == nil || !e.IsRecurring || e.RecurrenceRule == nil {
+		return
+	}
+	now := time.Now()
+	if !e.Time.Before(now) {
+		return
+	}
+	next, ok := recurrence.NextOccurrence(*e.RecurrenceRule, e.Time, now)
+	if !ok {
+		return
+	}
+	if e.EndTime != nil {
+		duration := e.EndTime.Sub(e.Time)
+		newEnd := next.Add(duration)
+		e.EndTime = &newEnd
+	}
+	e.Time = next
+}
 
 type EventRepository interface {
 	Create(ctx context.Context, event *models.Event) error
@@ -71,6 +96,7 @@ func scanEvent(row interface {
 		return nil, err
 	}
 	e.Mood = normalizedMood
+	applyRecurrence(e)
 	return e, nil
 }
 
@@ -259,6 +285,7 @@ func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, 
 			return nil, err
 		}
 		e.Mood = normalizedMood
+		applyRecurrence(e)
 		events = append(events, e)
 	}
 	fmt.Printf("[EVENT_REPO] scanEvents: Total events found: %d\n", len(events))

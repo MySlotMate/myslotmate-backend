@@ -54,6 +54,7 @@ type NotificationService interface {
 	SendBookingConfirmationEmail(ctx context.Context, booking *models.Booking, user *models.User, event *models.Event) error
 	SendEventReminderWhatsapp(ctx context.Context, booking *models.Booking, user *models.User, event *models.Event) error
 	SendEventReminderEmail(ctx context.Context, booking *models.Booking, user *models.User, event *models.Event) error
+	SendSMS(ctx context.Context, to string, body string) error
 }
 
 // NewTwilioNotificationService creates a new Twilio notification service
@@ -161,6 +162,25 @@ func (s *TwilioNotificationService) SendEventReminderWhatsapp(ctx context.Contex
 	// Mark reminder notification as sent in database
 	if err := s.bookingRepo.MarkWhatsappReminderNotificationSent(ctx, booking.ID); err != nil {
 		return fmt.Errorf("failed to mark reminder WhatsApp as sent: %w", err)
+	}
+
+	return nil
+}
+
+// SendSMS sends a plain text SMS via Twilio
+func (s *TwilioNotificationService) SendSMS(ctx context.Context, to string, body string) error {
+	if s.cfg.PhoneNumber == "" {
+		return fmt.Errorf("Twilio phone number not configured")
+	}
+
+	params := &twilioapiv2010.CreateMessageParams{}
+	params.SetFrom(s.cfg.PhoneNumber)
+	params.SetTo(formatPhoneNumber(to))
+	params.SetBody(body)
+
+	_, err := s.client.Api.CreateMessage(params)
+	if err != nil {
+		return fmt.Errorf("failed to send SMS: %w", err)
 	}
 
 	return nil

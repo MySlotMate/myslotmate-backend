@@ -173,15 +173,15 @@ func main() {
 	})
 	log.Println("Using Razorpay Payment Collection Provider")
 
-	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, workerPool, dispatcher, aadharProvider, paymentProvider)
-	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, dispatcher)
-	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, dispatcher)
-
 	// Initialize notification service
 	notifService, err := initializeNotificationService(&cfg.Twilio, &cfg.SMTP, dbConn)
 	if err != nil {
 		log.Printf("Warning: failed to initialize notification service: %v", err)
 	}
+
+	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService)
+	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, dispatcher)
+	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, dispatcher)
 
 	// Initialize reminder scheduler
 	var reminderScheduler *notification.ReminderScheduler

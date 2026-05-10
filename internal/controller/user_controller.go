@@ -27,6 +27,8 @@ func (c *UserController) RegisterRoutes(r chi.Router) {
 	r.Post("/auth/signup", c.HandleSignUp)
 	r.Post("/auth/verify-aadhar/init", c.InitiateAadharVerification)
 	r.Post("/auth/verify-aadhar/complete", c.CompleteAadharVerification)
+	r.Post("/auth/otp/send", c.SendPhoneOTP)
+	r.Post("/auth/otp/verify", c.VerifyPhoneOTP)
 	r.Route("/users", func(r chi.Router) {
 		r.Get("/me", c.GetProfile)
 		r.Get("/by-firebase/{firebaseID}", c.GetUserByFirebaseID)
@@ -423,4 +425,53 @@ func (c *UserController) GetUserByFirebaseID(w http.ResponseWriter, r *http.Requ
 	}
 
 	RespondSuccess(w, http.StatusOK, user)
+}
+
+// SendPhoneOTP handles sending OTP to user's phone
+func (c *UserController) SendPhoneOTP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid user_id")
+		return
+	}
+
+	if err := c.userService.SendPhoneOTP(r.Context(), userID); err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, map[string]string{"message": "OTP sent successfully"})
+}
+
+// VerifyPhoneOTP handles verifying the OTP
+func (c *UserController) VerifyPhoneOTP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID string `json:"user_id"`
+		OTP    string `json:"otp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid user_id")
+		return
+	}
+
+	if err := c.userService.VerifyPhoneOTP(r.Context(), userID, req.OTP); err != nil {
+		RespondError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, map[string]string{"message": "OTP verified successfully"})
 }

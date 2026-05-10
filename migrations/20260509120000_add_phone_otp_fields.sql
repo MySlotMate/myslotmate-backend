@@ -1,0 +1,4 @@
+-- Add phone OTP and verification fields to users table
+ALTER TABLE users ADD COLUMN IF NOT EXISTS otp VARCHAR(6);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS otp_expires_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_phone_verified BOOLEAN DEFAULT FALSE;

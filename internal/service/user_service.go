@@ -9,6 +9,7 @@ import (
 	"myslotmate-backend/internal/lib/event"
 	"myslotmate-backend/internal/lib/identity"
 	"myslotmate-backend/internal/lib/payment"
+	"myslotmate-backend/internal/lib/notification"
 	"myslotmate-backend/internal/lib/validation"
 	"myslotmate-backend/internal/lib/worker"
 	"myslotmate-backend/internal/models"
@@ -33,6 +34,8 @@ type UserService interface {
 	VerifyTopUp(ctx context.Context, userID uuid.UUID, req VerifyTopUpRequest) (*WalletBalanceResponse, error)
 	CreditWalletFromWebhook(ctx context.Context, orderID string, razorpayPaymentID string) error
 	GetByAuthUID(ctx context.Context, authUID string) (*models.User, error)
+	SendPhoneOTP(ctx context.Context, userID uuid.UUID) error
+	VerifyPhoneOTP(ctx context.Context, userID uuid.UUID, otp string) error
 }
 
 type SignUpRequest struct {
@@ -89,6 +92,7 @@ type userService struct {
 	dispatcher      *event.Dispatcher
 	aadharProvider  identity.AadharProvider
 	paymentProvider payment.Provider
+	notifService    notification.NotificationService
 }
 
 // NewUserService Factory for UserService
@@ -102,6 +106,7 @@ func NewUserService(
 	dispatcher *event.Dispatcher,
 	ap identity.AadharProvider,
 	pp payment.Provider,
+	ns notification.NotificationService,
 ) UserService {
 	return &userService{
 		repo:            repo,
@@ -113,6 +118,7 @@ func NewUserService(
 		dispatcher:      dispatcher,
 		aadharProvider:  ap,
 		paymentProvider: pp,
+		notifService:    ns,
 	}
 }
 
@@ -434,6 +440,67 @@ func (s *userService) CreditWalletFromWebhook(ctx context.Context, orderID strin
 	pmtRecord.GatewayPaymentID = &razorpayPaymentID
 	pmtRecord.UpdatedAt = time.Now()
 	_ = s.paymentRepo.Update(ctx, pmtRecord)
+
+	return nil
+}
+
+// SendPhoneOTP generates and sends a 6-digit OTP to user's phone
+func (s *userService) SendPhoneOTP(ctx context.Context, userID uuid.UUID) error {
+	user, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errors.New("user not found")
+	}
+
+	if user.PhnNumber == "" {
+		return errors.New("phone number not found for user")
+	}
+
+	// Generate 6-digit OTP
+	otp := fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
+	expiresAt := time.Now().Add(10 * time.Minute)
+
+	// Store in database
+	if err := s.repo.UpdateOTP(ctx, userID, otp, expiresAt); err != nil {
+		return fmt.Errorf("failed to store OTP: %w", err)
+	}
+
+	// Send via SMS
+	body := fmt.Sprintf("Your MySlotMate verification code is: %s. Valid for 10 minutes.", otp)
+	return s.notifService.SendSMS(ctx, user.PhnNumber, body)
+}
+
+// VerifyPhoneOTP validates the provided OTP
+func (s *userService) VerifyPhoneOTP(ctx context.Context, userID uuid.UUID, otp string) error {
+	user, err := s.repo.GetByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errors.New("user not found")
+	}
+
+	if user.OTP == nil || *user.OTP == "" || user.OTPExpiresAt == nil {
+		return errors.New("OTP not found")
+	}
+
+	if time.Now().After(*user.OTPExpiresAt) {
+		return errors.New("OTP has expired")
+	}
+
+	if *user.OTP != otp {
+		return errors.New("invalid OTP")
+	}
+
+	// Mark as verified in database
+	if err := s.repo.SetPhoneVerified(ctx, userID); err != nil {
+		return fmt.Errorf("failed to set phone as verified: %w", err)
+	}
+
+	// Clear OTP from database
+	_ = s.repo.UpdateOTP(ctx, userID, "", time.Time{})
 
 	return nil
 }

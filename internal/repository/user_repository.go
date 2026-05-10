@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"myslotmate-backend/internal/models"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -18,6 +19,8 @@ type UserRepository interface {
 	SetVerified(ctx context.Context, id uuid.UUID) error
 	Update(ctx context.Context, user *models.User) error
 	GetByAuthUID(ctx context.Context, authUID string) (*models.User, error)
+	UpdateOTP(ctx context.Context, id uuid.UUID, otp string, expiresAt time.Time) error
+	SetPhoneVerified(ctx context.Context, id uuid.UUID) error
 }
 
 // postgresUserRepository is the concrete implementation
@@ -32,6 +35,18 @@ func NewUserRepository(db *sql.DB) UserRepository {
 
 func (r *postgresUserRepository) SetVerified(ctx context.Context, id uuid.UUID) error {
 	query := `UPDATE users SET is_verified = true, verified_at = NOW(), updated_at = NOW() WHERE id = $1`
+	_, err := r.db.ExecContext(ctx, query, id)
+	return err
+}
+
+func (r *postgresUserRepository) UpdateOTP(ctx context.Context, id uuid.UUID, otp string, expiresAt time.Time) error {
+	query := `UPDATE users SET otp = $2, otp_expires_at = $3, updated_at = NOW() WHERE id = $1`
+	_, err := r.db.ExecContext(ctx, query, id, otp, expiresAt)
+	return err
+}
+
+func (r *postgresUserRepository) SetPhoneVerified(ctx context.Context, id uuid.UUID) error {
+	query := `UPDATE users SET is_phone_verified = true, updated_at = NOW() WHERE id = $1`
 	_, err := r.db.ExecContext(ctx, query, id)
 	return err
 }
@@ -75,7 +90,7 @@ func (r *postgresUserRepository) Update(ctx context.Context, user *models.User) 
 	return err
 }
 
-const userColumns = `id, auth_uid, name, email, phn_number, avatar_url, city, is_verified, created_at, updated_at`
+const userColumns = `id, auth_uid, name, email, phn_number, avatar_url, city, is_verified, is_phone_verified, otp, otp_expires_at, verified_at, created_at, updated_at`
 
 func scanUser(row interface {
 	Scan(dest ...interface{}) error
@@ -90,6 +105,10 @@ func scanUser(row interface {
 		&user.AvatarURL,
 		&user.City,
 		&user.IsVerified,
+		&user.IsPhoneVerified,
+		&user.OTP,
+		&user.OTPExpiresAt,
+		&user.VerifiedAt,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)

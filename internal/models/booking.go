@@ -11,6 +11,7 @@ type Booking struct {
 	ID                               uuid.UUID     `db:"id" json:"id"`
 	EventID                          uuid.UUID     `db:"event_id" json:"event_id"`
 	UserID                           uuid.UUID     `db:"user_id" json:"user_id"`
+	OccurrenceDate                   time.Time     `db:"occurrence_date" json:"occurrence_date"`
 	Quantity                         int           `db:"quantity" json:"quantity"`
 	Status                           BookingStatus `db:"status" json:"status"`
 	PaymentID                        *uuid.UUID    `db:"payment_id" json:"payment_id,omitempty"`

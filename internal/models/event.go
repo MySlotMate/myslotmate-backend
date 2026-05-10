@@ -57,7 +57,18 @@ type Event struct {
 	AvgRating     *float64 `db:"avg_rating" json:"avg_rating,omitempty"`
 	TotalBookings int      `db:"total_bookings" json:"total_bookings"`
 	TotalReviews  int      `db:"total_reviews" json:"total_reviews"`
+	
+	// Calculated fields (not in DB)
+	NextAvailableDate *time.Time `json:"next_available_date,omitempty"`
 
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type OccurrenceAvailability struct {
+	Date          time.Time `json:"date"`
+	TotalBooked   int       `json:"total_booked"`
+	Capacity      int       `json:"capacity"`
+	Remaining     int       `json:"remaining"`
+	IsFullyBooked bool      `json:"is_fully_booked"`
 }

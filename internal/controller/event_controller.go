@@ -82,6 +82,7 @@ func (c *EventController) RegisterRoutes(r chi.Router) {
 		r.Post("/{eventID}/pause", c.PauseEvent)
 		r.Post("/{eventID}/resume", c.ResumeEvent)
 		r.Get("/{eventID}/attendees", c.GetEventAttendees)
+		r.Get("/{eventID}/availability", c.GetEventAvailability)
 	})
 }
 
@@ -484,11 +485,36 @@ func (c *EventController) GetEventAttendees(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	attendees, err := c.eventService.GetEventAttendees(r.Context(), eventID)
+	var occurrenceDate *time.Time
+	dateStr := r.URL.Query().Get("date")
+	if dateStr != "" {
+		t, err := time.Parse(time.RFC3339, dateStr)
+		if err == nil {
+			occurrenceDate = &t
+		}
+	}
+
+	attendees, err := c.eventService.GetEventAttendees(r.Context(), eventID, occurrenceDate)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	RespondSuccess(w, http.StatusOK, attendees)
+}
+
+func (c *EventController) GetEventAvailability(w http.ResponseWriter, r *http.Request) {
+	eventID, err := uuid.Parse(chi.URLParam(r, "eventID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid event ID")
+		return
+	}
+
+	availability, err := c.eventService.GetEventAvailability(r.Context(), eventID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, availability)
 }

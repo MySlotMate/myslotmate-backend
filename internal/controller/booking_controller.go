@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"myslotmate-backend/internal/service"
 
@@ -23,14 +24,16 @@ func (c *BookingController) RegisterRoutes(r chi.Router) {
 		r.Post("/", c.CreateBooking)
 		r.Post("/{bookingID}/confirm", c.ConfirmBooking)
 		r.Post("/{bookingID}/cancel", c.CancelBooking)
+		r.Get("/{bookingID}", c.GetBooking)
 		r.Get("/user/{userID}", c.GetUserBookings)
 	})
 }
 
 type CreateBookingRequest struct {
-	UserID         uuid.UUID `json:"user_id"` // From Auth
+	UserID         uuid.UUID `json:"user_id"`
 	EventID        uuid.UUID `json:"event_id"`
 	Quantity       int       `json:"quantity"`
+	OccurrenceDate string    `json:"occurrence_date,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 }
 
@@ -45,6 +48,16 @@ func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request
 		EventID:        req.EventID,
 		Quantity:       req.Quantity,
 		IdempotencyKey: req.IdempotencyKey,
+	}
+
+	// Parse occurrence_date if provided (for recurring events)
+	if req.OccurrenceDate != "" {
+		t, err := time.Parse(time.RFC3339, req.OccurrenceDate)
+		if err != nil {
+			RespondError(w, http.StatusBadRequest, "Invalid occurrence_date format; expected RFC3339")
+			return
+		}
+		svcReq.OccurrenceDate = &t
 	}
 
 	booking, err := c.bookingService.CreateBooking(r.Context(), req.UserID, svcReq)
@@ -66,6 +79,7 @@ func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request
 
 	RespondSuccess(w, http.StatusCreated, booking)
 }
+
 
 func (c *BookingController) GetUserBookings(w http.ResponseWriter, r *http.Request) {
 	userIDStr := chi.URLParam(r, "userID")
@@ -116,6 +130,22 @@ func (c *BookingController) CancelBooking(w http.ResponseWriter, r *http.Request
 	}
 
 	booking, err := c.bookingService.CancelBooking(r.Context(), bookingID, body.UserID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, booking)
+}
+
+func (c *BookingController) GetBooking(w http.ResponseWriter, r *http.Request) {
+	bookingID, err := uuid.Parse(chi.URLParam(r, "bookingID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid booking ID")
+		return
+	}
+
+	booking, err := c.bookingService.GetBooking(r.Context(), bookingID)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return

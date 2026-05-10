@@ -458,6 +458,14 @@ func (s *userService) SendPhoneOTP(ctx context.Context, userID uuid.UUID) error 
 		return errors.New("phone number not found for user")
 	}
 
+	// Rate limit: Don't send more than one OTP per minute
+	if user.OTPExpiresAt != nil {
+		// OTP expires in 10 minutes. If more than 9 minutes are left, it was sent less than a minute ago.
+		if time.Until(*user.OTPExpiresAt) > 9*time.Minute {
+			return errors.New("please wait a minute before requesting another OTP")
+		}
+	}
+
 	// Generate 6-digit OTP
 	otp := fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
 	expiresAt := time.Now().Add(10 * time.Minute)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"myslotmate-backend/internal/lib/event"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/teambition/rrule-go"
 )
 
 type EventService interface {
@@ -26,8 +28,9 @@ type EventService interface {
 	PublishEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error)
 	PauseEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error)
 	ResumeEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error)
-	GetEventAttendees(ctx context.Context, eventID uuid.UUID) ([]*models.Booking, error)
+	GetEventAttendees(ctx context.Context, eventID uuid.UUID, occurrenceDate *time.Time) ([]*models.Booking, error)
 	ListPublishedEvents(ctx context.Context, limit, offset int) ([]*models.Event, error)
+	GetEventAvailability(ctx context.Context, eventID uuid.UUID) ([]models.OccurrenceAvailability, error)
 }
 
 type EventCreateRequest struct {
@@ -370,8 +373,68 @@ func (s *eventService) GetHostEventsFiltered(ctx context.Context, hostID uuid.UU
 	return s.eventRepo.ListByHostIDFiltered(ctx, hostID, status, search, sortBy, limit, offset)
 }
 
+func normalizeRRule(rule string) string {
+	rule = strings.TrimSpace(rule)
+	if rule == "" {
+		return ""
+	}
+	upper := strings.ToUpper(rule)
+	if strings.Contains(upper, "FREQ=") {
+		return rule
+	}
+	switch strings.ToLower(rule) {
+	case "daily":
+		return "FREQ=DAILY"
+	case "weekly":
+		return "FREQ=WEEKLY"
+	case "monthly":
+		return "FREQ=MONTHLY"
+	case "biweekly":
+		return "FREQ=WEEKLY;INTERVAL=2"
+	}
+	return rule
+}
+
 func (s *eventService) GetCalendarEvents(ctx context.Context, hostID uuid.UUID, start, end time.Time) ([]*models.Event, error) {
-	return s.eventRepo.ListByDateRange(ctx, hostID, start, end)
+	events, err := s.eventRepo.ListByHostID(ctx, hostID)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []*models.Event
+	for _, e := range events {
+		if !e.IsRecurring || e.RecurrenceRule == nil || *e.RecurrenceRule == "" {
+			if (e.Time.After(start) || e.Time.Equal(start)) && e.Time.Before(end) {
+				result = append(result, e)
+			}
+			continue
+		}
+
+		ruleStr := normalizeRRule(*e.RecurrenceRule)
+		rule, err := rrule.StrToRRule(ruleStr)
+		if err != nil {
+			fmt.Printf("[EVENT_SERVICE] Invalid recurrence rule for event %s: %v\n", e.ID, err)
+			// fallback: check if base time is in range
+			if (e.Time.After(start) || e.Time.Equal(start)) && e.Time.Before(end) {
+				result = append(result, e)
+			}
+			continue
+		}
+		rule.DTStart(e.Time)
+
+		occurrences := rule.Between(start, end, true)
+		for _, occ := range occurrences {
+			instance := *e
+			instance.Time = occ
+			if e.EndTime != nil {
+				duration := e.EndTime.Sub(e.Time)
+				newEnd := occ.Add(duration)
+				instance.EndTime = &newEnd
+			}
+			result = append(result, &instance)
+		}
+	}
+	return result, nil
 }
 
 func (s *eventService) GetTodaySchedule(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error) {
@@ -437,10 +500,146 @@ func (s *eventService) ResumeEvent(ctx context.Context, eventID uuid.UUID, hostI
 	return evt, nil
 }
 
-func (s *eventService) GetEventAttendees(ctx context.Context, eventID uuid.UUID) ([]*models.Booking, error) {
+func (s *eventService) GetEventAttendees(ctx context.Context, eventID uuid.UUID, occurrenceDate *time.Time) ([]*models.Booking, error) {
+	if occurrenceDate != nil {
+		return s.bookingRepo.ListByEventOccurrence(ctx, eventID, *occurrenceDate)
+	}
 	return s.bookingRepo.ListByEventID(ctx, eventID)
 }
 
 func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset int) ([]*models.Event, error) {
-	return s.eventRepo.ListPublished(ctx, limit, offset)
+	events, err := s.eventRepo.ListPublished(ctx, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(events) == 0 {
+		return events, nil
+	}
+
+	// 1. Collect all event IDs
+	eventIDs := make([]uuid.UUID, len(events))
+	for i, e := range events {
+		eventIDs[i] = e.ID
+	}
+
+	// 2. Fetch occupancy for all these events in one batch
+	// We check from "now" to handle upcoming sessions
+	occupancyMap, err := s.bookingRepo.GetOccupancyForEvents(ctx, eventIDs, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		fmt.Printf("[EVENT_SERVICE] Error fetching batch occupancy: %v\n", err)
+		// Fallback to empty map to avoid failing the whole request
+		occupancyMap = make(map[uuid.UUID]map[string]int)
+	}
+
+	// 3. For each event, calculate next available date using the batch data
+	for _, e := range events {
+		eventOccupancy := occupancyMap[e.ID]
+		
+		if e.IsRecurring && e.RecurrenceRule != nil {
+			avail := s.calculateAvailabilityInternal(e, eventOccupancy)
+			for _, a := range avail {
+				if !a.IsFullyBooked {
+					e.NextAvailableDate = &a.Date
+					break
+				}
+			}
+		} else {
+			// For non-recurring, check occupancy from map
+			booked := eventOccupancy[e.Time.Format(time.RFC3339)]
+			if booked < e.Capacity {
+				e.NextAvailableDate = &e.Time
+			}
+		}
+	}
+
+	return events, nil
+}
+
+func (s *eventService) GetEventAvailability(ctx context.Context, eventID uuid.UUID) ([]models.OccurrenceAvailability, error) {
+	evt, err := s.eventRepo.GetByID(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	if evt == nil {
+		return nil, errors.New("event not found")
+	}
+
+	// For a single event, we can still fetch occupancy in batch for its occurrences
+	occupancy, err := s.bookingRepo.GetOccupancyForEvents(ctx, []uuid.UUID{eventID}, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		return nil, err
+	}
+
+	return s.calculateAvailabilityInternal(evt, occupancy[eventID]), nil
+}
+
+// calculateAvailabilityInternal is the core logic that takes an event and its pre-fetched occupancy
+// and returns the availability for its next few occurrences.
+func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupancy map[string]int) []models.OccurrenceAvailability {
+	var occurrences []time.Time
+	
+	// Generate occurrences using rrule
+	if (evt.IsRecurring || (evt.RecurrenceRule != nil && *evt.RecurrenceRule != "")) && evt.RecurrenceRule != nil {
+		ruleStr := normalizeRRule(*evt.RecurrenceRule)
+		var r *rrule.RRule
+		var err error
+
+		switch strings.ToUpper(ruleStr) {
+		case "FREQ=DAILY":
+			r, err = rrule.NewRRule(rrule.ROption{Freq: rrule.DAILY, Dtstart: evt.Time})
+		case "FREQ=WEEKLY":
+			r, err = rrule.NewRRule(rrule.ROption{Freq: rrule.WEEKLY, Dtstart: evt.Time})
+		case "FREQ=MONTHLY":
+			r, err = rrule.NewRRule(rrule.ROption{Freq: rrule.MONTHLY, Dtstart: evt.Time})
+		case "FREQ=WEEKLY;INTERVAL=2":
+			r, err = rrule.NewRRule(rrule.ROption{Freq: rrule.WEEKLY, Interval: 2, Dtstart: evt.Time})
+		default:
+			r, err = rrule.StrToRRule(ruleStr)
+			if err == nil {
+				r.DTStart(evt.Time)
+			}
+		}
+
+		if err != nil {
+			occurrences = append(occurrences, evt.Time)
+		} else {
+			now := time.Now()
+			curr := now.Add(-1 * time.Hour)
+			if evt.Time.After(curr) {
+				curr = evt.Time.Add(-1 * time.Second)
+			}
+			
+			for i := 0; i < 6; i++ {
+				next := r.After(curr, false)
+				if next.IsZero() {
+					break
+				}
+				occurrences = append(occurrences, next)
+				curr = next
+			}
+		}
+	}
+
+	if len(occurrences) == 0 {
+		occurrences = append(occurrences, evt.Time)
+	}
+
+	var availability []models.OccurrenceAvailability
+	for _, occ := range occurrences {
+		booked := 0
+		if occupancy != nil {
+			booked = occupancy[occ.Format(time.RFC3339)]
+		}
+
+		availability = append(availability, models.OccurrenceAvailability{
+			Date:          occ,
+			TotalBooked:   booked,
+			Capacity:      evt.Capacity,
+			Remaining:     evt.Capacity - booked,
+			IsFullyBooked: booked >= evt.Capacity,
+		})
+	}
+
+	return availability
 }

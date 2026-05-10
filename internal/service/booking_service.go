@@ -19,12 +19,14 @@ type BookingService interface {
 	ConfirmBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
 	CancelBooking(ctx context.Context, bookingID uuid.UUID, userID uuid.UUID) (*models.Booking, error)
 	GetUserBookings(ctx context.Context, userID uuid.UUID) ([]*models.Booking, error)
+	GetBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
 }
 
 type BookingCreateRequest struct {
 	EventID        uuid.UUID
 	Quantity       int
 	IdempotencyKey string
+	OccurrenceDate *time.Time // which specific date the user is booking for
 }
 
 type bookingService struct {
@@ -102,8 +104,16 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		return nil, errors.New("event not found")
 	}
 
-	// 4. Overbooking prevention
-	currentBooked, err := s.bookingRepo.GetTotalBookedQuantity(ctx, req.EventID)
+	// 4. Resolve occurrence date
+	// For recurring events the frontend sends the specific date the user picked.
+	// For non-recurring events (or if omitted) we fall back to the event's own time.
+	occurrenceDate := evt.Time
+	if req.OccurrenceDate != nil {
+		occurrenceDate = *req.OccurrenceDate
+	}
+
+	// 5. Overbooking prevention — check capacity per occurrence date
+	currentBooked, err := s.bookingRepo.GetTotalBookedQuantityForOccurrence(ctx, req.EventID, occurrenceDate)
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +271,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		ID:              uuid.New(),
 		EventID:         req.EventID,
 		UserID:          userID,
+		OccurrenceDate:  occurrenceDate,
 		Quantity:        req.Quantity,
 		Status:          models.BookingStatusPending,
 		IdempotencyKey:  &idempotencyKey,
@@ -448,4 +459,8 @@ func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID,
 
 func (s *bookingService) GetUserBookings(ctx context.Context, userID uuid.UUID) ([]*models.Booking, error) {
 	return s.bookingRepo.ListByUserID(ctx, userID)
+}
+
+func (s *bookingService) GetBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error) {
+	return s.bookingRepo.GetByID(ctx, bookingID)
 }

@@ -18,6 +18,7 @@ type BookingService interface {
 	CreateBooking(ctx context.Context, userID uuid.UUID, req BookingCreateRequest) (*models.Booking, error)
 	ConfirmBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
 	CancelBooking(ctx context.Context, bookingID uuid.UUID, userID uuid.UUID) (*models.Booking, error)
+	CancelBookingByHost(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
 	GetUserBookings(ctx context.Context, userID uuid.UUID) ([]*models.Booking, error)
 	GetBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
 }
@@ -407,10 +408,30 @@ func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID,
 		return nil, errors.New("booking is already cancelled or refunded")
 	}
 
+	return s.performCancellation(ctx, booking)
+}
+
+func (s *bookingService) CancelBookingByHost(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error) {
+	booking, err := s.bookingRepo.GetByID(ctx, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	if booking == nil {
+		return nil, errors.New("booking not found")
+	}
+	if booking.Status == models.BookingStatusCancelled || booking.Status == models.BookingStatusRefunded {
+		return nil, errors.New("booking is already cancelled or refunded")
+	}
+
+	// For host-initiated cancellations, we could trigger a specific "Host Cancelled" event
+	return s.performCancellation(ctx, booking)
+}
+
+func (s *bookingService) performCancellation(ctx context.Context, booking *models.Booking) (*models.Booking, error) {
 	now := time.Now()
 
 	// 1. Update booking status
-	if err := s.bookingRepo.UpdateStatus(ctx, bookingID, models.BookingStatusCancelled); err != nil {
+	if err := s.bookingRepo.UpdateStatus(ctx, booking.ID, models.BookingStatusCancelled); err != nil {
 		return nil, err
 	}
 	booking.Status = models.BookingStatusCancelled
@@ -418,19 +439,19 @@ func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID,
 
 	// 2. Refund user wallet
 	if booking.AmountCents != nil && *booking.AmountCents > 0 {
-		userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, userID)
+		userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, booking.UserID)
 		if err == nil && userAccount != nil {
 			_ = s.accountRepo.Credit(ctx, userAccount.ID, *booking.AmountCents)
 
 			// Create refund payment record
-			refundKey := fmt.Sprintf("refund_%s", bookingID)
+			refundKey := fmt.Sprintf("refund_%s", booking.ID)
 			displayRef := fmt.Sprintf("RF-%05d", time.Now().UnixMilli()%100000)
 			refundPayment := &models.Payment{
 				ID:               uuid.New(),
 				IdempotencyKey:   refundKey,
 				AccountID:        userAccount.ID,
 				Type:             models.PaymentTypeRefund,
-				ReferenceID:      &bookingID,
+				ReferenceID:      &booking.ID,
 				AmountCents:      *booking.AmountCents,
 				Status:           models.PaymentStatusCompleted,
 				DisplayReference: &displayRef,

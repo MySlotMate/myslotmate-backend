@@ -16,6 +16,8 @@ type BookingRepository interface {
 	ListByUserID(ctx context.Context, userID uuid.UUID) ([]*models.Booking, error)
 	ListByEventID(ctx context.Context, eventID uuid.UUID) ([]*models.Booking, error)
 	ListByEventOccurrence(ctx context.Context, eventID uuid.UUID, occurrenceDate time.Time) ([]*models.Booking, error)
+	ListAttendeesByEventID(ctx context.Context, eventID uuid.UUID) ([]*models.Attendee, error)
+	ListAttendeesByEventOccurrence(ctx context.Context, eventID uuid.UUID, occurrenceDate time.Time) ([]*models.Attendee, error)
 	GetTotalBookedQuantity(ctx context.Context, eventID uuid.UUID) (int, error)
 	GetTotalBookedQuantityForOccurrence(ctx context.Context, eventID uuid.UUID, occurrenceDate time.Time) (int, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status models.BookingStatus) error
@@ -110,6 +112,48 @@ func (r *postgresBookingRepository) ListByEventID(ctx context.Context, eventID u
 	}
 	defer rows.Close()
 	return scanBookingRows(rows)
+}
+
+// attendeeColumns extends bookingColumns with the joined user fields.
+const attendeeColumns = `b.id, b.event_id, b.user_id, b.occurrence_date, b.quantity, b.status, b.payment_id, b.idempotency_key, b.amount_cents, b.service_fee_cents, b.net_earning_cents, b.created_at, b.updated_at, b.cancelled_at, b.notification_sent_whatsapp, b.notification_sent_email, b.reminder_notification_sent_email, b.reminder_notification_sent_at, b.reminder_notification_sent_whatsapp, b.reminder_whatsapp_sent_at, u.name AS user_name, u.email AS user_email, u.avatar_url AS user_avatar_url`
+
+func scanAttendeeRows(rows *sql.Rows) ([]*models.Attendee, error) {
+	var attendees []*models.Attendee
+	for rows.Next() {
+		a := &models.Attendee{}
+		if err := rows.Scan(
+			&a.ID, &a.EventID, &a.UserID, &a.OccurrenceDate, &a.Quantity, &a.Status, &a.PaymentID, &a.IdempotencyKey, &a.AmountCents, &a.ServiceFeeCents, &a.NetEarningCents, &a.CreatedAt, &a.UpdatedAt, &a.CancelledAt, &a.NotificationSentWhatsapp, &a.NotificationSentEmail, &a.ReminderNotificationSentEmail, &a.ReminderNotificationSentAt, &a.ReminderNotificationSentWhatsapp, &a.ReminderWhatsappSentAt,
+			&a.UserName, &a.UserEmail, &a.UserAvatarURL,
+		); err != nil {
+			return nil, err
+		}
+		attendees = append(attendees, a)
+	}
+	return attendees, rows.Err()
+}
+
+func (r *postgresBookingRepository) ListAttendeesByEventID(ctx context.Context, eventID uuid.UUID) ([]*models.Attendee, error) {
+	query := `SELECT ` + attendeeColumns + `
+		FROM bookings b JOIN users u ON u.id = b.user_id
+		WHERE b.event_id = $1 AND b.status IN ('pending', 'confirmed') ORDER BY b.created_at ASC`
+	rows, err := r.db.QueryContext(ctx, query, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAttendeeRows(rows)
+}
+
+func (r *postgresBookingRepository) ListAttendeesByEventOccurrence(ctx context.Context, eventID uuid.UUID, occurrenceDate time.Time) ([]*models.Attendee, error) {
+	query := `SELECT ` + attendeeColumns + `
+		FROM bookings b JOIN users u ON u.id = b.user_id
+		WHERE b.event_id = $1 AND b.occurrence_date = $2 AND b.status IN ('pending', 'confirmed') ORDER BY b.created_at ASC`
+	rows, err := r.db.QueryContext(ctx, query, eventID, occurrenceDate)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAttendeeRows(rows)
 }
 
 func (r *postgresBookingRepository) ListByEventOccurrence(ctx context.Context, eventID uuid.UUID, occurrenceDate time.Time) ([]*models.Booking, error) {

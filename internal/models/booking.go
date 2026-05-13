@@ -6,6 +6,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// Attendee is a Booking enriched with the booking user's display fields.
+// Used by host-facing attendee/bookings views so the UI can show names
+// instead of opaque user IDs.
+type Attendee struct {
+	Booking
+	UserName      string  `db:"user_name" json:"user_name"`
+	UserEmail     string  `db:"user_email" json:"user_email"`
+	UserAvatarURL *string `db:"user_avatar_url" json:"user_avatar_url,omitempty"`
+}
+
 // Booking links a user to an event with quantity and status.
 type Booking struct {
 	ID                               uuid.UUID     `db:"id" json:"id"`

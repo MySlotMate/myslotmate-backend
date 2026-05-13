@@ -26,11 +26,12 @@ type EventService interface {
 	GetCalendarEvents(ctx context.Context, hostID uuid.UUID, start, end time.Time) ([]*models.Event, error)
 	GetTodaySchedule(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error)
 	PublishEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error)
-	PauseEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error)
+	PauseEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID, pausedFrom *time.Time, pausedDate *time.Time) (*models.Event, error)
 	ResumeEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error)
-	GetEventAttendees(ctx context.Context, eventID uuid.UUID, occurrenceDate *time.Time) ([]*models.Booking, error)
+	GetEventAttendees(ctx context.Context, eventID uuid.UUID, occurrenceDate *time.Time) ([]*models.Attendee, error)
 	ListPublishedEvents(ctx context.Context, limit, offset int) ([]*models.Event, error)
 	GetEventAvailability(ctx context.Context, eventID uuid.UUID) ([]models.OccurrenceAvailability, error)
+	GetEventOccurrencesForHost(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) ([]models.OccurrenceAvailability, error)
 }
 
 type EventCreateRequest struct {
@@ -88,11 +89,12 @@ type EventUpdateRequest struct {
 }
 
 type eventService struct {
-	eventRepo   repository.EventRepository
-	bookingRepo repository.BookingRepository
-	accountRepo repository.AccountRepository
-	ledgerRepo  repository.TransactionLedgerRepository
-	dispatcher  *event.Dispatcher
+	eventRepo      repository.EventRepository
+	bookingRepo    repository.BookingRepository
+	accountRepo    repository.AccountRepository
+	ledgerRepo     repository.TransactionLedgerRepository
+	dispatcher     *event.Dispatcher
+	bookingService BookingService
 }
 
 var ErrInvalidEventMood = errors.New("invalid event mood")
@@ -103,13 +105,15 @@ func NewEventService(
 	ar repository.AccountRepository,
 	lr repository.TransactionLedgerRepository,
 	d *event.Dispatcher,
+	bs BookingService,
 ) EventService {
 	return &eventService{
-		eventRepo:   er,
-		bookingRepo: br,
-		accountRepo: ar,
-		ledgerRepo:  lr,
-		dispatcher:  d,
+		eventRepo:      er,
+		bookingRepo:    br,
+		accountRepo:    ar,
+		ledgerRepo:     lr,
+		dispatcher:     d,
+		bookingService: bs,
 	}
 }
 
@@ -464,7 +468,7 @@ func (s *eventService) PublishEvent(ctx context.Context, eventID uuid.UUID, host
 	return evt, nil
 }
 
-func (s *eventService) PauseEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error) {
+func (s *eventService) PauseEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID, pausedFrom *time.Time, pausedDate *time.Time) (*models.Event, error) {
 	evt, err := s.eventRepo.GetByID(ctx, eventID)
 	if err != nil {
 		return nil, err
@@ -475,10 +479,64 @@ func (s *eventService) PauseEvent(ctx context.Context, eventID uuid.UUID, hostID
 	if evt.HostID != hostID {
 		return nil, errors.New("unauthorized")
 	}
-	if err := s.eventRepo.UpdateStatus(ctx, eventID, models.EventStatusPaused); err != nil {
+
+	// Any pause mode (full, from-session, or single-session) flips status to
+	// "paused" so the host UI can surface the paused state on the event card.
+	// The granular fields paused_from / paused_dates determine which specific
+	// occurrences are filtered; a "full pause" is identified downstream by
+	// status=paused with both granular fields empty.
+	now := time.Now()
+	evt.Status = models.EventStatusPaused
+	evt.PausedAt = &now
+	evt.PausedFrom = pausedFrom
+	if pausedDate != nil {
+		evt.PausedDates = append(evt.PausedDates, pausedDate.Format(time.RFC3339))
+	}
+
+	if err := s.eventRepo.Update(ctx, evt); err != nil {
 		return nil, err
 	}
-	evt.Status = models.EventStatusPaused
+
+	// TRIGGER AUTOMATIC REFUNDS
+	go func() {
+		bgCtx := context.Background()
+		// 1. Get all pending/confirmed bookings for this event
+		bookings, err := s.bookingRepo.ListByEventID(bgCtx, eventID)
+		if err != nil {
+			fmt.Printf("[PAUSE_REFUND] Failed to list bookings for event %s: %v\n", eventID, err)
+			return
+		}
+
+		for _, b := range bookings {
+			shouldRefund := false
+
+			if pausedDate != nil {
+				// Option: Single session pause
+				if b.OccurrenceDate.Equal(*pausedDate) {
+					shouldRefund = true
+				}
+			} else if pausedFrom != nil {
+				// Option: From specific date onwards
+				if !b.OccurrenceDate.Before(*pausedFrom) {
+					shouldRefund = true
+				}
+			} else {
+				// Option: Full pause (pause all future sessions)
+				if !b.OccurrenceDate.Before(now) {
+					shouldRefund = true
+				}
+			}
+
+			if shouldRefund {
+				fmt.Printf("[PAUSE_REFUND] Refunding booking %s (occurrence %s) due to event pause\n", b.ID, b.OccurrenceDate)
+				_, err := s.bookingService.CancelBookingByHost(bgCtx, b.ID)
+				if err != nil {
+					fmt.Printf("[PAUSE_REFUND] Failed to refund booking %s: %v\n", b.ID, err)
+				}
+			}
+		}
+	}()
+
 	return evt, nil
 }
 
@@ -493,18 +551,24 @@ func (s *eventService) ResumeEvent(ctx context.Context, eventID uuid.UUID, hostI
 	if evt.HostID != hostID {
 		return nil, errors.New("unauthorized")
 	}
-	if err := s.eventRepo.UpdateStatus(ctx, eventID, models.EventStatusLive); err != nil {
+
+	// Clear all pause state so the event returns to a normal live schedule.
+	evt.Status = models.EventStatusLive
+	evt.PausedAt = nil
+	evt.PausedFrom = nil
+	evt.PausedDates = nil
+
+	if err := s.eventRepo.Update(ctx, evt); err != nil {
 		return nil, err
 	}
-	evt.Status = models.EventStatusLive
 	return evt, nil
 }
 
-func (s *eventService) GetEventAttendees(ctx context.Context, eventID uuid.UUID, occurrenceDate *time.Time) ([]*models.Booking, error) {
+func (s *eventService) GetEventAttendees(ctx context.Context, eventID uuid.UUID, occurrenceDate *time.Time) ([]*models.Attendee, error) {
 	if occurrenceDate != nil {
-		return s.bookingRepo.ListByEventOccurrence(ctx, eventID, *occurrenceDate)
+		return s.bookingRepo.ListAttendeesByEventOccurrence(ctx, eventID, *occurrenceDate)
 	}
-	return s.bookingRepo.ListByEventID(ctx, eventID)
+	return s.bookingRepo.ListAttendeesByEventID(ctx, eventID)
 }
 
 func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset int) ([]*models.Event, error) {
@@ -537,7 +601,7 @@ func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset in
 		eventOccupancy := occupancyMap[e.ID]
 		
 		if e.IsRecurring && e.RecurrenceRule != nil {
-			avail := s.calculateAvailabilityInternal(e, eventOccupancy)
+			avail := s.calculateAvailabilityInternal(e, eventOccupancy, false)
 			for _, a := range avail {
 				if !a.IsFullyBooked {
 					e.NextAvailableDate = &a.Date
@@ -552,8 +616,16 @@ func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset in
 			}
 		}
 	}
+	// 4. Filter out events that have no available dates (fully paused or fully booked)
+	// EXCEPT if they are Live (we might still want to show fully booked live events)
+	finalEvents := make([]*models.Event, 0, len(events))
+	for _, e := range events {
+		if e.NextAvailableDate != nil || e.Status == models.EventStatusLive {
+			finalEvents = append(finalEvents, e)
+		}
+	}
 
-	return events, nil
+	return finalEvents, nil
 }
 
 func (s *eventService) GetEventAvailability(ctx context.Context, eventID uuid.UUID) ([]models.OccurrenceAvailability, error) {
@@ -571,14 +643,45 @@ func (s *eventService) GetEventAvailability(ctx context.Context, eventID uuid.UU
 		return nil, err
 	}
 
-	return s.calculateAvailabilityInternal(evt, occupancy[eventID]), nil
+	return s.calculateAvailabilityInternal(evt, occupancy[eventID], false), nil
+}
+
+// GetEventOccurrencesForHost returns the full upcoming occurrence list for the host's
+// pause/manage UI. Unlike GetEventAvailability (public/booking view), paused occurrences
+// are included with IsPaused=true so the host can see and act on the entire schedule.
+func (s *eventService) GetEventOccurrencesForHost(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) ([]models.OccurrenceAvailability, error) {
+	evt, err := s.eventRepo.GetByID(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	if evt == nil {
+		return nil, errors.New("event not found")
+	}
+	if evt.HostID != hostID {
+		return nil, errors.New("unauthorized")
+	}
+
+	occupancy, err := s.bookingRepo.GetOccupancyForEvents(ctx, []uuid.UUID{eventID}, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		return nil, err
+	}
+
+	return s.calculateAvailabilityInternal(evt, occupancy[eventID], true), nil
 }
 
 // calculateAvailabilityInternal is the core logic that takes an event and its pre-fetched occupancy
 // and returns the availability for its next few occurrences.
-func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupancy map[string]int) []models.OccurrenceAvailability {
-	var occurrences []time.Time
-	
+//
+// When includePaused is false (public/booking view), paused occurrences are filtered out entirely.
+// When includePaused is true (host pause-management view), paused occurrences are returned with
+// IsPaused=true so the host can see and manage the full upcoming schedule.
+func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupancy map[string]int, includePaused bool) []models.OccurrenceAvailability {
+	type occurrence struct {
+		t        time.Time
+		isPaused bool
+	}
+	var occurrences []occurrence
+
 	// Generate occurrences using rrule
 	if (evt.IsRecurring || (evt.RecurrenceRule != nil && *evt.RecurrenceRule != "")) && evt.RecurrenceRule != nil {
 		ruleStr := normalizeRRule(*evt.RecurrenceRule)
@@ -602,42 +705,72 @@ func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupanc
 		}
 
 		if err != nil {
-			occurrences = append(occurrences, evt.Time)
+			occurrences = append(occurrences, occurrence{t: evt.Time})
 		} else {
 			now := time.Now()
 			curr := now.Add(-1 * time.Hour)
 			if evt.Time.After(curr) {
 				curr = evt.Time.Add(-1 * time.Second)
 			}
-			
-			for i := 0; i < 6; i++ {
+
+			for i := 0; i < 12; i++ {
 				next := r.After(curr, false)
 				if next.IsZero() {
 					break
 				}
-				occurrences = append(occurrences, next)
+
+				// Check if this specific date is paused
+				isDatePaused := false
+				for _, pdStr := range evt.PausedDates {
+					pd, err := time.Parse(time.RFC3339, pdStr)
+					if err == nil && pd.Equal(next) {
+						isDatePaused = true
+						break
+					}
+					if strings.HasPrefix(pdStr, next.Format("2006-01-02")) {
+						isDatePaused = true
+						break
+					}
+				}
+
+				isAfterPausedFrom := evt.PausedFrom != nil && !next.Before(*evt.PausedFrom)
+
+				// Full pause: status=paused with no granular options set
+				isFullPause := evt.Status == models.EventStatusPaused && evt.PausedFrom == nil && len(evt.PausedDates) == 0
+
+				isPaused := isDatePaused || isAfterPausedFrom || isFullPause
+
+				if !isPaused || includePaused {
+					occurrences = append(occurrences, occurrence{t: next, isPaused: isPaused})
+				}
+
+				if len(occurrences) >= 6 {
+					break
+				}
 				curr = next
 			}
 		}
 	}
 
-	if len(occurrences) == 0 {
-		occurrences = append(occurrences, evt.Time)
+	if len(occurrences) == 0 && (evt.Status != models.EventStatusPaused || includePaused) {
+		isPaused := evt.Status == models.EventStatusPaused
+		occurrences = append(occurrences, occurrence{t: evt.Time, isPaused: isPaused})
 	}
 
 	var availability []models.OccurrenceAvailability
-	for _, occ := range occurrences {
+	for _, o := range occurrences {
 		booked := 0
 		if occupancy != nil {
-			booked = occupancy[occ.Format(time.RFC3339)]
+			booked = occupancy[o.t.Format(time.RFC3339)]
 		}
 
 		availability = append(availability, models.OccurrenceAvailability{
-			Date:          occ,
+			Date:          o.t,
 			TotalBooked:   booked,
 			Capacity:      evt.Capacity,
 			Remaining:     evt.Capacity - booked,
 			IsFullyBooked: booked >= evt.Capacity,
+			IsPaused:      o.isPaused,
 		})
 	}
 

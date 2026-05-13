@@ -169,9 +169,10 @@ func NormalizeEventMood(mood *EventMood) (*EventMood, error) {
 type CancellationPolicy string
 
 const (
-	CancellationFlexible CancellationPolicy = "flexible" // Full refund 24h prior
-	CancellationModerate CancellationPolicy = "moderate" // Full refund 72h prior
-	CancellationStrict   CancellationPolicy = "strict"   // No refund
+	CancellationFlexible CancellationPolicy = "flexible"  // Full refund 24h prior
+	CancellationModerate CancellationPolicy = "moderate"  // Full refund 5 days prior
+	CancellationStrict   CancellationPolicy = "strict"    // 50% refund 1 week prior
+	CancellationNoRefund CancellationPolicy = "no_refund" // Non-refundable
 )
 
 // SupportCategory is the type of support request.

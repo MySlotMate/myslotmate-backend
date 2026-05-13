@@ -49,6 +49,7 @@ func NewRouter(
 	uploadCtrl *controller.UploadController,
 	adminCtrl *controller.AdminController,
 	blogCtrl *controller.BlogController,
+	experienceTemplateCtrl *controller.ExperienceTemplateController,
 	ragChatCtrl *controller.RAGChatController,
 	ragDocCtrl *controller.RAGDocumentController,
 ) http.Handler {
@@ -130,6 +131,10 @@ func NewRouter(
 
 	if blogCtrl != nil {
 		blogCtrl.RegisterRoutes(r)
+	}
+
+	if experienceTemplateCtrl != nil {
+		experienceTemplateCtrl.RegisterRoutes(r)
 	}
 
 	if ragChatCtrl != nil {

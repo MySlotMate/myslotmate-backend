@@ -49,6 +49,8 @@ type Event struct {
 	Status      EventStatus `db:"status" json:"status"`
 	PublishedAt *time.Time  `db:"published_at" json:"published_at,omitempty"`
 	PausedAt    *time.Time  `db:"paused_at" json:"paused_at,omitempty"`
+	PausedFrom  *time.Time  `db:"paused_from" json:"paused_from,omitempty"`
+	PausedDates pq.StringArray `db:"paused_dates" json:"paused_dates,omitempty"`
 
 	// ── AI ───────────────────────────────────────────────────────────────────
 	AISuggestion *string `db:"ai_suggestion" json:"ai_suggestion,omitempty"`
@@ -71,4 +73,5 @@ type OccurrenceAvailability struct {
 	Capacity      int       `json:"capacity"`
 	Remaining     int       `json:"remaining"`
 	IsFullyBooked bool      `json:"is_fully_booked"`
+	IsPaused      bool      `json:"is_paused,omitempty"`
 }

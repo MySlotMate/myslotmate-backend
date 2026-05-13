@@ -83,6 +83,7 @@ func (c *EventController) RegisterRoutes(r chi.Router) {
 		r.Post("/{eventID}/resume", c.ResumeEvent)
 		r.Get("/{eventID}/attendees", c.GetEventAttendees)
 		r.Get("/{eventID}/availability", c.GetEventAvailability)
+		r.Get("/{eventID}/occurrences", c.GetEventOccurrencesForHost)
 	})
 }
 
@@ -444,11 +445,13 @@ func (c *EventController) PauseEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		HostID uuid.UUID `json:"host_id"`
+		HostID     uuid.UUID  `json:"host_id"`
+		PausedFrom *time.Time `json:"paused_from,omitempty"`
+		PausedDate *time.Time `json:"paused_date,omitempty"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	evt, err := c.eventService.PauseEvent(r.Context(), eventID, body.HostID)
+	evt, err := c.eventService.PauseEvent(r.Context(), eventID, body.HostID, body.PausedFrom, body.PausedDate)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -517,4 +520,37 @@ func (c *EventController) GetEventAvailability(w http.ResponseWriter, r *http.Re
 	}
 
 	RespondSuccess(w, http.StatusOK, availability)
+}
+
+// GetEventOccurrencesForHost returns the full upcoming occurrence list for the host's
+// pause-management UI. Paused occurrences are included with is_paused=true.
+// Requires ?host_id=<uuid> for ownership verification.
+func (c *EventController) GetEventOccurrencesForHost(w http.ResponseWriter, r *http.Request) {
+	eventID, err := uuid.Parse(chi.URLParam(r, "eventID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid event ID")
+		return
+	}
+
+	hostID, err := uuid.Parse(r.URL.Query().Get("host_id"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid or missing host_id")
+		return
+	}
+
+	occurrences, err := c.eventService.GetEventOccurrencesForHost(r.Context(), eventID, hostID)
+	if err != nil {
+		if err.Error() == "unauthorized" {
+			RespondError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		if err.Error() == "event not found" {
+			RespondError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, occurrences)
 }

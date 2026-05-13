@@ -116,6 +116,7 @@ func main() {
 	savedExpRepo := repository.NewSavedExperienceRepository(dbConn)
 	ledgerRepo := repository.NewTransactionLedgerRepository(dbConn)
 	blogRepo := repository.NewBlogRepository(dbConn)
+	experienceTemplateRepo := repository.NewExperienceTemplateRepository(dbConn)
 
 	// Ensure platform account exists for fee tracking
 	if err := ensurePlatformAccount(ctx, accountRepo); err != nil {
@@ -181,7 +182,12 @@ func main() {
 
 	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService)
 	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, dispatcher)
-	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, dispatcher)
+	bookingService := service.NewBookingService(bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, dispatcher, notifService)
+	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, dispatcher, bookingService)
+	reviewService := service.NewReviewService(reviewRepo, eventRepo, hostRepo, dispatcher)
+	inboxService := service.NewInboxService(inboxRepo, eventRepo, socketService)
+	supportService := service.NewSupportService(supportRepo)
+	payoutService := service.NewPayoutService(payoutRepo, accountRepo, paymentRepo, hostRepo, ledgerRepo, payoutProvider, dispatcher)
 
 	// Initialize reminder scheduler
 	var reminderScheduler *notification.ReminderScheduler
@@ -189,12 +195,6 @@ func main() {
 		reminderScheduler = initializeReminderScheduler(dbConn, notifService, 5, 90)
 		reminderScheduler.Start(5 * time.Minute)
 	}
-
-	bookingService := service.NewBookingService(bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, dispatcher, notifService)
-	reviewService := service.NewReviewService(reviewRepo, eventRepo, hostRepo, dispatcher)
-	inboxService := service.NewInboxService(inboxRepo, eventRepo, socketService)
-	supportService := service.NewSupportService(supportRepo)
-	payoutService := service.NewPayoutService(payoutRepo, accountRepo, paymentRepo, hostRepo, ledgerRepo, payoutProvider, dispatcher)
 
 	userController := controller.NewUserController(userService)
 	hostController := controller.NewHostController(hostService)
@@ -208,6 +208,7 @@ func main() {
 	uploadController := controller.NewUploadController(uploadService)
 	adminController := controller.NewAdminController(hostService, payoutService, fbApp.Auth, cfg.AdminEmail)
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail)
+	experienceTemplateController := controller.NewExperienceTemplateController(experienceTemplateRepo)
 
 	// Initialize RAG components
 	ragEngine := rag.NewRAGEngine(
@@ -241,6 +242,7 @@ func main() {
 		uploadController,
 		adminController,
 		blogController,
+		experienceTemplateController,
 		ragChatCtrl,
 		ragDocCtrl,
 	)

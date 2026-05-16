@@ -55,8 +55,17 @@ func IsAdmin(firebaseAuth *auth.Client, adminEmail string) func(http.Handler) ht
 				return
 			}
 
-			// 4. Check admin
-			if !strings.EqualFold(email, adminEmail) {
+			// 4. Check admin (supports comma-separated list)
+			isAdmin := false
+			admins := strings.Split(adminEmail, ",")
+			for _, a := range admins {
+				if strings.EqualFold(email, strings.TrimSpace(a)) {
+					isAdmin = true
+					break
+				}
+			}
+
+			if !isAdmin {
 				http.Error(w, `{"success":false,"error":"forbidden: admin access required"}`, http.StatusForbidden)
 				return
 			}

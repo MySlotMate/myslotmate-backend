@@ -66,6 +66,7 @@ var eventColumns = `id, host_id,
 	title, hook_line, mood, description,
 	cover_image_url, gallery_urls,
 	is_online, meeting_link, location, location_lat, location_lng, google_maps_url, duration_minutes, min_group_size, max_group_size, capacity,
+	languages, level,
 	price_cents, is_free, time, end_time, is_recurring, recurrence_rule,
 	cancellation_policy, status, published_at, paused_at, paused_from, paused_dates,
 	ai_suggestion, avg_rating, total_bookings, total_reviews,
@@ -80,6 +81,7 @@ func scanEvent(row interface {
 		&e.Title, &e.HookLine, &e.Mood, &e.Description,
 		&e.CoverImageURL, &e.GalleryURLs,
 		&e.IsOnline, &e.MeetingLink, &e.Location, &e.LocationLat, &e.LocationLng, &e.GoogleMapsURL, &e.DurationMinutes, &e.MinGroupSize, &e.MaxGroupSize, &e.Capacity,
+		&e.Languages, &e.Level,
 		&e.PriceCents, &e.IsFree, &e.Time, &e.EndTime, &e.IsRecurring, &e.RecurrenceRule,
 		&e.CancellationPolicy, &e.Status, &e.PublishedAt, &e.PausedAt, &e.PausedFrom, &e.PausedDates,
 		&e.AISuggestion, &e.AvgRating, &e.TotalBookings, &e.TotalReviews,
@@ -107,6 +109,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			title, hook_line, mood, description,
 			cover_image_url, gallery_urls,
 			is_online, meeting_link, location, location_lat, location_lng, google_maps_url, duration_minutes, min_group_size, max_group_size, capacity,
+			languages, level,
 			price_cents, is_free, time, end_time, is_recurring, recurrence_rule,
 			cancellation_policy, status, published_at, paused_from, paused_dates,
 			ai_suggestion,
@@ -116,10 +119,11 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			$3, $4, $5, $6,
 			$7, $8,
 			$9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-			$19, $20, $21, $22, $23, $24,
-			$25, $26, $27, $28, $29,
-			$30,
-			$31, $32
+			$19, $20,
+			$21, $22, $23, $24, $25, $26,
+			$27, $28, $29, $30, $31,
+			$32,
+			$33, $34
 		)
 	`
 	if event.ID == uuid.Nil {
@@ -130,6 +134,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 		event.Title, event.HookLine, event.Mood, event.Description,
 		event.CoverImageURL, pq.Array(event.GalleryURLs),
 		event.IsOnline, event.MeetingLink, event.Location, event.LocationLat, event.LocationLng, event.GoogleMapsURL, event.DurationMinutes, event.MinGroupSize, event.MaxGroupSize, event.Capacity,
+		pq.Array(event.Languages), event.Level,
 		event.PriceCents, event.IsFree, event.Time, event.EndTime, event.IsRecurring, event.RecurrenceRule,
 		event.CancellationPolicy, event.Status, event.PublishedAt, event.PausedFrom, pq.Array(event.PausedDates),
 		event.AISuggestion,
@@ -144,15 +149,17 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 			title = $1, hook_line = $2, mood = $3, description = $4,
 			cover_image_url = $5, gallery_urls = $6,
 			is_online = $7, meeting_link = $8, location = $9, location_lat = $10, location_lng = $11, google_maps_url = $12, duration_minutes = $13, min_group_size = $14, max_group_size = $15, capacity = $16,
-			price_cents = $17, is_free = $18, time = $19, end_time = $20, is_recurring = $21, recurrence_rule = $22,
-			cancellation_policy = $23, status = $24, published_at = $25, paused_at = $26, paused_from = $27, paused_dates = $28,
-			ai_suggestion = $29, avg_rating = $30, total_bookings = $31
-		WHERE id = $32
+			languages = $17, level = $18,
+			price_cents = $19, is_free = $20, time = $21, end_time = $22, is_recurring = $23, recurrence_rule = $24,
+			cancellation_policy = $25, status = $26, published_at = $27, paused_at = $28, paused_from = $29, paused_dates = $30,
+			ai_suggestion = $31, avg_rating = $32, total_bookings = $33
+		WHERE id = $34
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		event.Title, event.HookLine, event.Mood, event.Description,
 		event.CoverImageURL, pq.Array(event.GalleryURLs),
 		event.IsOnline, event.MeetingLink, event.Location, event.LocationLat, event.LocationLng, event.GoogleMapsURL, event.DurationMinutes, event.MinGroupSize, event.MaxGroupSize, event.Capacity,
+		pq.Array(event.Languages), event.Level,
 		event.PriceCents, event.IsFree, event.Time, event.EndTime, event.IsRecurring, event.RecurrenceRule,
 		event.CancellationPolicy, event.Status, event.PublishedAt, event.PausedAt, event.PausedFrom, pq.Array(event.PausedDates),
 		event.AISuggestion, event.AvgRating, event.TotalBookings,
@@ -270,6 +277,7 @@ func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, 
 			&e.Title, &e.HookLine, &e.Mood, &e.Description,
 			&e.CoverImageURL, &e.GalleryURLs,
 			&e.IsOnline, &e.MeetingLink, &e.Location, &e.LocationLat, &e.LocationLng, &e.GoogleMapsURL, &e.DurationMinutes, &e.MinGroupSize, &e.MaxGroupSize, &e.Capacity,
+			&e.Languages, &e.Level,
 			&e.PriceCents, &e.IsFree, &e.Time, &e.EndTime, &e.IsRecurring, &e.RecurrenceRule,
 			&e.CancellationPolicy, &e.Status, &e.PublishedAt, &e.PausedAt, &e.PausedFrom, &e.PausedDates,
 			&e.AISuggestion, &e.AvgRating, &e.TotalBookings, &e.TotalReviews,

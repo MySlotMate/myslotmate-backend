@@ -20,6 +20,7 @@ type BookingRepository interface {
 	ListAttendeesByEventOccurrence(ctx context.Context, eventID uuid.UUID, occurrenceDate time.Time) ([]*models.Attendee, error)
 	GetTotalBookedQuantity(ctx context.Context, eventID uuid.UUID) (int, error)
 	GetTotalBookedQuantityForOccurrence(ctx context.Context, eventID uuid.UUID, occurrenceDate time.Time) (int, error)
+	GetBookedQuantitySince(ctx context.Context, eventID uuid.UUID, since time.Time) (int, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status models.BookingStatus) error
 	ListRecentCancelledByEventIDs(ctx context.Context, eventIDs []uuid.UUID, limit int) ([]*models.Booking, error)
 	CountConfirmedByEventIDs(ctx context.Context, eventIDs []uuid.UUID) (int, error)
@@ -182,6 +183,16 @@ func (r *postgresBookingRepository) GetTotalBookedQuantityForOccurrence(ctx cont
 	query := `SELECT COALESCE(SUM(quantity), 0) FROM bookings WHERE event_id = $1 AND occurrence_date = $2 AND status IN ('pending', 'confirmed')`
 	var total int
 	err := r.db.QueryRowContext(ctx, query, eventID, occurrenceDate).Scan(&total)
+	return total, err
+}
+
+// GetBookedQuantitySince returns the total booked quantity (people count, summing
+// quantity per booking) for an event since the given timestamp. Used to surface
+// recent booking activity like "N people booked this week".
+func (r *postgresBookingRepository) GetBookedQuantitySince(ctx context.Context, eventID uuid.UUID, since time.Time) (int, error) {
+	query := `SELECT COALESCE(SUM(quantity), 0) FROM bookings WHERE event_id = $1 AND created_at >= $2 AND status IN ('pending', 'confirmed')`
+	var total int
+	err := r.db.QueryRowContext(ctx, query, eventID, since).Scan(&total)
 	return total, err
 }
 

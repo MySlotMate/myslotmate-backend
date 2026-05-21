@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/models"
@@ -37,6 +38,7 @@ func (c *BlogController) RegisterRoutes(r chi.Router) {
 	r.Route("/blogs", func(r chi.Router) {
 		// Admin-only routes (registered first for priority)
 		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Post("/", c.CreateBlog)
+		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Get("/admin", c.ListAllBlogs)
 		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Put("/{blogID}", c.UpdateBlog)
 		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Delete("/{blogID}", c.DeleteBlog)
 		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Post("/{blogID}/publish", c.PublishBlog)
@@ -54,7 +56,7 @@ func (c *BlogController) RegisterRoutes(r chi.Router) {
 type CreateBlogRequest struct {
 	Title           string  `json:"title" validate:"required"`
 	Description     *string `json:"description,omitempty"`
-	Category        string  `json:"category" validate:"required,oneof=Hosting Wellness Adventure"`
+	Category        string  `json:"category" validate:"required"`
 	Content         string  `json:"content" validate:"required"`
 	CoverImageURL   *string `json:"cover_image_url,omitempty"`
 	ReadTimeMinutes int     `json:"read_time_minutes,omitempty"`
@@ -122,7 +124,37 @@ func (c *BlogController) CreateBlog(w http.ResponseWriter, r *http.Request) {
 	RespondSuccess(w, http.StatusCreated, blog)
 }
 
-// GetBlog retrieves a single blog post by ID
+// isAdminRequest verifies the optional bearer token on a public route and
+// reports whether the caller is a configured admin. Unlike the IsAdmin
+// middleware it never rejects the request — a missing/invalid token simply
+// yields false. Used to selectively expose drafts to admins.
+func (c *BlogController) isAdminRequest(r *http.Request) bool {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return false
+	}
+	idToken := strings.TrimPrefix(authHeader, "Bearer ")
+	if idToken == authHeader {
+		return false
+	}
+	token, err := c.firebaseAuth.VerifyIDToken(r.Context(), idToken)
+	if err != nil {
+		return false
+	}
+	email, _ := token.Claims["email"].(string)
+	if email == "" {
+		return false
+	}
+	for _, a := range strings.Split(c.adminEmail, ",") {
+		if strings.EqualFold(email, strings.TrimSpace(a)) {
+			return true
+		}
+	}
+	return false
+}
+
+// GetBlog retrieves a single blog post by ID. Draft (unpublished) blogs are
+// only returned to admins; everyone else gets a 404 so drafts stay hidden.
 func (c *BlogController) GetBlog(w http.ResponseWriter, r *http.Request) {
 	blogIDStr := chi.URLParam(r, "blogID")
 	blogID, err := uuid.Parse(blogIDStr)
@@ -137,7 +169,30 @@ func (c *BlogController) GetBlog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if blog.PublishedAt == nil && !c.isAdminRequest(r) {
+		RespondError(w, http.StatusNotFound, "Blog not found")
+		return
+	}
+
 	RespondSuccess(w, http.StatusOK, blog)
+}
+
+// ListAllBlogs retrieves every blog including unpublished drafts (admin only)
+func (c *BlogController) ListAllBlogs(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	blogs, err := c.blogRepo.ListAll(r.Context(), limit, offset)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if blogs == nil {
+		blogs = []*models.Blog{}
+	}
+
+	RespondSuccess(w, http.StatusOK, blogs)
 }
 
 // ListPublishedBlogs retrieves all published blogs with pagination

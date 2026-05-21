@@ -34,6 +34,10 @@ type Event struct {
 	MaxGroupSize    *int     `db:"max_group_size" json:"max_group_size,omitempty"`
 	Capacity        int      `db:"capacity" json:"capacity"` // kept for overbooking prevention
 
+	// ── Audience ────────────────────────────────────────────────────────────
+	Languages pq.StringArray `db:"languages" json:"languages"`     // languages the experience is run in
+	Level     *string        `db:"level" json:"level,omitempty"` // Beginner Friendly / Intermediate / Advanced
+
 	// ── Schedule & Pricing ──────────────────────────────────────────────────
 	PriceCents     *int64     `db:"price_cents" json:"price_cents,omitempty"` // per guest; nil = free
 	IsFree         bool       `db:"is_free" json:"is_free"`
@@ -62,6 +66,7 @@ type Event struct {
 	
 	// Calculated fields (not in DB)
 	NextAvailableDate *time.Time `json:"next_available_date,omitempty"`
+	BookingsLastWeek  int        `json:"bookings_last_week,omitempty"`
 
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`

@@ -51,6 +51,8 @@ type EventCreateRequest struct {
 	MinGroupSize       *int                       `json:"min_group_size,omitempty"`
 	MaxGroupSize       *int                       `json:"max_group_size,omitempty"`
 	Capacity           int                        `json:"capacity"`
+	Languages          []string                   `json:"languages,omitempty"`
+	Level              *string                    `json:"level,omitempty"`
 	PriceCents         *int64                     `json:"price_cents,omitempty"`
 	IsFree             bool                       `json:"is_free"`
 	Time               time.Time                  `json:"time"`
@@ -79,6 +81,8 @@ type EventUpdateRequest struct {
 	MinGroupSize       *int                       `json:"min_group_size,omitempty"`
 	MaxGroupSize       *int                       `json:"max_group_size,omitempty"`
 	Capacity           *int                       `json:"capacity,omitempty"`
+	Languages          []string                   `json:"languages,omitempty"`
+	Level              *string                    `json:"level,omitempty"`
 	PriceCents         *int64                     `json:"price_cents,omitempty"`
 	IsFree             *bool                      `json:"is_free,omitempty"`
 	Time               *time.Time                 `json:"time,omitempty"`
@@ -156,6 +160,8 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		MinGroupSize:       req.MinGroupSize,
 		MaxGroupSize:       req.MaxGroupSize,
 		Capacity:           req.Capacity,
+		Languages:          pq.StringArray(req.Languages),
+		Level:              req.Level,
 		PriceCents:         req.PriceCents,
 		IsFree:             req.IsFree,
 		Time:               req.Time,
@@ -245,6 +251,12 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 	}
 	if req.Capacity != nil {
 		evt.Capacity = *req.Capacity
+	}
+	if req.Languages != nil {
+		evt.Languages = pq.StringArray(req.Languages)
+	}
+	if req.Level != nil {
+		evt.Level = req.Level
 	}
 	if req.PriceCents != nil {
 		evt.PriceCents = req.PriceCents
@@ -366,7 +378,19 @@ func (s *eventService) DeleteEvent(ctx context.Context, eventID uuid.UUID, hostI
 }
 
 func (s *eventService) GetEvent(ctx context.Context, eventID uuid.UUID) (*models.Event, error) {
-	return s.eventRepo.GetByID(ctx, eventID)
+	evt, err := s.eventRepo.GetByID(ctx, eventID)
+	if err != nil || evt == nil {
+		return evt, err
+	}
+
+	weekAgo := time.Now().AddDate(0, 0, -7)
+	if count, err := s.bookingRepo.GetBookedQuantitySince(ctx, eventID, weekAgo); err == nil {
+		evt.BookingsLastWeek = count
+	} else {
+		fmt.Printf("[EVENT_SERVICE] Error fetching weekly bookings for %s: %v\n", eventID, err)
+	}
+
+	return evt, nil
 }
 
 func (s *eventService) GetHostEvents(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error) {

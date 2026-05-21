@@ -109,6 +109,8 @@ type EventCreateRequestBody struct {
 	Capacity           int                        `json:"capacity"`
 	MinGroupSize       *int                       `json:"min_group_size,omitempty"`
 	MaxGroupSize       *int                       `json:"max_group_size,omitempty"`
+	Languages          []string                   `json:"languages,omitempty"`
+	Level              *string                    `json:"level,omitempty"`
 	PriceCents         *int64                     `json:"price_cents,omitempty"`
 	IsFree             bool                       `json:"is_free"`
 	IsRecurring        bool                       `json:"is_recurring"`
@@ -136,6 +138,8 @@ type EventUpdateRequestBody struct {
 	Capacity           *int                       `json:"capacity,omitempty"`
 	MinGroupSize       *int                       `json:"min_group_size,omitempty"`
 	MaxGroupSize       *int                       `json:"max_group_size,omitempty"`
+	Languages          []string                   `json:"languages,omitempty"`
+	Level              *string                    `json:"level,omitempty"`
 	PriceCents         *int64                     `json:"price_cents,omitempty"`
 	IsFree             *bool                      `json:"is_free,omitempty"`
 	IsRecurring        *bool                      `json:"is_recurring,omitempty"`
@@ -194,6 +198,8 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		Capacity:           req.Capacity,
 		MinGroupSize:       req.MinGroupSize,
 		MaxGroupSize:       req.MaxGroupSize,
+		Languages:          req.Languages,
+		Level:              req.Level,
 		PriceCents:         req.PriceCents,
 		IsFree:             req.IsFree,
 		IsRecurring:        req.IsRecurring,
@@ -250,6 +256,8 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		Capacity:           body.Capacity,
 		MinGroupSize:       body.MinGroupSize,
 		MaxGroupSize:       body.MaxGroupSize,
+		Languages:          body.Languages,
+		Level:              body.Level,
 		PriceCents:         body.PriceCents,
 		IsFree:             body.IsFree,
 		IsRecurring:        body.IsRecurring,

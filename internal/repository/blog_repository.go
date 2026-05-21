@@ -16,6 +16,8 @@ type BlogRepository interface {
 	ListPublished(ctx context.Context, limit, offset int) ([]*models.Blog, error)
 	ListPublishedByCategory(ctx context.Context, category string, limit, offset int) ([]*models.Blog, error)
 	ListByAuthorID(ctx context.Context, authorID uuid.UUID, limit, offset int) ([]*models.Blog, error)
+	// ListAll returns every blog including unpublished drafts. Admin-only.
+	ListAll(ctx context.Context, limit, offset int) ([]*models.Blog, error)
 	Update(ctx context.Context, blog *models.Blog) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	Publish(ctx context.Context, id uuid.UUID) error
@@ -148,6 +150,37 @@ func (r *postgresBlogRepository) ListByAuthorID(ctx context.Context, authorID uu
 		ctx,
 		fmt.Sprintf(`SELECT %s FROM blogs WHERE author_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`, blogColumns),
 		authorID, limit, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var blogs []*models.Blog
+	for rows.Next() {
+		blog, err := scanBlog(rows)
+		if err != nil {
+			return nil, err
+		}
+		blogs = append(blogs, blog)
+	}
+
+	return blogs, rows.Err()
+}
+
+// ListAll returns every blog (drafts + published), newest first. Admin-only.
+func (r *postgresBlogRepository) ListAll(ctx context.Context, limit, offset int) ([]*models.Blog, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	rows, err := r.db.QueryContext(
+		ctx,
+		fmt.Sprintf(`SELECT %s FROM blogs ORDER BY created_at DESC LIMIT $1 OFFSET $2`, blogColumns),
+		limit, offset,
 	)
 	if err != nil {
 		return nil, err

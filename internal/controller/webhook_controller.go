@@ -9,6 +9,7 @@ import (
 
 	"myslotmate-backend/internal/lib/payment"
 	"myslotmate-backend/internal/lib/payout"
+	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/service"
 
 	"github.com/go-chi/chi/v5"
@@ -209,20 +210,33 @@ func (c *WebhookController) HandlePayoutWebhook(w http.ResponseWriter, r *http.R
 
 // ── Payment (collection) webhook ────────────────────────────────────────────
 
-// RazorpayPaymentWebhookEvent is the top-level payload for payment.captured / payment.failed events.
+// RazorpayPaymentWebhookEvent is the top-level payload for payment.captured /
+// payment.failed / refund.processed / refund.failed events. Razorpay puts the
+// refund entity under payload.refund instead of payload.payment, so the struct
+// carries both.
 type RazorpayPaymentWebhookEvent struct {
 	Entity    string `json:"entity"` // "event"
 	AccountID string `json:"account_id"`
-	Event     string `json:"event"` // "payment.captured", "payment.failed"
+	Event     string `json:"event"` // payment.captured, refund.processed, refund.failed, ...
 	Payload   struct {
 		Payment struct {
 			Entity struct {
 				ID      string `json:"id"`       // pay_xxxxx
 				OrderID string `json:"order_id"` // order_xxxxx
 				Amount  int64  `json:"amount"`
-				Status  string `json:"status"` // "captured", "failed"
+				Status  string `json:"status"` // captured, failed
 			} `json:"entity"`
 		} `json:"payment"`
+		Refund struct {
+			Entity struct {
+				ID                   string `json:"id"`         // rfnd_xxxxx
+				PaymentID            string `json:"payment_id"` // pay_xxxxx of the original payment
+				Amount               int64  `json:"amount"`
+				Status               string `json:"status"` // pending, processed, failed
+				ErrorCode            string `json:"error_code"`
+				ErrorDescription     string `json:"error_description"`
+			} `json:"entity"`
+		} `json:"refund"`
 	} `json:"payload"`
 	CreatedAt int64 `json:"created_at"`
 }
@@ -247,25 +261,48 @@ func (c *WebhookController) HandlePaymentWebhook(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// We only act on payment.captured — the money is with us.
-	if event.Event != "payment.captured" {
+	switch event.Event {
+	case "payment.captured":
+		orderID := event.Payload.Payment.Entity.OrderID
+		paymentID := event.Payload.Payment.Entity.ID
+		if orderID == "" || paymentID == "" {
+			RespondError(w, http.StatusBadRequest, "Missing order_id or payment id in webhook payload")
+			return
+		}
+		if err := c.userService.CreditWalletFromWebhook(r.Context(), orderID, paymentID); err != nil {
+			log.Printf("[webhook/payment] error crediting wallet for order %s: %v", orderID, err)
+			RespondError(w, http.StatusInternalServerError, "Failed to process payment webhook")
+			return
+		}
+		RespondSuccess(w, http.StatusOK, map[string]string{"message": "payment webhook processed"})
+
+	case "refund.processed", "refund.failed":
+		refundID := event.Payload.Refund.Entity.ID
+		if refundID == "" {
+			RespondError(w, http.StatusBadRequest, "Missing refund id in webhook payload")
+			return
+		}
+		// Map the Razorpay refund status to our PaymentStatus.
+		newStatus := models.PaymentStatusCompleted
+		reason := ""
+		if event.Event == "refund.failed" {
+			newStatus = models.PaymentStatusFailed
+			reason = event.Payload.Refund.Entity.ErrorDescription
+			if reason == "" {
+				reason = event.Payload.Refund.Entity.ErrorCode
+			}
+		}
+		if err := c.userService.ApplyRefundWebhook(r.Context(), refundID, newStatus, reason); err != nil {
+			log.Printf("[webhook/payment] error applying refund webhook %s: %v", refundID, err)
+			RespondError(w, http.StatusInternalServerError, "Failed to process refund webhook")
+			return
+		}
+		RespondSuccess(w, http.StatusOK, map[string]string{"message": "refund webhook processed"})
+
+	default:
+		// Other event types (payment.failed, etc.) are not yet handled; respond
+		// 200 so Razorpay stops retrying.
 		log.Printf("[webhook/payment] ignoring event: %s", event.Event)
 		RespondSuccess(w, http.StatusOK, map[string]string{"message": "event ignored"})
-		return
 	}
-
-	orderID := event.Payload.Payment.Entity.OrderID
-	paymentID := event.Payload.Payment.Entity.ID
-	if orderID == "" || paymentID == "" {
-		RespondError(w, http.StatusBadRequest, "Missing order_id or payment id in webhook payload")
-		return
-	}
-
-	if err := c.userService.CreditWalletFromWebhook(r.Context(), orderID, paymentID); err != nil {
-		log.Printf("[webhook/payment] error crediting wallet for order %s: %v", orderID, err)
-		RespondError(w, http.StatusInternalServerError, "Failed to process payment webhook")
-		return
-	}
-
-	RespondSuccess(w, http.StatusOK, map[string]string{"message": "payment webhook processed"})
 }

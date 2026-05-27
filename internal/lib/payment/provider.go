@@ -25,6 +25,24 @@ type VerifyRequest struct {
 	Signature string // razorpay_signature
 }
 
+// RefundRequest tells the provider to refund a captured payment back to its
+// original instrument. Razorpay only refunds against a specific payment id, so
+// the caller MUST know which top-up to refund.
+type RefundRequest struct {
+	GatewayPaymentID string            // Razorpay pay_xxxxx — the original payment to refund
+	AmountCents      int64             // partial allowed; must be ≤ remaining headroom on the payment
+	Notes            map[string]string // free-form metadata stored on the refund
+	Speed            string            // "normal" (default) or "optimum"
+}
+
+// RefundResponse is returned after a refund is created. Status is async — the
+// final outcome arrives via `refund.processed` / `refund.failed` webhooks.
+type RefundResponse struct {
+	RefundID    string // provider's refund id (e.g. rfnd_xxxxx)
+	AmountCents int64
+	Status      string // "pending" | "processed" | "failed"
+}
+
 // Provider is the Strategy interface for payment collection (top-up, future direct pay).
 // This is separate from the payout.Provider which is for sending money out.
 type Provider interface {
@@ -41,4 +59,8 @@ type Provider interface {
 
 	// GetKeyID returns the public key ID for the client-side checkout SDK.
 	GetKeyID() string
+
+	// CreateRefund initiates a refund of a captured payment back to its
+	// original source. Status is async — final outcome arrives via webhook.
+	CreateRefund(ctx context.Context, req RefundRequest) (*RefundResponse, error)
 }

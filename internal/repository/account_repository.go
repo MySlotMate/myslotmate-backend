@@ -16,14 +16,20 @@ type AccountRepository interface {
 	Credit(ctx context.Context, accountID uuid.UUID, amountCents int64) error
 	Debit(ctx context.Context, accountID uuid.UUID, amountCents int64) error
 	GetBalance(ctx context.Context, accountID uuid.UUID) (int64, error)
+	// WithTx returns a copy of the repository bound to the given transaction.
+	WithTx(tx *sql.Tx) AccountRepository
 }
 
 type postgresAccountRepository struct {
-	db *sql.DB
+	db DBTX
 }
 
 func NewAccountRepository(db *sql.DB) AccountRepository {
 	return &postgresAccountRepository{db: db}
+}
+
+func (r *postgresAccountRepository) WithTx(tx *sql.Tx) AccountRepository {
+	return &postgresAccountRepository{db: tx}
 }
 
 func (r *postgresAccountRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Account, error) {

@@ -180,9 +180,9 @@ func main() {
 		log.Printf("Warning: failed to initialize notification service: %v", err)
 	}
 
-	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService)
+	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, ledgerRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService)
 	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, dispatcher)
-	bookingService := service.NewBookingService(bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, dispatcher, notifService)
+	bookingService := service.NewBookingService(dbConn, bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, userService, dispatcher, notifService)
 	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, dispatcher, bookingService)
 	reviewService := service.NewReviewService(reviewRepo, eventRepo, hostRepo, dispatcher)
 	inboxService := service.NewInboxService(inboxRepo, eventRepo, socketService)
@@ -202,11 +202,11 @@ func main() {
 	bookingController := controller.NewBookingController(bookingService)
 	reviewController := controller.NewReviewController(reviewService)
 	inboxController := controller.NewInboxController(inboxService)
-	payoutController := controller.NewPayoutController(payoutService)
+	payoutController := controller.NewPayoutController(payoutService, userRepo, hostRepo, fbApp.Auth)
 	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider)
 	supportController := controller.NewSupportController(supportService, uploadService)
 	uploadController := controller.NewUploadController(uploadService)
-	adminController := controller.NewAdminController(hostService, payoutService, fbApp.Auth, cfg.AdminEmail)
+	adminController := controller.NewAdminController(hostService, payoutService, userService, fbApp.Auth, cfg.AdminEmail)
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail)
 	experienceTemplateController := controller.NewExperienceTemplateController(experienceTemplateRepo)
 

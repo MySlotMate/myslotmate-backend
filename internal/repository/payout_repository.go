@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"myslotmate-backend/internal/models"
 
 	"github.com/google/uuid"
@@ -27,6 +28,7 @@ type PayoutRepository interface {
 	// Host Earnings
 	GetHostEarnings(ctx context.Context, hostID uuid.UUID) (*models.HostEarnings, error)
 	IncrementEarnings(ctx context.Context, hostID uuid.UUID, amountCents int64) error
+	DecrementEarnings(ctx context.Context, hostID uuid.UUID, amountCents int64) error
 	AddPendingClearance(ctx context.Context, hostID uuid.UUID, amountCents int64) error
 	ClearPending(ctx context.Context, hostID uuid.UUID, amountCents int64) error
 
@@ -35,14 +37,21 @@ type PayoutRepository interface {
 
 	// Fraud Flags
 	HasActiveFraudFlag(ctx context.Context, userID uuid.UUID) (bool, error)
+
+	// WithTx returns a copy of the repository bound to the given transaction.
+	WithTx(tx *sql.Tx) PayoutRepository
 }
 
 type postgresPayoutRepository struct {
-	db *sql.DB
+	db DBTX
 }
 
 func NewPayoutRepository(db *sql.DB) PayoutRepository {
 	return &postgresPayoutRepository{db: db}
+}
+
+func (r *postgresPayoutRepository) WithTx(tx *sql.Tx) PayoutRepository {
+	return &postgresPayoutRepository{db: tx}
 }
 
 // ── Payout Methods ──────────────────────────────────────────────────────────
@@ -124,8 +133,13 @@ func (r *postgresPayoutRepository) GetPrimaryPayoutMethod(ctx context.Context, h
 }
 
 func (r *postgresPayoutRepository) SetPrimary(ctx context.Context, hostID uuid.UUID, methodID uuid.UUID) error {
-	// Unset all, then set the chosen one
-	tx, err := r.db.BeginTx(ctx, nil)
+	// Unset all, then set the chosen one. Manages its own transaction, so it
+	// cannot run on a tx-bound instance (see WithTx / DBTX).
+	sqlDB, ok := r.db.(*sql.DB)
+	if !ok {
+		return errors.New("SetPrimary requires a direct DB connection, not a transaction")
+	}
+	tx, err := sqlDB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -194,8 +208,13 @@ func (r *postgresPayoutRepository) GetAdminPrimaryPayoutMethod(ctx context.Conte
 }
 
 func (r *postgresPayoutRepository) SetAdminPrimary(ctx context.Context, methodID uuid.UUID) error {
-	// Unset all admin methods, then set the chosen one
-	tx, err := r.db.BeginTx(ctx, nil)
+	// Unset all admin methods, then set the chosen one. Manages its own
+	// transaction, so it cannot run on a tx-bound instance (see WithTx / DBTX).
+	sqlDB, ok := r.db.(*sql.DB)
+	if !ok {
+		return errors.New("SetAdminPrimary requires a direct DB connection, not a transaction")
+	}
+	tx, err := sqlDB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -241,6 +260,14 @@ func (r *postgresPayoutRepository) GetHostEarnings(ctx context.Context, hostID u
 
 func (r *postgresPayoutRepository) IncrementEarnings(ctx context.Context, hostID uuid.UUID, amountCents int64) error {
 	query := `UPDATE host_earnings SET total_earnings_cents = total_earnings_cents + $1 WHERE host_id = $2`
+	_, err := r.db.ExecContext(ctx, query, amountCents, hostID)
+	return err
+}
+
+// DecrementEarnings reverses a host's lifetime earnings (e.g. on booking
+// cancellation). GREATEST(...,0) prevents the total going negative.
+func (r *postgresPayoutRepository) DecrementEarnings(ctx context.Context, hostID uuid.UUID, amountCents int64) error {
+	query := `UPDATE host_earnings SET total_earnings_cents = GREATEST(total_earnings_cents - $1, 0) WHERE host_id = $2`
 	_, err := r.db.ExecContext(ctx, query, amountCents, hostID)
 	return err
 }

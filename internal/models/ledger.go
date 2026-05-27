@@ -17,12 +17,14 @@ const (
 	LedgerTypeRefundCredit      LedgerTransactionType = "refund_credit"       // User/Host refunded on cancellation
 	LedgerTypeWebhookReversal   LedgerTransactionType = "webhook_reversal"    // Reversal due to failed payout
 	LedgerTypeManualCredit      LedgerTransactionType = "manual_credit"       // Admin adjustment (with audit)
+	LedgerTypeTopupCredit       LedgerTransactionType = "topup_credit"        // User wallet top-up via payment gateway
 
 	// Debits (money out)
 	LedgerTypeWithdrawalDebit   LedgerTransactionType = "withdrawal_debit"   // Host/Admin withdrawal request
 	LedgerTypeCancellationDebit LedgerTransactionType = "cancellation_debit" // User booking cancellation
 	LedgerTypePayoutDebit       LedgerTransactionType = "payout_debit"       // Payout initiated (temporary, reverses if fails)
 	LedgerTypeManualDebit       LedgerTransactionType = "manual_debit"       // Admin adjustment (with audit)
+	LedgerTypeSourceRefundDebit LedgerTransactionType = "source_refund_debit" // Wallet drained as money goes back to card (Razorpay refund)
 )
 
 // ── LedgerStatus represents status of ledger entry ──────────────────────

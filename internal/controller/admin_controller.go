@@ -17,14 +17,16 @@ import (
 type AdminController struct {
 	hostService   service.HostService
 	payoutService service.PayoutService
+	userService   service.UserService
 	firebaseAuth  *fbauth.Client
 	adminEmail    string
 }
 
-func NewAdminController(hs service.HostService, ps service.PayoutService, fa *fbauth.Client, adminEmail string) *AdminController {
+func NewAdminController(hs service.HostService, ps service.PayoutService, us service.UserService, fa *fbauth.Client, adminEmail string) *AdminController {
 	return &AdminController{
 		hostService:   hs,
 		payoutService: ps,
+		userService:   us,
 		firebaseAuth:  fa,
 		adminEmail:    adminEmail,
 	}
@@ -50,6 +52,15 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Put("/payout-methods/{methodID}/primary", c.SetAdminPrimaryMethod)
 		r.Delete("/payout-methods/{methodID}", c.DeleteAdminPayoutMethod)
 		r.Post("/withdraw", c.RequestAdminWithdrawal)
+	})
+
+	r.Route("/admin/payments", func(r chi.Router) {
+		// Admin-only "refund to source" — sends a top-up's money back to the
+		// customer's original card/UPI via the Razorpay Refunds API. The default
+		// refund (cancellation → wallet) is unchanged; this is the escape hatch
+		// for special cases (disputes, chargebacks, regulatory).
+		r.Use(auth.IsAdmin(c.firebaseAuth, c.adminEmail))
+		r.Post("/{paymentID}/source-refund", c.RequestSourceRefund)
 	})
 }
 
@@ -243,4 +254,40 @@ func (c *AdminController) RequestAdminWithdrawal(w http.ResponseWriter, r *http.
 	}
 
 	RespondSuccess(w, http.StatusOK, payment)
+}
+
+// ── Admin "refund to source" ────────────────────────────────────────────────
+
+type SourceRefundRequestBody struct {
+	AmountCents    int64  `json:"amount_cents"`
+	Reason         string `json:"reason"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// RequestSourceRefund initiates a Razorpay refund of the {paymentID} top-up
+// back to the customer's original payment instrument. Admin-only.
+func (c *AdminController) RequestSourceRefund(w http.ResponseWriter, r *http.Request) {
+	topupID, err := uuid.Parse(chi.URLParam(r, "paymentID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid payment ID")
+		return
+	}
+
+	var body SourceRefundRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	refund, err := c.userService.RefundTopUpToSource(r.Context(), topupID, service.SourceRefundRequest{
+		AmountCents:    body.AmountCents,
+		Reason:         body.Reason,
+		IdempotencyKey: body.IdempotencyKey,
+	})
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusCreated, refund)
 }

@@ -21,6 +21,13 @@ type Payment struct {
 	DisplayReference *string       `db:"display_reference" json:"display_reference,omitempty"`   // e.g. TXN-88234
 	GatewayOrderID   *string       `db:"gateway_order_id" json:"gateway_order_id,omitempty"`     // Razorpay order_xxxxx
 	GatewayPaymentID *string       `db:"gateway_payment_id" json:"gateway_payment_id,omitempty"` // Razorpay pay_xxxxx
-	CreatedAt        time.Time     `db:"created_at" json:"created_at"`
-	UpdatedAt        time.Time     `db:"updated_at" json:"updated_at"`
+
+	// Source-refund linkage (admin-gated "refund to card" flow). Populated only
+	// on refund-type payment rows that go back to the original instrument via
+	// the Razorpay Refunds API; nil for cancellation→wallet refunds.
+	GatewayRefundID    *string    `db:"gateway_refund_id" json:"gateway_refund_id,omitempty"`         // Razorpay rfnd_xxxxx
+	RefundOfPaymentID  *uuid.UUID `db:"refund_of_payment_id" json:"refund_of_payment_id,omitempty"`   // the top-up being refunded
+
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }

@@ -22,6 +22,7 @@ type BookingRepository interface {
 	GetTotalBookedQuantityForOccurrence(ctx context.Context, eventID uuid.UUID, occurrenceDate time.Time) (int, error)
 	GetBookedQuantitySince(ctx context.Context, eventID uuid.UUID, since time.Time) (int, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status models.BookingStatus) error
+	UpdatePaymentID(ctx context.Context, id uuid.UUID, paymentID uuid.UUID) error
 	ListRecentCancelledByEventIDs(ctx context.Context, eventIDs []uuid.UUID, limit int) ([]*models.Booking, error)
 	CountConfirmedByEventIDs(ctx context.Context, eventIDs []uuid.UUID) (int, error)
 	MarkWhatsappNotificationSent(ctx context.Context, id uuid.UUID) error
@@ -30,14 +31,20 @@ type BookingRepository interface {
 	MarkWhatsappReminderNotificationSent(ctx context.Context, id uuid.UUID) error
 	ListPendingReminderNotifications(ctx context.Context, limit int) ([]*models.Booking, error)
 	GetOccupancyForEvents(ctx context.Context, eventIDs []uuid.UUID, since time.Time) (map[uuid.UUID]map[string]int, error)
+	// WithTx returns a copy of the repository bound to the given transaction.
+	WithTx(tx *sql.Tx) BookingRepository
 }
 
 type postgresBookingRepository struct {
-	db *sql.DB
+	db DBTX
 }
 
 func NewBookingRepository(db *sql.DB) BookingRepository {
 	return &postgresBookingRepository{db: db}
+}
+
+func (r *postgresBookingRepository) WithTx(tx *sql.Tx) BookingRepository {
+	return &postgresBookingRepository{db: tx}
 }
 
 // bookingColumns is the canonical column list for SELECT queries.
@@ -198,10 +205,17 @@ func (r *postgresBookingRepository) GetBookedQuantitySince(ctx context.Context, 
 
 func (r *postgresBookingRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status models.BookingStatus) error {
 	query := `UPDATE bookings SET status = $1 WHERE id = $2`
-	if status == models.BookingStatusCancelled {
+	if status == models.BookingStatusCancelled || status == models.BookingStatusRefunded {
 		query = `UPDATE bookings SET status = $1, cancelled_at = NOW() WHERE id = $2`
 	}
 	_, err := r.db.ExecContext(ctx, query, status, id)
+	return err
+}
+
+// UpdatePaymentID links a booking row to its payment record (bookings.payment_id).
+func (r *postgresBookingRepository) UpdatePaymentID(ctx context.Context, id uuid.UUID, paymentID uuid.UUID) error {
+	query := `UPDATE bookings SET payment_id = $1, updated_at = NOW() WHERE id = $2`
+	_, err := r.db.ExecContext(ctx, query, paymentID, id)
 	return err
 }
 

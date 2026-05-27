@@ -1,11 +1,18 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
+	fbauth "firebase.google.com/go/v4/auth"
+
+	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/models"
+	"myslotmate-backend/internal/repository"
 	"myslotmate-backend/internal/service"
 
 	"github.com/go-chi/chi/v5"
@@ -14,14 +21,33 @@ import (
 
 type PayoutController struct {
 	payoutService service.PayoutService
+	userRepo      repository.UserRepository
+	hostRepo      repository.HostRepository
+	firebaseAuth  *fbauth.Client
 }
 
-func NewPayoutController(s service.PayoutService) *PayoutController {
-	return &PayoutController{payoutService: s}
+func NewPayoutController(
+	s service.PayoutService,
+	ur repository.UserRepository,
+	hr repository.HostRepository,
+	fa *fbauth.Client,
+) *PayoutController {
+	return &PayoutController{
+		payoutService: s,
+		userRepo:      ur,
+		hostRepo:      hr,
+		firebaseAuth:  fa,
+	}
 }
 
 func (c *PayoutController) RegisterRoutes(r chi.Router) {
 	r.Route("/payouts", func(r chi.Router) {
+		// All /payouts/* endpoints require an authenticated user. The host
+		// identity is derived from the auth context (resolveHostID) — body
+		// fields and URL params named host_id are IGNORED for ownership.
+		// Closes bug C1 (unauthenticated payout drain).
+		r.Use(auth.RequireUser(c.firebaseAuth))
+
 		// Payout Methods
 		r.Post("/methods", c.AddPayoutMethod)
 		r.Get("/methods/{hostID}", c.ListPayoutMethods)
@@ -39,6 +65,32 @@ func (c *PayoutController) RegisterRoutes(r chi.Router) {
 	})
 }
 
+// resolveHostID derives the caller's host UUID from the auth context. Returns
+// an error if the caller is not authenticated or is not registered as a host.
+// This is the SINGLE source of truth for "which host is acting" on /payouts/*.
+// Body fields and URL params named host_id MUST be ignored — closes C1 / H5.
+func (c *PayoutController) resolveHostID(ctx context.Context) (uuid.UUID, error) {
+	uid, ok := ctx.Value(auth.ContextKeyUID).(string)
+	if !ok || uid == "" {
+		return uuid.Nil, errors.New("unauthenticated")
+	}
+	user, err := c.userRepo.GetByAuthUID(ctx, uid)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("user lookup failed: %w", err)
+	}
+	if user == nil {
+		return uuid.Nil, errors.New("user not found")
+	}
+	host, err := c.hostRepo.GetByUserID(ctx, user.ID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("host lookup failed: %w", err)
+	}
+	if host == nil {
+		return uuid.Nil, errors.New("caller is not a host")
+	}
+	return host.ID, nil
+}
+
 // ── Payout Methods ──────────────────────────────────────────────────────────
 
 type AddPayoutMethodReq struct {
@@ -53,6 +105,11 @@ type AddPayoutMethodReq struct {
 }
 
 func (c *PayoutController) AddPayoutMethod(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	var req AddPayoutMethodReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -69,7 +126,7 @@ func (c *PayoutController) AddPayoutMethod(w http.ResponseWriter, r *http.Reques
 		UPIID:           req.UPIID,
 	}
 
-	pm, err := c.payoutService.AddPayoutMethod(r.Context(), req.HostID, svcReq)
+	pm, err := c.payoutService.AddPayoutMethod(r.Context(), hostID, svcReq)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -79,9 +136,9 @@ func (c *PayoutController) AddPayoutMethod(w http.ResponseWriter, r *http.Reques
 }
 
 func (c *PayoutController) ListPayoutMethods(w http.ResponseWriter, r *http.Request) {
-	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	hostID, err := c.resolveHostID(r.Context())
 	if err != nil {
-		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		RespondError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -95,16 +152,14 @@ func (c *PayoutController) ListPayoutMethods(w http.ResponseWriter, r *http.Requ
 }
 
 func (c *PayoutController) SetPrimaryMethod(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	methodID, err := uuid.Parse(chi.URLParam(r, "methodID"))
 	if err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid method ID")
-		return
-	}
-
-	hostIDStr := r.URL.Query().Get("host_id")
-	hostID, err := uuid.Parse(hostIDStr)
-	if err != nil {
-		RespondError(w, http.StatusBadRequest, "Missing or invalid host_id query param")
 		return
 	}
 
@@ -117,17 +172,14 @@ func (c *PayoutController) SetPrimaryMethod(w http.ResponseWriter, r *http.Reque
 }
 
 func (c *PayoutController) DeletePayoutMethod(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	methodID, err := uuid.Parse(chi.URLParam(r, "methodID"))
 	if err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid method ID")
-		return
-	}
-
-	// Host ID from query or body for authorization
-	hostIDStr := r.URL.Query().Get("host_id")
-	hostID, err := uuid.Parse(hostIDStr)
-	if err != nil {
-		RespondError(w, http.StatusBadRequest, "Missing or invalid host_id query param")
 		return
 	}
 
@@ -149,11 +201,17 @@ type WithdrawalReq struct {
 }
 
 func (c *PayoutController) RequestWithdrawal(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	var req WithdrawalReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
+	// req.HostID is intentionally ignored — closes C1 (anyone-can-withdraw-as-any-host).
 
 	svcReq := service.WithdrawalRequest{
 		AmountCents:    req.AmountCents,
@@ -161,9 +219,9 @@ func (c *PayoutController) RequestWithdrawal(w http.ResponseWriter, r *http.Requ
 		IdempotencyKey: req.IdempotencyKey,
 	}
 
-	payment, err := c.payoutService.RequestWithdrawal(r.Context(), req.HostID, svcReq)
+	payment, err := c.payoutService.RequestWithdrawal(r.Context(), hostID, svcReq)
 	if err != nil {
-		RespondError(w, http.StatusInternalServerError, err.Error())
+		RespondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -173,9 +231,9 @@ func (c *PayoutController) RequestWithdrawal(w http.ResponseWriter, r *http.Requ
 // ── Earnings ────────────────────────────────────────────────────────────────
 
 func (c *PayoutController) GetEarningsSummary(w http.ResponseWriter, r *http.Request) {
-	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	hostID, err := c.resolveHostID(r.Context())
 	if err != nil {
-		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		RespondError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -191,9 +249,9 @@ func (c *PayoutController) GetEarningsSummary(w http.ResponseWriter, r *http.Req
 // ── Payout History ──────────────────────────────────────────────────────────
 
 func (c *PayoutController) GetPayoutHistory(w http.ResponseWriter, r *http.Request) {
-	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	hostID, err := c.resolveHostID(r.Context())
 	if err != nil {
-		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		RespondError(w, http.StatusForbidden, err.Error())
 		return
 	}
 

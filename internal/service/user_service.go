@@ -33,6 +33,9 @@ type UserService interface {
 	InitiateTopUp(ctx context.Context, userID uuid.UUID, req TopUpRequest) (*TopUpOrderResponse, error)
 	VerifyTopUp(ctx context.Context, userID uuid.UUID, req VerifyTopUpRequest) (*WalletBalanceResponse, error)
 	CreditWalletFromWebhook(ctx context.Context, orderID string, razorpayPaymentID string) error
+	RefundTopUpToSource(ctx context.Context, topupPaymentID uuid.UUID, req SourceRefundRequest) (*models.Payment, error)
+	ApplyRefundWebhook(ctx context.Context, gatewayRefundID string, newStatus models.PaymentStatus, reason string) error
+	GetWalletTransactions(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*models.Payment, error)
 	GetByAuthUID(ctx context.Context, authUID string) (*models.User, error)
 	SendPhoneOTP(ctx context.Context, userID uuid.UUID) error
 	VerifyPhoneOTP(ctx context.Context, userID uuid.UUID, otp string) error
@@ -75,6 +78,17 @@ type TopUpOrderResponse struct {
 }
 
 // VerifyTopUpRequest is sent by the client after Razorpay checkout completes.
+// SourceRefundRequest is the admin-gated request to send wallet money back to
+// the original payment instrument (card/UPI/netbank) via Razorpay's Refund API.
+// The target top-up payment is identified separately (URL param on the admin
+// route). See userService.RefundTopUpToSource.
+type SourceRefundRequest struct {
+	AmountCents    int64      // amount to refund in paise; partial allowed up to top-up headroom
+	Reason         string     // human note, stored on the refund and forwarded as a Razorpay note
+	IdempotencyKey string     // required — client-supplied; duplicate keys return the existing refund
+	AdminActorID   *uuid.UUID // for audit (who triggered the refund); optional
+}
+
 type VerifyTopUpRequest struct {
 	RazorpayOrderID   string `json:"razorpay_order_id"`
 	RazorpayPaymentID string `json:"razorpay_payment_id"`
@@ -88,6 +102,7 @@ type userService struct {
 	savedExpRepo    repository.SavedExperienceRepository
 	accountRepo     repository.AccountRepository
 	paymentRepo     repository.PaymentRepository
+	ledgerRepo      repository.TransactionLedgerRepository
 	workerPool      *worker.WorkerPool
 	dispatcher      *event.Dispatcher
 	aadharProvider  identity.AadharProvider
@@ -102,6 +117,7 @@ func NewUserService(
 	savedExpRepo repository.SavedExperienceRepository,
 	ar repository.AccountRepository,
 	pmr repository.PaymentRepository,
+	lr repository.TransactionLedgerRepository,
 	wp *worker.WorkerPool,
 	dispatcher *event.Dispatcher,
 	ap identity.AadharProvider,
@@ -114,6 +130,7 @@ func NewUserService(
 		savedExpRepo:    savedExpRepo,
 		accountRepo:     ar,
 		paymentRepo:     pmr,
+		ledgerRepo:      lr,
 		workerPool:      wp,
 		dispatcher:      dispatcher,
 		aadharProvider:  ap,
@@ -399,6 +416,10 @@ func (s *userService) VerifyTopUp(ctx context.Context, userID uuid.UUID, req Ver
 		return nil, fmt.Errorf("failed to credit wallet: %w", err)
 	}
 
+	// 3b. Record the top-up in the transaction ledger so the ledger stays in sync
+	// with accounts.balance_cents. Idempotent — see recordTopUpLedger.
+	s.recordTopUpLedger(ctx, pmtRecord)
+
 	// 4. Mark payment as completed and store the Razorpay payment ID.
 	gatewayPaymentID := req.RazorpayPaymentID
 	pmtRecord.Status = models.PaymentStatusCompleted
@@ -436,12 +457,292 @@ func (s *userService) CreditWalletFromWebhook(ctx context.Context, orderID strin
 		return fmt.Errorf("failed to credit wallet via webhook: %w", err)
 	}
 
+	// Record the top-up in the transaction ledger. Idempotent — see recordTopUpLedger.
+	s.recordTopUpLedger(ctx, pmtRecord)
+
 	pmtRecord.Status = models.PaymentStatusCompleted
 	pmtRecord.GatewayPaymentID = &razorpayPaymentID
 	pmtRecord.UpdatedAt = time.Now()
 	_ = s.paymentRepo.Update(ctx, pmtRecord)
 
 	return nil
+}
+
+// recordTopUpLedger writes a topup_credit entry to the transaction ledger for a
+// completed wallet top-up, keeping the ledger in sync with accounts.balance_cents.
+// It is idempotent: the idempotency key is derived from the payment ID, and the
+// ledger's UNIQUE(idempotency_key) constraint means a concurrent VerifyTopUp and
+// payment.captured webhook cannot create two entries for the same top-up.
+// Best-effort: the wallet is already credited, so a ledger failure (including the
+// expected duplicate-key when the other path won the race) is logged, not surfaced.
+func (s *userService) recordTopUpLedger(ctx context.Context, pmt *models.Payment) {
+	key := "topup_ledger_" + pmt.ID.String()
+	if _, err := s.ledgerRepo.Create(ctx, &models.TransactionLedger{
+		ID:             uuid.New(),
+		AccountID:      pmt.AccountID,
+		Type:           models.LedgerTypeTopupCredit,
+		AmountCents:    pmt.AmountCents, // POSITIVE = money into the user's wallet
+		ReferenceID:    &pmt.ID,
+		ReferenceType:  strPtr("payment"),
+		IdempotencyKey: &key,
+		Description:    strPtr("Wallet top-up via payment gateway"),
+		Status:         models.LedgerStatusCompleted,
+		CreatedAt:      time.Now(),
+	}); err != nil {
+		fmt.Printf("[TOPUP] ledger entry not written for payment %s (ok if duplicate): %v\n", pmt.ID, err)
+	}
+}
+
+// RefundTopUpToSource initiates a Razorpay refund of a top-up payment back to
+// the customer's original payment instrument (card/UPI/netbank). This is the
+// admin-gated "refund to source" flow — the alternative to F4's wallet-credit
+// refund. See bugs-and-risks.md "F7" / skill flows.md.
+//
+// Safety checks (in order):
+//  1. Idempotency: a payments row with req.IdempotencyKey already exists →
+//     return it. The payments.idempotency_key UNIQUE index serialises concurrent
+//     duplicate requests at the DB level too.
+//  2. Top-up must be a completed top-up with a Razorpay payment id.
+//  3. Refund must not exceed the top-up's remaining source-refund headroom
+//     (top-up amount minus refunds already issued against the same pay_xxx).
+//  4. Refund must not exceed the user's current wallet balance — you can't
+//     refund money the user has since spent on uncancelled bookings.
+//
+// Flow (this is NOT wrapped in a single DB transaction — same shape as the
+// existing payout flow; see "Phase A/B/C" pattern):
+//
+//	A. Create refund payment row (status=pending) + ledger debit + Debit wallet.
+//	B. Call Razorpay (external HTTP, must run outside any open tx).
+//	C. On Razorpay success: update the payment row with rfnd_xxx + status.
+//	   On Razorpay failure: reverse via writeSourceRefundReversal.
+//
+// Async finalisation: the `refund.processed` / `refund.failed` webhook calls
+// ApplyRefundWebhook to flip the row to completed/failed.
+func (s *userService) RefundTopUpToSource(ctx context.Context, topupPaymentID uuid.UUID, req SourceRefundRequest) (*models.Payment, error) {
+	if req.AmountCents <= 0 {
+		return nil, errors.New("refund amount must be positive")
+	}
+	if req.IdempotencyKey == "" {
+		return nil, errors.New("idempotency_key is required for source refund")
+	}
+
+	// 1. Idempotency: short-circuit on a duplicate request.
+	if existing, err := s.paymentRepo.GetByIdempotencyKey(ctx, req.IdempotencyKey); err == nil && existing != nil {
+		return existing, nil
+	}
+
+	// 2. Load + validate the top-up.
+	topup, err := s.paymentRepo.GetByID(ctx, topupPaymentID)
+	if err != nil {
+		return nil, fmt.Errorf("load top-up payment: %w", err)
+	}
+	if topup == nil {
+		return nil, errors.New("top-up payment not found")
+	}
+	if topup.Type != models.PaymentTypeTopup {
+		return nil, errors.New("payment is not a top-up; cannot source-refund")
+	}
+	if topup.Status != models.PaymentStatusCompleted {
+		return nil, fmt.Errorf("top-up status is %q; only completed top-ups can be refunded to source", topup.Status)
+	}
+	if topup.GatewayPaymentID == nil || *topup.GatewayPaymentID == "" {
+		return nil, errors.New("top-up has no Razorpay payment id; cannot source-refund")
+	}
+
+	// 3. Headroom: don't exceed what Razorpay will accept on this pay_xxx.
+	alreadyRefunded, err := s.paymentRepo.SumActiveRefundsAgainstPayment(ctx, topup.ID)
+	if err != nil {
+		return nil, fmt.Errorf("compute refund headroom: %w", err)
+	}
+	headroom := topup.AmountCents - alreadyRefunded
+	if req.AmountCents > headroom {
+		return nil, fmt.Errorf("refund exceeds top-up headroom: requested %d, available %d (top-up %d, already refunded %d)",
+			req.AmountCents, headroom, topup.AmountCents, alreadyRefunded)
+	}
+
+	// 4. Wallet check: can only refund money the user still has in their wallet.
+	account, err := s.accountRepo.GetByID(ctx, topup.AccountID)
+	if err != nil {
+		return nil, fmt.Errorf("load user account: %w", err)
+	}
+	if account == nil {
+		return nil, errors.New("user account not found")
+	}
+	if req.AmountCents > account.BalanceCents {
+		return nil, fmt.Errorf("refund exceeds user's wallet balance: requested %d, available %d — cancel the relevant bookings first to put money back in the wallet",
+			req.AmountCents, account.BalanceCents)
+	}
+
+	// ── Phase A: stake out the refund row + ledger + wallet debit ────────
+	displayRef := fmt.Sprintf("RFS-%05d", time.Now().UnixMilli()%100000)
+	refundPayment := &models.Payment{
+		ID:                uuid.New(),
+		IdempotencyKey:    req.IdempotencyKey,
+		AccountID:         account.ID,
+		Type:              models.PaymentTypeRefund,
+		ReferenceID:       &topup.ID,
+		AmountCents:       req.AmountCents,
+		Status:            models.PaymentStatusPending,
+		DisplayReference:  &displayRef,
+		RefundOfPaymentID: &topup.ID,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+	if err := s.paymentRepo.Create(ctx, refundPayment); err != nil {
+		return nil, fmt.Errorf("create refund payment row: %w", err)
+	}
+
+	ledgerKey := "source_refund_" + refundPayment.ID.String()
+	if _, err := s.ledgerRepo.Create(ctx, &models.TransactionLedger{
+		ID:             uuid.New(),
+		AccountID:      account.ID,
+		Type:           models.LedgerTypeSourceRefundDebit,
+		AmountCents:    -req.AmountCents, // NEGATIVE = money leaving the wallet
+		ReferenceID:    &refundPayment.ID,
+		ReferenceType:  strPtr("payment"),
+		IdempotencyKey: &ledgerKey,
+		Description:    strPtr(fmt.Sprintf("Refund to source: %s", req.Reason)),
+		Status:         models.LedgerStatusPending,
+		CreatedAt:      time.Now(),
+		CreatedBy:      req.AdminActorID,
+	}); err != nil {
+		// Couldn't write the ledger entry — the payment row exists but is not
+		// reflected in the journal. Mark the payment failed so it drops out of
+		// active-refunds; admin can retry.
+		_ = s.paymentRepo.UpdateStatus(ctx, refundPayment.ID, models.PaymentStatusFailed, strPtr(err.Error()))
+		return nil, fmt.Errorf("write source refund ledger entry: %w", err)
+	}
+
+	if err := s.accountRepo.Debit(ctx, account.ID, req.AmountCents); err != nil {
+		// Should not normally happen — we balance-checked above — but cover the race.
+		s.writeSourceRefundReversal(ctx, account.ID, refundPayment.ID, req.AmountCents,
+			"wallet debit failed: "+err.Error(), false)
+		_ = s.paymentRepo.UpdateStatus(ctx, refundPayment.ID, models.PaymentStatusFailed, strPtr(err.Error()))
+		return nil, fmt.Errorf("debit user wallet: %w", err)
+	}
+
+	// ── Phase B: call Razorpay (external HTTP, must NOT be inside a DB tx) ─
+	resp, err := s.paymentProvider.CreateRefund(ctx, payment.RefundRequest{
+		GatewayPaymentID: *topup.GatewayPaymentID,
+		AmountCents:      req.AmountCents,
+		Speed:            "normal",
+		Notes: map[string]string{
+			"refund_payment_id": refundPayment.ID.String(),
+			"topup_payment_id":  topup.ID.String(),
+			"reason":            req.Reason,
+		},
+	})
+	if err != nil {
+		// Razorpay rejected the refund. Reverse the wallet debit + ledger entry
+		// and mark the payment failed so it drops out of active-refunds (the
+		// headroom is restored).
+		s.writeSourceRefundReversal(ctx, account.ID, refundPayment.ID, req.AmountCents,
+			"razorpay refund failed: "+err.Error(), true)
+		errMsg := err.Error()
+		_ = s.paymentRepo.UpdateStatus(ctx, refundPayment.ID, models.PaymentStatusFailed, &errMsg)
+		return nil, fmt.Errorf("razorpay refund failed: %w", err)
+	}
+
+	// ── Phase C: persist the Razorpay refund id + map the async status ───
+	refundPayment.GatewayRefundID = &resp.RefundID
+	refundPayment.UpdatedAt = time.Now()
+	switch resp.Status {
+	case "processed":
+		refundPayment.Status = models.PaymentStatusCompleted
+	case "failed":
+		refundPayment.Status = models.PaymentStatusFailed
+	default: // "pending" — the refund webhook will finalise.
+		refundPayment.Status = models.PaymentStatusProcessing
+	}
+	if err := s.paymentRepo.Update(ctx, refundPayment); err != nil {
+		// Non-fatal — the webhook can still finalise. Log so we don't silently
+		// lose the rfnd_xxx linkage.
+		fmt.Printf("[REFUND] Warning: failed to persist rfnd_xxx %s on payment %s: %v\n",
+			resp.RefundID, refundPayment.ID, err)
+	}
+
+	return refundPayment, nil
+}
+
+// writeSourceRefundReversal is the compensating action when the Razorpay call
+// fails after Phase A has already debited the wallet + written a ledger entry.
+// Uses a deterministic idempotency key so a retry can't double-credit.
+// If creditWallet is false, only the ledger entry is written (wallet debit
+// hadn't run yet).
+func (s *userService) writeSourceRefundReversal(ctx context.Context, accountID, refundPaymentID uuid.UUID, amountCents int64, reason string, creditWallet bool) {
+	reversalKey := "source_refund_reversal_" + refundPaymentID.String()
+	_, _ = s.ledgerRepo.Create(ctx, &models.TransactionLedger{
+		ID:             uuid.New(),
+		AccountID:      accountID,
+		Type:           models.LedgerTypeWebhookReversal,
+		AmountCents:    amountCents, // POSITIVE = money back into the wallet
+		ReferenceID:    &refundPaymentID,
+		ReferenceType:  strPtr("payment"),
+		IdempotencyKey: &reversalKey,
+		Description:    strPtr("Reversal - source refund failed: " + reason),
+		Status:         models.LedgerStatusCompleted,
+		CreatedAt:      time.Now(),
+	})
+	if creditWallet {
+		if err := s.accountRepo.Credit(ctx, accountID, amountCents); err != nil {
+			fmt.Printf("[REFUND] CRITICAL: failed to credit wallet on reversal for payment %s: %v — manual fix required\n", refundPaymentID, err)
+		}
+	}
+}
+
+// ApplyRefundWebhook is called by the Razorpay webhook handler for
+// `refund.processed` and `refund.failed` events. It looks up the payments row
+// by rfnd_xxx and finalises its status. On `failed`, the wallet debit is
+// reversed (Razorpay didn't actually send the money to the card).
+func (s *userService) ApplyRefundWebhook(ctx context.Context, gatewayRefundID string, newStatus models.PaymentStatus, reason string) error {
+	pmt, err := s.paymentRepo.GetByGatewayRefundID(ctx, gatewayRefundID)
+	if err != nil {
+		return fmt.Errorf("look up refund payment: %w", err)
+	}
+	if pmt == nil {
+		// Unknown refund — could be a webhook for a refund created outside this
+		// system, or a race. Don't error the webhook (provider will retry); just
+		// log and skip.
+		fmt.Printf("[REFUND] Webhook for unknown gateway_refund_id=%s (status=%s) — ignored\n", gatewayRefundID, newStatus)
+		return nil
+	}
+	// Already finalised — idempotent no-op.
+	if pmt.Status == models.PaymentStatusCompleted || pmt.Status == models.PaymentStatusFailed {
+		return nil
+	}
+
+	if newStatus == models.PaymentStatusFailed {
+		// Razorpay failed the refund after we'd already debited the wallet —
+		// reverse the debit so the user is whole.
+		s.writeSourceRefundReversal(ctx, pmt.AccountID, pmt.ID, pmt.AmountCents,
+			"razorpay refund webhook: "+reason, true)
+		errMsg := reason
+		return s.paymentRepo.UpdateStatus(ctx, pmt.ID, models.PaymentStatusFailed, &errMsg)
+	}
+
+	// Success path.
+	return s.paymentRepo.UpdateStatus(ctx, pmt.ID, models.PaymentStatusCompleted, nil)
+}
+
+// GetWalletTransactions returns the user's payment history (top-ups, bookings,
+// refunds) for the wallet-history UI. Ordered newest-first by created_at.
+// Includes all statuses (pending/processing/completed/failed/reversed) so the
+// user can see in-flight and historical activity.
+func (s *userService) GetWalletTransactions(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*models.Payment, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	account, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, userID)
+	if err != nil {
+		return nil, fmt.Errorf("load user account: %w", err)
+	}
+	if account == nil {
+		return nil, errors.New("user account not found")
+	}
+	return s.paymentRepo.ListByAccountID(ctx, account.ID, limit, offset)
 }
 
 // SendPhoneOTP generates and sends a 6-digit OTP to user's phone

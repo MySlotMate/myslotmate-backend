@@ -122,14 +122,20 @@ func (c *BookingController) CancelBooking(w http.ResponseWriter, r *http.Request
 	}
 
 	var body struct {
-		UserID uuid.UUID `json:"user_id"`
+		UserID            uuid.UUID `json:"user_id"`
+		RefundDestination string    `json:"refund_destination"` // "wallet" (default) | "source"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
 
-	booking, err := c.bookingService.CancelBooking(r.Context(), bookingID, body.UserID)
+	dest := service.RefundDestinationWallet
+	if body.RefundDestination == string(service.RefundDestinationSource) {
+		dest = service.RefundDestinationSource
+	}
+
+	booking, err := c.bookingService.CancelBooking(r.Context(), bookingID, body.UserID, dest)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return

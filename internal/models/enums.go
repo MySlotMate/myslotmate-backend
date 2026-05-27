@@ -106,6 +106,9 @@ const (
 	EventMoodWellness    EventMood = "wellness"
 	EventMoodCulinary    EventMood = "culinary"
 	EventMoodCultural    EventMood = "cultural"
+	EventMoodFashion     EventMood = "fashion"
+	EventMoodFitness     EventMood = "fitness"
+	EventMoodFamily      EventMood = "family"
 
 	// Legacy DB/API aliases kept for backward compatibility.
 	EventMoodAdventureLegacy    EventMood = "adventure"
@@ -125,6 +128,9 @@ var canonicalEventMoodValues = []string{
 	string(EventMoodWellness),
 	string(EventMoodCulinary),
 	string(EventMoodCultural),
+	string(EventMoodFashion),
+	string(EventMoodFitness),
+	string(EventMoodFamily),
 }
 
 // NormalizeEventMood converts both legacy and frontend mood labels into the
@@ -154,6 +160,12 @@ func NormalizeEventMood(mood *EventMood) (*EventMood, error) {
 		canonical = EventMoodCulinary
 	case string(EventMoodCultural), string(EventMoodNightlifeLegacy):
 		canonical = EventMoodCultural
+	case string(EventMoodFashion):
+		canonical = EventMoodFashion
+	case string(EventMoodFitness):
+		canonical = EventMoodFitness
+	case string(EventMoodFamily):
+		canonical = EventMoodFamily
 	default:
 		return nil, fmt.Errorf(
 			"invalid event mood: %q (allowed: %s)",

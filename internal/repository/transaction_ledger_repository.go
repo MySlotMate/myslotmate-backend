@@ -40,14 +40,21 @@ type TransactionLedgerRepository interface {
 	// Reconciliation
 	RunReconciliation(ctx context.Context) (*models.ReconciliationRun, error)
 	GetLastReconciliation(ctx context.Context) (*models.ReconciliationRun, error)
+
+	// WithTx returns a copy of the repository bound to the given transaction.
+	WithTx(tx *sql.Tx) TransactionLedgerRepository
 }
 
 type postgresTransactionLedgerRepository struct {
-	db *sql.DB
+	db DBTX
 }
 
 func NewTransactionLedgerRepository(db *sql.DB) TransactionLedgerRepository {
 	return &postgresTransactionLedgerRepository{db: db}
+}
+
+func (r *postgresTransactionLedgerRepository) WithTx(tx *sql.Tx) TransactionLedgerRepository {
+	return &postgresTransactionLedgerRepository{db: tx}
 }
 
 // Create inserts a new ledger entry and recalculates balance

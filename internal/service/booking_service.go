@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -17,7 +18,7 @@ import (
 type BookingService interface {
 	CreateBooking(ctx context.Context, userID uuid.UUID, req BookingCreateRequest) (*models.Booking, error)
 	ConfirmBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
-	CancelBooking(ctx context.Context, bookingID uuid.UUID, userID uuid.UUID) (*models.Booking, error)
+	CancelBooking(ctx context.Context, bookingID uuid.UUID, userID uuid.UUID, refundDestination RefundDestination) (*models.Booking, error)
 	CancelBookingByHost(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
 	GetUserBookings(ctx context.Context, userID uuid.UUID) ([]*models.Booking, error)
 	GetBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
@@ -30,7 +31,20 @@ type BookingCreateRequest struct {
 	OccurrenceDate *time.Time // which specific date the user is booking for
 }
 
+// RefundDestination is where the refund money ends up on a user-initiated
+// booking cancellation. "wallet" (default) keeps it in the user's wallet —
+// the F4 flow alone. "source" additionally chains a Razorpay source-refund
+// against the user's most-recent refundable top-up so the money goes back
+// to the original card/UPI. See skill flows.md §4.
+type RefundDestination string
+
+const (
+	RefundDestinationWallet RefundDestination = "wallet"
+	RefundDestinationSource RefundDestination = "source"
+)
+
 type bookingService struct {
+	db                  *sql.DB
 	bookingRepo         repository.BookingRepository
 	eventRepo           repository.EventRepository
 	accountRepo         repository.AccountRepository
@@ -39,11 +53,13 @@ type bookingService struct {
 	hostRepo            repository.HostRepository
 	userRepo            repository.UserRepository
 	ledgerRepo          repository.TransactionLedgerRepository
+	userService         UserService // for chaining source-refund on cancel
 	dispatcher          *event.Dispatcher
 	notificationService notification.NotificationService
 }
 
 func NewBookingService(
+	db *sql.DB,
 	br repository.BookingRepository,
 	er repository.EventRepository,
 	ar repository.AccountRepository,
@@ -52,10 +68,12 @@ func NewBookingService(
 	hr repository.HostRepository,
 	ur repository.UserRepository,
 	lr repository.TransactionLedgerRepository,
+	us UserService,
 	d *event.Dispatcher,
 	ns notification.NotificationService,
 ) BookingService {
 	return &bookingService{
+		db:                  db,
 		bookingRepo:         br,
 		eventRepo:           er,
 		accountRepo:         ar,
@@ -64,6 +82,7 @@ func NewBookingService(
 		hostRepo:            hr,
 		userRepo:            ur,
 		ledgerRepo:          lr,
+		userService:         us,
 		dispatcher:          d,
 		notificationService: ns,
 	}
@@ -75,16 +94,16 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		idempotencyKey = fmt.Sprintf("booking_%s_%d", userID, time.Now().UnixNano())
 	}
 
-	// 1. Idempotency check via ledger (prevents duplicate ledger entries)
+	// ── Validation & lookups — read-only, before the transaction opens ───
+
+	// 1. Idempotency check via ledger (prevents duplicate ledger entries).
 	actualLedger, err := s.ledgerRepo.GetByIdempotencyKey(ctx, idempotencyKey)
 	if err != nil {
 		return nil, err
 	}
-	if actualLedger != nil {
-		// Already processed this booking, return the original
-		if actualLedger.ReferenceID != nil {
-			return s.bookingRepo.GetByID(ctx, *actualLedger.ReferenceID)
-		}
+	if actualLedger != nil && actualLedger.ReferenceID != nil {
+		// Already processed this booking, return the original.
+		return s.bookingRepo.GetByID(ctx, *actualLedger.ReferenceID)
 	}
 
 	// 2. Fraud check
@@ -113,7 +132,10 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		occurrenceDate = *req.OccurrenceDate
 	}
 
-	// 5. Overbooking prevention — check capacity per occurrence date
+	// 5. Overbooking prevention — check capacity per occurrence date.
+	// NOTE: this is still a check-then-insert race (bug C4). Wrapping the writes
+	// in a transaction gives atomicity but does NOT serialise two concurrent
+	// capacity checks — closing C4 needs a SELECT ... FOR UPDATE on the event row.
 	currentBooked, err := s.bookingRepo.GetTotalBookedQuantityForOccurrence(ctx, req.EventID, occurrenceDate)
 	if err != nil {
 		return nil, err
@@ -122,13 +144,11 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		return nil, errors.New("event capacity exceeded")
 	}
 
-	// 5. Get platform fee config
+	// 6. Platform fee config + price calculation
 	feeConfig, err := s.payoutRepo.GetPlatformFeeConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	// Price calculation - use event's price, default to 0 for free events
 	var pricePerTicketCents int64 = 0
 	if evt.PriceCents != nil && *evt.PriceCents > 0 {
 		pricePerTicketCents = *evt.PriceCents
@@ -137,7 +157,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	platformFee := totalAmount * int64(feeConfig.PlatformPercentage) / 100
 	hostEarning := totalAmount - platformFee
 
-	// 6. Get user account (must exist)
+	// 7. Get user account (must exist)
 	userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, userID)
 	if err != nil {
 		return nil, err
@@ -146,31 +166,63 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		return nil, errors.New("user account not found")
 	}
 
-	// 7. Check sufficient balance BEFORE creating ledger (only for paid events)
+	// 8. Platform & host accounts (paid events only)
+	var platformAccount, hostAccount *models.Account
+	var host *models.Host
 	if totalAmount > 0 {
-		if err := s.accountRepo.Debit(ctx, userAccount.ID, totalAmount); err != nil {
-			if errors.Is(err, repository.ErrInsufficientBalance) {
-				return nil, errors.New("insufficient wallet balance; please top up first")
-			}
-			return nil, err
+		platformAccount, err = s.accountRepo.GetByOwner(ctx, models.AccountOwnerPlatform, uuid.Nil)
+		if err != nil {
+			return nil, fmt.Errorf("platform account not found: %w", err)
+		}
+		host, err = s.hostRepo.GetByID(ctx, evt.HostID)
+		if err != nil {
+			return nil, fmt.Errorf("host lookup failed: %w", err)
+		}
+		hostAccount, err = s.accountRepo.GetByOwner(ctx, models.AccountOwnerHost, host.ID)
+		if err != nil {
+			return nil, fmt.Errorf("host account not found: %w", err)
 		}
 	}
+
+	// ── Transaction — every write below commits all-or-nothing ───────────
+	// A crash or error at any point rolls the whole booking back: no orphan
+	// debit, no partial ledger, no booking without its payment row (bug C3).
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("booking: begin transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	ledgerTx := s.ledgerRepo.WithTx(tx)
+	accountTx := s.accountRepo.WithTx(tx)
+	bookingTx := s.bookingRepo.WithTx(tx)
+	paymentTx := s.paymentRepo.WithTx(tx)
+	payoutTx := s.payoutRepo.WithTx(tx)
 
 	// ─────────────────────────────────────────────────────────────────────
 	// SWIGGY-STYLE LEDGER FLOW (Immutable Journal)
 	// Only process ledger entries for paid events (totalAmount > 0)
 	// ─────────────────────────────────────────────────────────────────────
-
-	var platformCreditID *uuid.UUID
-
 	if totalAmount > 0 {
-		// 8. Ledger Entry 1: User DEBIT - User pays amount to platform
-		// (This records money flowing from user → platform)
-		userDebitLedger := &models.TransactionLedger{
+		// Debit the user's wallet (the DB CHECK rejects an insufficient balance).
+		if err := accountTx.Debit(ctx, userAccount.ID, totalAmount); err != nil {
+			if errors.Is(err, repository.ErrInsufficientBalance) {
+				return nil, errors.New("insufficient wallet balance; please top up first")
+			}
+			return nil, err
+		}
+
+		// Ledger Entry 1: user debit — money flowing user → platform.
+		userDebit, err := ledgerTx.Create(ctx, &models.TransactionLedger{
 			ID:             uuid.New(),
 			AccountID:      userAccount.ID,
-			Type:           models.LedgerTypeBookingCredit, // CREDIT from user's perspective (they paid)
-			AmountCents:    -totalAmount,                   // NEGATIVE = money out
+			Type:           models.LedgerTypeBookingCredit,
+			AmountCents:    -totalAmount, // NEGATIVE = money out
 			ReferenceID:    &req.EventID,
 			ReferenceType:  strPtr("event"),
 			IdempotencyKey: strPtr(idempotencyKey),
@@ -178,24 +230,13 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 			Status:         models.LedgerStatusCompleted,
 			CreatedAt:      time.Now(),
 			CreatedBy:      &userID,
-		}
-		userDebit, err := s.ledgerRepo.Create(ctx, userDebitLedger)
+		})
 		if err != nil {
-			// Rollback the account debit
-			_ = s.accountRepo.Credit(ctx, userAccount.ID, totalAmount)
 			return nil, fmt.Errorf("failed to create user debit ledger: %w", err)
 		}
 
-		// 9. Get platform account
-		platformAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerPlatform, uuid.Nil)
-		if err != nil {
-			// Rollback
-			_ = s.accountRepo.Credit(ctx, userAccount.ID, totalAmount)
-			return nil, fmt.Errorf("platform account not found: %w", err)
-		}
-
-		// 10. Ledger Entry 2: Platform CREDIT - Receives user payment
-		platformCreditLedger := &models.TransactionLedger{
+		// Ledger Entry 2: platform credit — receives the user payment.
+		platformCredit, err := ledgerTx.Create(ctx, &models.TransactionLedger{
 			ID:            uuid.New(),
 			AccountID:     platformAccount.ID,
 			Type:          models.LedgerTypeBookingCredit,
@@ -205,69 +246,52 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 			Description:   strPtr("Payment received for event registration"),
 			Status:        models.LedgerStatusCompleted,
 			CreatedAt:     time.Now(),
-		}
-		platformCredit, err := s.ledgerRepo.Create(ctx, platformCreditLedger)
+		})
 		if err != nil {
-			_ = s.accountRepo.Credit(ctx, userAccount.ID, totalAmount)
 			return nil, fmt.Errorf("failed to create platform credit ledger: %w", err)
 		}
-		platformCreditID = &platformCredit.ID
 
-		// 11. Ledger Entry 3: Platform FEE DEBIT - Platform keeps commission
-		platformFeeDebitLedger := &models.TransactionLedger{
+		// Ledger Entry 3: platform disburses the host's share. Amount MUST be
+		// -hostEarning (not -platformFee) so the four entries net to zero.
+		if _, err := ledgerTx.Create(ctx, &models.TransactionLedger{
 			ID:            uuid.New(),
 			AccountID:     platformAccount.ID,
 			Type:          models.LedgerTypePlatformFeeCredit,
-			AmountCents:   -platformFee, // NEGATIVE = platform fee reserved
+			AmountCents:   -hostEarning, // NEGATIVE = host's share paid out of platform account
 			ReferenceID:   &req.EventID,
 			ReferenceType: strPtr("event"),
-			Description:   strPtr(fmt.Sprintf("Commission: %d%% of booking", feeConfig.PlatformPercentage)),
+			Description:   strPtr(fmt.Sprintf("Host earning disbursed (platform keeps %d%% commission)", feeConfig.PlatformPercentage)),
 			Status:        models.LedgerStatusCompleted,
 			CreatedAt:     time.Now(),
-		}
-		_, err = s.ledgerRepo.Create(ctx, platformFeeDebitLedger)
-		if err != nil {
-			_ = s.accountRepo.Credit(ctx, userAccount.ID, totalAmount)
+		}); err != nil {
 			return nil, fmt.Errorf("failed to create platform fee ledger: %w", err)
 		}
 
-		// 12. Get host account
-		host, err := s.hostRepo.GetByID(ctx, evt.HostID)
-		if err != nil {
-			_ = s.accountRepo.Credit(ctx, userAccount.ID, totalAmount)
-			return nil, fmt.Errorf("host lookup failed: %w", err)
-		}
-
-		hostAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerHost, host.ID)
-		if err != nil {
-			_ = s.accountRepo.Credit(ctx, userAccount.ID, totalAmount)
-			return nil, fmt.Errorf("host account not found: %w", err)
-		}
-
-		// 13. Ledger Entry 4: Host CREDIT - Host's earning (pending settlement)
-		hostCreditLedger := &models.TransactionLedger{
+		// Ledger Entry 4: host credit — the host's earning (pending settlement).
+		if _, err := ledgerTx.Create(ctx, &models.TransactionLedger{
 			ID:            uuid.New(),
 			AccountID:     hostAccount.ID,
 			Type:          models.LedgerTypeBookingCredit,
 			AmountCents:   hostEarning, // POSITIVE = money reserved for host
-			ReferenceID:   platformCreditID,
+			ReferenceID:   &platformCredit.ID,
 			ReferenceType: strPtr("ledger"),
 			Description:   strPtr(fmt.Sprintf("Booking earning (after %d%% commission)", feeConfig.PlatformPercentage)),
 			Status:        models.LedgerStatusCompleted,
 			CreatedAt:     time.Now(),
-		}
-		_, err = s.ledgerRepo.Create(ctx, hostCreditLedger)
-		if err != nil {
-			_ = s.accountRepo.Credit(ctx, userAccount.ID, totalAmount)
+		}); err != nil {
 			return nil, fmt.Errorf("failed to create host credit ledger: %w", err)
 		}
 
-		// 16. Update host earnings aggregate (only for paid events)
-		_ = s.payoutRepo.IncrementEarnings(ctx, host.ID, hostEarning)
-		_ = s.payoutRepo.AddPendingClearance(ctx, host.ID, hostEarning)
+		// Update host earnings aggregate.
+		if err := payoutTx.IncrementEarnings(ctx, host.ID, hostEarning); err != nil {
+			return nil, fmt.Errorf("failed to increment host earnings: %w", err)
+		}
+		if err := payoutTx.AddPendingClearance(ctx, host.ID, hostEarning); err != nil {
+			return nil, fmt.Errorf("failed to add host pending clearance: %w", err)
+		}
 	}
 
-	// 14. Create the booking record
+	// Create the booking record.
 	newBooking := &models.Booking{
 		ID:              uuid.New(),
 		EventID:         req.EventID,
@@ -282,15 +306,11 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
 	}
-
-	if err := s.bookingRepo.Create(ctx, newBooking); err != nil {
-		if totalAmount > 0 {
-			_ = s.accountRepo.Credit(ctx, userAccount.ID, totalAmount)
-		}
+	if err := bookingTx.Create(ctx, newBooking); err != nil {
 		return nil, fmt.Errorf("failed to create booking: %w", err)
 	}
 
-	// 15. Create payment record (for legacy payment history)
+	// Create the payment record and link it to the booking (bookings.payment_id).
 	displayRef := fmt.Sprintf("BK-%05d", time.Now().UnixMilli()%100000)
 	bookingPayment := &models.Payment{
 		ID:               uuid.New(),
@@ -305,14 +325,20 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
 	}
-
-	if err := s.paymentRepo.Create(ctx, bookingPayment); err != nil {
-		// Non-critical — ledger entries are source of truth
-		fmt.Printf("[BOOKING] Warning: Payment record creation failed: %v\n", err)
+	if err := paymentTx.Create(ctx, bookingPayment); err != nil {
+		return nil, fmt.Errorf("failed to create payment record: %w", err)
+	}
+	if err := bookingTx.UpdatePaymentID(ctx, newBooking.ID, bookingPayment.ID); err != nil {
+		return nil, fmt.Errorf("failed to link payment to booking: %w", err)
 	}
 	newBooking.PaymentID = &bookingPayment.ID
 
-	// 17. Publish event
+	// ── Commit ───────────────────────────────────────────────────────────
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("booking: commit transaction: %w", err)
+	}
+	committed = true
+
 	s.dispatcher.Publish(event.BookingCreated, newBooking)
 
 	fmt.Printf("[BOOKING] CreateBooking SUCCESS: id=%s, user=%s, event=%s, total=%d, host_earning=%d, platform_fee=%d\n",
@@ -393,7 +419,7 @@ func (s *bookingService) ConfirmBooking(ctx context.Context, bookingID uuid.UUID
 	return booking, nil
 }
 
-func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID, userID uuid.UUID) (*models.Booking, error) {
+func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID, userID uuid.UUID, refundDestination RefundDestination) (*models.Booking, error) {
 	booking, err := s.bookingRepo.GetByID(ctx, bookingID)
 	if err != nil {
 		return nil, err
@@ -408,7 +434,61 @@ func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID,
 		return nil, errors.New("booking is already cancelled or refunded")
 	}
 
-	return s.performCancellation(ctx, booking)
+	cancelled, err := s.performCancellation(ctx, booking)
+	if err != nil {
+		return nil, err
+	}
+
+	// If the user picked "refund to source", additionally chain a Razorpay
+	// refund of the funding top-up — money goes from their wallet back to the
+	// original card/UPI. Best-effort: if it fails (no eligible top-up, gateway
+	// rejection, etc.), the F4 wallet refund stands and the booking is still
+	// correctly cancelled — the user just keeps the money in their wallet.
+	if refundDestination == RefundDestinationSource {
+		s.tryChainSourceRefundOnCancel(ctx, cancelled)
+	}
+	return cancelled, nil
+}
+
+// tryChainSourceRefundOnCancel attempts to source-refund the booking amount
+// against the user's most-recent refundable top-up. Best-effort — any failure
+// is logged and ignored; the booking-cancel + wallet-credit already committed
+// so the user is whole either way.
+//
+// Lot selection is LIFO (newest top-up first), matching the policy documented
+// in skill flows.md §11 / bugs-and-risks.md F7.
+func (s *bookingService) tryChainSourceRefundOnCancel(ctx context.Context, b *models.Booking) {
+	if b == nil || b.AmountCents == nil || *b.AmountCents <= 0 {
+		return // free booking — nothing to source-refund
+	}
+	if s.userService == nil {
+		fmt.Printf("[CANCEL/SOURCE] userService not wired — skipping source refund for booking %s\n", b.ID)
+		return
+	}
+	amountCents := *b.AmountCents
+
+	userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, b.UserID)
+	if err != nil || userAccount == nil {
+		fmt.Printf("[CANCEL/SOURCE] user account lookup failed for %s: %v — keeping wallet refund\n", b.UserID, err)
+		return
+	}
+	topup, err := s.paymentRepo.FindMostRecentRefundableTopup(ctx, userAccount.ID, amountCents)
+	if err != nil {
+		fmt.Printf("[CANCEL/SOURCE] top-up lookup error for user %s: %v — keeping wallet refund\n", b.UserID, err)
+		return
+	}
+	if topup == nil {
+		fmt.Printf("[CANCEL/SOURCE] no refundable top-up for user %s with >= %d cents headroom — keeping wallet refund\n", b.UserID, amountCents)
+		return
+	}
+
+	if _, err := s.userService.RefundTopUpToSource(ctx, topup.ID, SourceRefundRequest{
+		AmountCents:    amountCents,
+		Reason:         fmt.Sprintf("User-requested source refund on booking cancellation %s", b.ID),
+		IdempotencyKey: "source_refund_" + b.ID.String(),
+	}); err != nil {
+		fmt.Printf("[CANCEL/SOURCE] source refund failed for booking %s (top-up %s): %v — wallet refund retained\n", b.ID, topup.ID, err)
+	}
 }
 
 func (s *bookingService) CancelBookingByHost(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error) {
@@ -427,53 +507,228 @@ func (s *bookingService) CancelBookingByHost(ctx context.Context, bookingID uuid
 	return s.performCancellation(ctx, booking)
 }
 
+// performCancellation cancels a booking and reverses its money movements.
+//
+// It reverses the booking's effect through the transaction ledger so that
+// accounts.balance_cents stays in sync with SUM(transaction_ledger) — the
+// previous implementation moved balances directly with no ledger entries,
+// which permanently drifted the ledger (bug H2).
+//
+// The four reversal effects:
+//   - user:     refund_credit  (+amount)   ledger entry + wallet credit
+//   - host:     cancellation_debit (-net)  ledger entry; host_earnings reduced
+//   - platform: cancellation_debit (-fee)  ledger entry
+//   - the original `booking` payment row is marked `reversed`
+//
+// Host/platform accounts.balance_cents are intentionally NOT touched: the
+// booking flow never credits them (host money lives in host_earnings), so
+// debiting them here would only recreate drift. See bugs-and-risks.md "3c".
+//
+// All writes run on one *sql.Tx and commit together, or roll back together —
+// a crash or error mid-way leaves the booking entirely uncancelled rather than
+// in a partial state.
 func (s *bookingService) performCancellation(ctx context.Context, booking *models.Booking) (*models.Booking, error) {
 	now := time.Now()
 
-	// 1. Update booking status
-	if err := s.bookingRepo.UpdateStatus(ctx, booking.ID, models.BookingStatusCancelled); err != nil {
-		return nil, err
+	amountCents := int64(0)
+	if booking.AmountCents != nil {
+		amountCents = *booking.AmountCents
 	}
-	booking.Status = models.BookingStatusCancelled
+	netEarningCents := int64(0)
+	if booking.NetEarningCents != nil {
+		netEarningCents = *booking.NetEarningCents
+	}
+	serviceFeeCents := int64(0)
+	if booking.ServiceFeeCents != nil {
+		serviceFeeCents = *booking.ServiceFeeCents
+	}
+	isRefund := amountCents > 0
+
+	// A paid cancellation becomes `refunded`; a free booking becomes `cancelled`.
+	finalStatus := models.BookingStatusCancelled
+	if isRefund {
+		finalStatus = models.BookingStatusRefunded
+	}
+
+	// ── Read-only lookups — done before the transaction opens ────────────
+	var userAccount *models.Account
+	if isRefund {
+		ua, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, booking.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("cancel: load user account: %w", err)
+		}
+		if ua == nil {
+			return nil, errors.New("cancel: user account not found")
+		}
+		userAccount = ua
+	}
+
+	var hostID uuid.UUID
+	var hostAccount *models.Account
+	if netEarningCents > 0 {
+		evt, err := s.eventRepo.GetByID(ctx, booking.EventID)
+		if err != nil {
+			return nil, fmt.Errorf("cancel: load event: %w", err)
+		}
+		if evt != nil {
+			hostID = evt.HostID
+			ha, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerHost, evt.HostID)
+			if err != nil {
+				return nil, fmt.Errorf("cancel: load host account: %w", err)
+			}
+			hostAccount = ha
+		}
+	}
+
+	var platformAccount *models.Account
+	if serviceFeeCents > 0 {
+		pa, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerPlatform, uuid.Nil)
+		if err != nil {
+			return nil, fmt.Errorf("cancel: load platform account: %w", err)
+		}
+		platformAccount = pa
+	}
+
+	// ── Transaction — everything below commits all-or-nothing ────────────
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cancel: begin transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	ledgerTx := s.ledgerRepo.WithTx(tx)
+	accountTx := s.accountRepo.WithTx(tx)
+	bookingTx := s.bookingRepo.WithTx(tx)
+	paymentTx := s.paymentRepo.WithTx(tx)
+	payoutTx := s.payoutRepo.WithTx(tx)
+
+	// ── User refund ──────────────────────────────────────────────────────
+	if isRefund {
+		// Idempotency guard: one refund_credit ledger entry per booking. If it
+		// already exists, this booking was already refunded — abort rather than
+		// refund twice. (The ledger's UNIQUE(idempotency_key) is the hard guard;
+		// this check just yields a friendlier error.)
+		refundLedgerKey := "refund_credit_" + booking.ID.String()
+		if existing, err := ledgerTx.GetByIdempotencyKey(ctx, refundLedgerKey); err != nil {
+			return nil, fmt.Errorf("cancel: refund idempotency check: %w", err)
+		} else if existing != nil {
+			return nil, errors.New("booking has already been refunded")
+		}
+
+		if _, err := ledgerTx.Create(ctx, &models.TransactionLedger{
+			ID:             uuid.New(),
+			AccountID:      userAccount.ID,
+			Type:           models.LedgerTypeRefundCredit,
+			AmountCents:    amountCents, // POSITIVE = money back into the user's wallet
+			ReferenceID:    &booking.ID,
+			ReferenceType:  strPtr("booking"),
+			IdempotencyKey: &refundLedgerKey,
+			Description:    strPtr("Refund for cancelled booking"),
+			Status:         models.LedgerStatusCompleted,
+			CreatedAt:      time.Now(),
+			CreatedBy:      &booking.UserID,
+		}); err != nil {
+			return nil, fmt.Errorf("cancel: write refund ledger entry: %w", err)
+		}
+
+		if err := accountTx.Credit(ctx, userAccount.ID, amountCents); err != nil {
+			return nil, fmt.Errorf("cancel: credit user wallet: %w", err)
+		}
+
+		refundKey := fmt.Sprintf("refund_%s", booking.ID)
+		displayRef := fmt.Sprintf("RF-%05d", time.Now().UnixMilli()%100000)
+		if err := paymentTx.Create(ctx, &models.Payment{
+			ID:               uuid.New(),
+			IdempotencyKey:   refundKey,
+			AccountID:        userAccount.ID,
+			Type:             models.PaymentTypeRefund,
+			ReferenceID:      &booking.ID,
+			AmountCents:      amountCents,
+			Status:           models.PaymentStatusCompleted,
+			DisplayReference: &displayRef,
+			CreatedAt:        time.Now(),
+			UpdatedAt:        time.Now(),
+		}); err != nil {
+			return nil, fmt.Errorf("cancel: create refund payment record: %w", err)
+		}
+	}
+
+	// ── Mark the booking ─────────────────────────────────────────────────
+	if err := bookingTx.UpdateStatus(ctx, booking.ID, finalStatus); err != nil {
+		return nil, fmt.Errorf("cancel: update booking status: %w", err)
+	}
+
+	// ── Reverse the host side ────────────────────────────────────────────
+	if netEarningCents > 0 && hostAccount != nil {
+		cancelLedgerKey := "cancellation_debit_" + booking.ID.String()
+		if _, err := ledgerTx.Create(ctx, &models.TransactionLedger{
+			ID:             uuid.New(),
+			AccountID:      hostAccount.ID,
+			Type:           models.LedgerTypeCancellationDebit,
+			AmountCents:    -netEarningCents, // NEGATIVE = host earning reversed
+			ReferenceID:    &booking.ID,
+			ReferenceType:  strPtr("booking"),
+			IdempotencyKey: &cancelLedgerKey,
+			Description:    strPtr("Host earning reversed — booking cancelled"),
+			Status:         models.LedgerStatusCompleted,
+			CreatedAt:      time.Now(),
+		}); err != nil {
+			return nil, fmt.Errorf("cancel: write host cancellation ledger entry: %w", err)
+		}
+	}
+	if netEarningCents > 0 && hostID != uuid.Nil {
+		// Reduce both the pending clearance and the lifetime earnings total.
+		if err := payoutTx.ClearPending(ctx, hostID, netEarningCents); err != nil {
+			return nil, fmt.Errorf("cancel: clear host pending clearance: %w", err)
+		}
+		if err := payoutTx.DecrementEarnings(ctx, hostID, netEarningCents); err != nil {
+			return nil, fmt.Errorf("cancel: decrement host earnings: %w", err)
+		}
+	}
+
+	// ── Reverse the platform commission ──────────────────────────────────
+	// With the user fully refunded and the host earning reversed, this leaves
+	// the cancelled booking with a net-zero footprint across the ledger.
+	if serviceFeeCents > 0 && platformAccount != nil {
+		platformCancelKey := "cancellation_platform_" + booking.ID.String()
+		if _, err := ledgerTx.Create(ctx, &models.TransactionLedger{
+			ID:             uuid.New(),
+			AccountID:      platformAccount.ID,
+			Type:           models.LedgerTypeCancellationDebit,
+			AmountCents:    -serviceFeeCents, // NEGATIVE = platform commission reversed
+			ReferenceID:    &booking.ID,
+			ReferenceType:  strPtr("booking"),
+			IdempotencyKey: &platformCancelKey,
+			Description:    strPtr("Platform commission reversed — booking cancelled"),
+			Status:         models.LedgerStatusCompleted,
+			CreatedAt:      time.Now(),
+		}); err != nil {
+			return nil, fmt.Errorf("cancel: write platform cancellation ledger entry: %w", err)
+		}
+	}
+
+	// ── Reverse the original booking payment record ──────────────────────
+	if bookingPayment, err := paymentTx.GetByReferenceAndType(ctx, booking.ID, models.PaymentTypeBooking); err != nil {
+		return nil, fmt.Errorf("cancel: load booking payment: %w", err)
+	} else if bookingPayment != nil && bookingPayment.Status != models.PaymentStatusReversed {
+		if err := paymentTx.UpdateStatus(ctx, bookingPayment.ID, models.PaymentStatusReversed, nil); err != nil {
+			return nil, fmt.Errorf("cancel: reverse booking payment: %w", err)
+		}
+	}
+
+	// ── Commit ───────────────────────────────────────────────────────────
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("cancel: commit transaction: %w", err)
+	}
+	committed = true
+
+	booking.Status = finalStatus
 	booking.CancelledAt = &now
-
-	// 2. Refund user wallet
-	if booking.AmountCents != nil && *booking.AmountCents > 0 {
-		userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, booking.UserID)
-		if err == nil && userAccount != nil {
-			_ = s.accountRepo.Credit(ctx, userAccount.ID, *booking.AmountCents)
-
-			// Create refund payment record
-			refundKey := fmt.Sprintf("refund_%s", booking.ID)
-			displayRef := fmt.Sprintf("RF-%05d", time.Now().UnixMilli()%100000)
-			refundPayment := &models.Payment{
-				ID:               uuid.New(),
-				IdempotencyKey:   refundKey,
-				AccountID:        userAccount.ID,
-				Type:             models.PaymentTypeRefund,
-				ReferenceID:      &booking.ID,
-				AmountCents:      *booking.AmountCents,
-				Status:           models.PaymentStatusCompleted,
-				DisplayReference: &displayRef,
-				CreatedAt:        time.Now(),
-				UpdatedAt:        time.Now(),
-			}
-			_ = s.paymentRepo.Create(ctx, refundPayment)
-		}
-
-		// 3. Debit host wallet for the net earning
-		if booking.NetEarningCents != nil && *booking.NetEarningCents > 0 {
-			evt, err := s.eventRepo.GetByID(ctx, booking.EventID)
-			if err == nil && evt != nil {
-				hostAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerHost, evt.HostID)
-				if err == nil && hostAccount != nil {
-					_ = s.accountRepo.Debit(ctx, hostAccount.ID, *booking.NetEarningCents)
-					_ = s.payoutRepo.ClearPending(ctx, evt.HostID, *booking.NetEarningCents)
-				}
-			}
-		}
-	}
-
 	s.dispatcher.Publish(event.BookingCancelled, booking)
 	return booking, nil
 }

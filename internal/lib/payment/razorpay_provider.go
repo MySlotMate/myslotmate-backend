@@ -140,3 +140,86 @@ func (p *RazorpayProvider) ValidateWebhookSignature(payload []byte, signature st
 func (p *RazorpayProvider) GetKeyID() string {
 	return p.cfg.KeyID
 }
+
+// razorpayCreateRefundReq is the body for POST /v1/payments/{id}/refund.
+type razorpayCreateRefundReq struct {
+	Amount int64             `json:"amount,omitempty"` // omit for full refund (we always send a value)
+	Speed  string            `json:"speed,omitempty"`  // "normal" (default) or "optimum"
+	Notes  map[string]string `json:"notes,omitempty"`
+}
+
+// razorpayRefundResp is the response from POST /v1/payments/{id}/refund.
+// Docs: https://razorpay.com/docs/api/refunds/#refund-entity
+type razorpayRefundResp struct {
+	ID        string `json:"id"`         // rfnd_xxxxx
+	Entity    string `json:"entity"`     // "refund"
+	Amount    int64  `json:"amount"`     // paise
+	Currency  string `json:"currency"`   // "INR"
+	PaymentID string `json:"payment_id"` // pay_xxxxx
+	Status    string `json:"status"`     // pending / processed / failed
+	Speed     string `json:"speed_requested"`
+	Error     *struct {
+		Code        string `json:"code"`
+		Description string `json:"description"`
+	} `json:"error,omitempty"`
+}
+
+// CreateRefund refunds a captured payment back to its original instrument.
+// Razorpay's API: POST /v1/payments/{payment_id}/refund — partial refunds
+// allowed as long as the sum across refunds does not exceed payment.amount.
+// The returned status is async; the final outcome arrives via the
+// `refund.processed` / `refund.failed` webhook.
+func (p *RazorpayProvider) CreateRefund(ctx context.Context, req RefundRequest) (*RefundResponse, error) {
+	if req.GatewayPaymentID == "" {
+		return nil, fmt.Errorf("refund: gateway_payment_id is required")
+	}
+	if req.AmountCents <= 0 {
+		return nil, fmt.Errorf("refund: amount must be positive")
+	}
+	speed := req.Speed
+	if speed == "" {
+		speed = "normal"
+	}
+
+	body, err := json.Marshal(razorpayCreateRefundReq{
+		Amount: req.AmountCents,
+		Speed:  speed,
+		Notes:  req.Notes,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("refund: marshal request: %w", err)
+	}
+
+	url := razorpayBaseURL + "/payments/" + req.GatewayPaymentID + "/refund"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("refund: build HTTP request: %w", err)
+	}
+	httpReq.SetBasicAuth(p.cfg.KeyID, p.cfg.KeySecret)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("refund: razorpay API call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("refund: read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("refund: razorpay API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var rr razorpayRefundResp
+	if err := json.Unmarshal(respBody, &rr); err != nil {
+		return nil, fmt.Errorf("refund: parse response: %w", err)
+	}
+
+	return &RefundResponse{
+		RefundID:    rr.ID,
+		AmountCents: rr.Amount,
+		Status:      rr.Status,
+	}, nil
+}

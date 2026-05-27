@@ -340,6 +340,43 @@ func (s *payoutService) RequestWithdrawal(ctx context.Context, hostID uuid.UUID,
 	}
 	fmt.Printf("[PAYOUT] Account found: accountID=%s, currentBalance=%d\n", account.ID, account.BalanceCents)
 
+	// 3b. Available-to-withdraw gate.
+	//
+	// The host's spendable balance is computed from host_earnings (where booking
+	// earnings live by design — see skill "3c"), minus any payouts already in
+	// flight or paid out. This closes two bugs at once:
+	//   C2  — withdrawing money the host doesn't have / withdrawing the same
+	//         balance repeatedly (the old code never debited anything).
+	//   "Case B" — withdrawing a booking's earning before the cancellation
+	//         window has passed (pending_clearance_cents holds that back).
+	//
+	// available = total_earnings − pending_clearance − active_payouts
+	// where active_payouts is the sum of payout/withdrawal payments whose
+	// status is pending / processing / completed.
+	earnings, err := s.payoutRepo.GetHostEarnings(ctx, hostID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load host earnings: %w", err)
+	}
+	if earnings == nil {
+		return nil, errors.New("host earnings record not found")
+	}
+	activePayouts, err := s.paymentRepo.SumActivePayoutAmountByAccount(ctx, account.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute active payouts: %w", err)
+	}
+	available := earnings.TotalEarningsCents - earnings.PendingClearanceCents - activePayouts
+	fmt.Printf("[PAYOUT] Available check: total=%d, pending=%d, in_flight=%d => available=%d, requested=%d\n",
+		earnings.TotalEarningsCents, earnings.PendingClearanceCents, activePayouts, available, req.AmountCents)
+	if available < 0 {
+		// Defensive — should never happen, but don't let a corrupted aggregate
+		// allow a withdrawal.
+		return nil, errors.New("withdrawable balance is negative; contact support")
+	}
+	if req.AmountCents > available {
+		return nil, fmt.Errorf("insufficient withdrawable balance: requested %d, available %d (cleared earnings minus payouts in flight)",
+			req.AmountCents, available)
+	}
+
 	// 4. Determine payout method
 	fmt.Printf("[PAYOUT] Selecting payout method\n")
 	var payoutMethod *models.PayoutMethod
@@ -483,14 +520,32 @@ func (s *payoutService) RequestWithdrawal(ctx context.Context, hostID uuid.UUID,
 	fmt.Printf("[PAYOUT] Calling provider: InitiateTransfer with amount=%d, method=%s\n", req.AmountCents, transferReq.MethodType)
 	resp, err := s.provider.InitiateTransfer(ctx, transferReq)
 	if err != nil {
-		fmt.Printf("[PAYOUT] Provider call failed: %v (rolling back debit)\n", err)
-		// Provider call failed — mark payment as failed, credit wallet back
+		fmt.Printf("[PAYOUT] Provider call failed: %v (marking failed + writing reversal ledger)\n", err)
+		// Provider call failed. IncrementRetry sets payment.status='failed', which
+		// drops this payment from the active-payouts sum — restoring the host's
+		// available balance automatically. NO accountRepo.Credit: nothing was
+		// debited (host money lives in host_earnings, not accounts.balance_cents
+		// — see skill "3c"); the old code's Credit here was a bug that inflated
+		// the host wallet by req.AmountCents on every failed payout.
 		errMsg := err.Error()
 		_ = s.paymentRepo.IncrementRetry(ctx, payment.ID, errMsg)
-		_ = s.accountRepo.Credit(ctx, account.ID, req.AmountCents)
+		// Balance the pending withdrawal_debit ledger entry with a reversal so
+		// SUM(ledger) for this account stays in line.
+		_, _ = s.ledgerRepo.Create(ctx, &models.TransactionLedger{
+			ID:                 uuid.New(),
+			AccountID:          account.ID,
+			Type:               models.LedgerTypeWebhookReversal,
+			AmountCents:        req.AmountCents,
+			ReferenceID:        &withdrawalLedger.ID,
+			ReferenceType:      strPtr("ledger"),
+			IdempotencyKey:     strPtr(fmt.Sprintf("%s_reversal", idempotencyKey)),
+			Description:        strPtr("Reversal - provider transfer initiation failed"),
+			Status:             models.LedgerStatusCompleted,
+			ReversalOfLedgerID: &withdrawalLedger.ID,
+			CreatedAt:          time.Now(),
+		})
 		payment.Status = models.PaymentStatusFailed
 		payment.LastError = &errMsg
-		fmt.Printf("[PAYOUT] Payment marked as FAILED and wallet reconciled\n")
 		return payment, nil
 	}
 
@@ -504,12 +559,27 @@ func (s *payoutService) RequestWithdrawal(ctx context.Context, hostID uuid.UUID,
 		s.dispatcher.Publish(event.PayoutCompleted, payment)
 		fmt.Printf("[PAYOUT] Payment finalized: paymentID=%s, amount=%d, status=COMPLETED\n", payment.ID, req.AmountCents)
 	} else if resp.Status == "failed" {
-		fmt.Printf("[PAYOUT] Payment failed by provider: %s (rolling back debit)\n", resp.Error)
+		fmt.Printf("[PAYOUT] Payment failed by provider: %s (marking failed + writing reversal ledger)\n", resp.Error)
+		// Same shape as the InitiateTransfer-error path above: failed payment
+		// drops out of active_payouts so available restores; NO accountRepo.Credit
+		// (nothing was debited — see "3c"); add a reversal ledger entry to keep
+		// SUM(ledger) for this account balanced.
 		_ = s.paymentRepo.IncrementRetry(ctx, payment.ID, resp.Error)
-		_ = s.accountRepo.Credit(ctx, account.ID, req.AmountCents)
+		_, _ = s.ledgerRepo.Create(ctx, &models.TransactionLedger{
+			ID:                 uuid.New(),
+			AccountID:          account.ID,
+			Type:               models.LedgerTypeWebhookReversal,
+			AmountCents:        req.AmountCents,
+			ReferenceID:        &withdrawalLedger.ID,
+			ReferenceType:      strPtr("ledger"),
+			IdempotencyKey:     strPtr(fmt.Sprintf("%s_reversal", idempotencyKey)),
+			Description:        strPtr("Reversal - provider reported transfer failed"),
+			Status:             models.LedgerStatusCompleted,
+			ReversalOfLedgerID: &withdrawalLedger.ID,
+			CreatedAt:          time.Now(),
+		})
 		payment.Status = models.PaymentStatusFailed
 		payment.LastError = &resp.Error
-		fmt.Printf("[PAYOUT] Payment marked as FAILED and wallet reconciled\n")
 	} else {
 		fmt.Printf("[PAYOUT] Payment status=%s - waiting for webhook update\n", resp.Status)
 	}

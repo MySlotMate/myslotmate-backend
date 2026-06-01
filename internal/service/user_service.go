@@ -411,16 +411,22 @@ func (s *userService) VerifyTopUp(ctx context.Context, userID uuid.UUID, req Ver
 		return &WalletBalanceResponse{AccountID: pmtRecord.AccountID, BalanceCents: balance}, nil
 	}
 
-	// 3. Credit the wallet.
-	if err := s.accountRepo.Credit(ctx, pmtRecord.AccountID, pmtRecord.AmountCents); err != nil {
-		return nil, fmt.Errorf("failed to credit wallet: %w", err)
+	// 3. Reserve the right to credit via a unique ledger entry. If another
+	//    path (a concurrent payment.captured webhook, or a replayed webhook)
+	//    has already credited, we skip the wallet Credit — preventing the C5
+	//    double-credit race.
+	reserved, err := s.reserveTopUpLedger(ctx, pmtRecord)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reserve top-up: %w", err)
+	}
+	if reserved {
+		if err := s.accountRepo.Credit(ctx, pmtRecord.AccountID, pmtRecord.AmountCents); err != nil {
+			return nil, fmt.Errorf("failed to credit wallet: %w", err)
+		}
 	}
 
-	// 3b. Record the top-up in the transaction ledger so the ledger stays in sync
-	// with accounts.balance_cents. Idempotent — see recordTopUpLedger.
-	s.recordTopUpLedger(ctx, pmtRecord)
-
-	// 4. Mark payment as completed and store the Razorpay payment ID.
+	// 4. Mark payment as completed and store the Razorpay payment ID. Safe to
+	//    do this even when reserved=false — it's an idempotent state transition.
 	gatewayPaymentID := req.RazorpayPaymentID
 	pmtRecord.Status = models.PaymentStatusCompleted
 	pmtRecord.GatewayPaymentID = &gatewayPaymentID
@@ -447,18 +453,24 @@ func (s *userService) CreditWalletFromWebhook(ctx context.Context, orderID strin
 		return errors.New("payment record not found for order")
 	}
 
-	// Already credited — nothing to do.
+	// Already credited — nothing to do. Cheap early-exit; the ledger reserve
+	// below is the actual atomic guard.
 	if pmtRecord.Status == models.PaymentStatusCompleted {
 		return nil
 	}
 
-	// Credit wallet.
-	if err := s.accountRepo.Credit(ctx, pmtRecord.AccountID, pmtRecord.AmountCents); err != nil {
-		return fmt.Errorf("failed to credit wallet via webhook: %w", err)
+	// Reserve via a unique ledger entry. If another path (the client
+	// VerifyTopUp, or a concurrent / replayed webhook) already credited, this
+	// returns reserved=false and we skip the wallet Credit — closing C5.
+	reserved, err := s.reserveTopUpLedger(ctx, pmtRecord)
+	if err != nil {
+		return fmt.Errorf("failed to reserve top-up: %w", err)
 	}
-
-	// Record the top-up in the transaction ledger. Idempotent — see recordTopUpLedger.
-	s.recordTopUpLedger(ctx, pmtRecord)
+	if reserved {
+		if err := s.accountRepo.Credit(ctx, pmtRecord.AccountID, pmtRecord.AmountCents); err != nil {
+			return fmt.Errorf("failed to credit wallet via webhook: %w", err)
+		}
+	}
 
 	pmtRecord.Status = models.PaymentStatusCompleted
 	pmtRecord.GatewayPaymentID = &razorpayPaymentID
@@ -468,16 +480,28 @@ func (s *userService) CreditWalletFromWebhook(ctx context.Context, orderID strin
 	return nil
 }
 
-// recordTopUpLedger writes a topup_credit entry to the transaction ledger for a
-// completed wallet top-up, keeping the ledger in sync with accounts.balance_cents.
-// It is idempotent: the idempotency key is derived from the payment ID, and the
-// ledger's UNIQUE(idempotency_key) constraint means a concurrent VerifyTopUp and
-// payment.captured webhook cannot create two entries for the same top-up.
-// Best-effort: the wallet is already credited, so a ledger failure (including the
-// expected duplicate-key when the other path won the race) is logged, not surfaced.
-func (s *userService) recordTopUpLedger(ctx context.Context, pmt *models.Payment) {
+// reserveTopUpLedger atomically claims the right to credit the wallet for a
+// completed top-up. The transaction_ledger UNIQUE(idempotency_key) constraint
+// means at most one caller can succeed; concurrent callers (the client
+// VerifyTopUp + a replayed payment.captured webhook + a second concurrent
+// webhook delivery — all the C5 race conditions) serialise on the INSERT.
+//
+// Returns:
+//   - reserved=true:  this call inserted the ledger entry. Caller MUST follow
+//     up with accountRepo.Credit.
+//   - reserved=false, err=nil: another path already inserted; the wallet has
+//     already been credited (or is being credited). Caller MUST NOT credit
+//     again — that's the C5 double-credit bug we're fixing.
+//   - reserved=false, err!=nil: some other DB error. Caller should bail.
+//
+// Order matters: the ledger entry is written BEFORE the wallet credit, so the
+// unique constraint is the actual lock. (Before this fix the wallet was
+// credited first and the ledger entry was written best-effort after; that
+// meant two concurrent callers could both reach Credit before either reached
+// Create, doubling the wallet balance.)
+func (s *userService) reserveTopUpLedger(ctx context.Context, pmt *models.Payment) (reserved bool, err error) {
 	key := "topup_ledger_" + pmt.ID.String()
-	if _, err := s.ledgerRepo.Create(ctx, &models.TransactionLedger{
+	_, err = s.ledgerRepo.Create(ctx, &models.TransactionLedger{
 		ID:             uuid.New(),
 		AccountID:      pmt.AccountID,
 		Type:           models.LedgerTypeTopupCredit,
@@ -488,9 +512,15 @@ func (s *userService) recordTopUpLedger(ctx context.Context, pmt *models.Payment
 		Description:    strPtr("Wallet top-up via payment gateway"),
 		Status:         models.LedgerStatusCompleted,
 		CreatedAt:      time.Now(),
-	}); err != nil {
-		fmt.Printf("[TOPUP] ledger entry not written for payment %s (ok if duplicate): %v\n", pmt.ID, err)
+	})
+	if err != nil {
+		if errors.Is(err, repository.ErrDuplicateKey) {
+			fmt.Printf("[TOPUP] reservation lost (another path already credited) for payment %s\n", pmt.ID)
+			return false, nil
+		}
+		return false, err
 	}
+	return true, nil
 }
 
 // RefundTopUpToSource initiates a Razorpay refund of a top-up payment back to

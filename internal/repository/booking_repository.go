@@ -31,8 +31,51 @@ type BookingRepository interface {
 	MarkWhatsappReminderNotificationSent(ctx context.Context, id uuid.UUID) error
 	ListPendingReminderNotifications(ctx context.Context, limit int) ([]*models.Booking, error)
 	GetOccupancyForEvents(ctx context.Context, eventIDs []uuid.UUID, since time.Time) (map[uuid.UUID]map[string]int, error)
+	// GetHostEarningsBreakdown computes the host's earnings from the bookings
+	// table — the authoritative source. Cancelled / refunded bookings are
+	// naturally excluded (status != 'confirmed'), so the result is already
+	// "lifetime net of refunds". Splits earnings by whether each booking's
+	// event has happened yet (`occurrence_date < NOW()`) for the available-vs-
+	// pending distinction.
+	GetHostEarningsBreakdown(ctx context.Context, hostID uuid.UUID) (*HostEarningsBreakdown, error)
+	// ListHostSales returns every booking made on any of this host's events,
+	// joined with the buyer (users) and event (events) for display in the
+	// earnings dashboard. Newest first. Includes cancelled / refunded bookings
+	// so the host can see the full picture. When fromDate is non-nil, only
+	// bookings created at or after that timestamp are returned.
+	ListHostSales(ctx context.Context, hostID uuid.UUID, limit, offset int, fromDate *time.Time) ([]*HostSale, error)
 	// WithTx returns a copy of the repository bound to the given transaction.
 	WithTx(tx *sql.Tx) BookingRepository
+}
+
+// HostEarningsBreakdown is the live, booking-derived view of a host's earnings,
+// used by the earnings dashboard and the withdrawal-availability gate.
+//
+//	TotalCents = EventPassedCents + EventUpcomingCents (always).
+type HostEarningsBreakdown struct {
+	TotalCents         int64 // lifetime net (refunds deducted)
+	EventPassedCents   int64 // confirmed bookings whose event has happened — eligible to withdraw
+	EventUpcomingCents int64 // confirmed bookings whose event is upcoming — locked
+}
+
+// HostSale is one booking row joined with its buyer + event, used by the
+// host's "Sales" panel — answers "who bought what for how much."
+type HostSale struct {
+	BookingID       uuid.UUID
+	EventID         uuid.UUID
+	EventTitle      string
+	BuyerUserID     uuid.UUID
+	BuyerName       string
+	BuyerEmail      string
+	BuyerAvatarURL  *string
+	OccurrenceDate  time.Time
+	Quantity        int
+	AmountCents     int64
+	NetEarningCents *int64 // host's share — nil for free bookings
+	ServiceFeeCents *int64
+	Status          models.BookingStatus
+	CreatedAt       time.Time
+	CancelledAt     *time.Time
 }
 
 type postgresBookingRepository struct {
@@ -45,6 +88,75 @@ func NewBookingRepository(db *sql.DB) BookingRepository {
 
 func (r *postgresBookingRepository) WithTx(tx *sql.Tx) BookingRepository {
 	return &postgresBookingRepository{db: tx}
+}
+
+func (r *postgresBookingRepository) ListHostSales(ctx context.Context, hostID uuid.UUID, limit, offset int, fromDate *time.Time) ([]*HostSale, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var fromArg sql.NullTime
+	if fromDate != nil {
+		fromArg = sql.NullTime{Time: *fromDate, Valid: true}
+	}
+	const query = `
+		SELECT
+			b.id,           b.event_id,     e.title,
+			b.user_id,      u.name,         u.email,         u.avatar_url,
+			b.occurrence_date, b.quantity,
+			b.amount_cents, b.net_earning_cents, b.service_fee_cents,
+			b.status,       b.created_at,   b.cancelled_at
+		FROM bookings b
+		JOIN events e ON e.id = b.event_id
+		JOIN users  u ON u.id = b.user_id
+		WHERE e.host_id = $1
+		  AND ($4::timestamptz IS NULL OR b.created_at >= $4)
+		ORDER BY b.created_at DESC
+		LIMIT $2 OFFSET $3`
+	rows, err := r.db.QueryContext(ctx, query, hostID, limit, offset, fromArg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sales []*HostSale
+	for rows.Next() {
+		s := &HostSale{}
+		var amount sql.NullInt64
+		if err := rows.Scan(
+			&s.BookingID, &s.EventID, &s.EventTitle,
+			&s.BuyerUserID, &s.BuyerName, &s.BuyerEmail, &s.BuyerAvatarURL,
+			&s.OccurrenceDate, &s.Quantity,
+			&amount, &s.NetEarningCents, &s.ServiceFeeCents,
+			&s.Status, &s.CreatedAt, &s.CancelledAt,
+		); err != nil {
+			return nil, err
+		}
+		if amount.Valid {
+			s.AmountCents = amount.Int64
+		}
+		sales = append(sales, s)
+	}
+	return sales, rows.Err()
+}
+
+func (r *postgresBookingRepository) GetHostEarningsBreakdown(ctx context.Context, hostID uuid.UUID) (*HostEarningsBreakdown, error) {
+	const query = `
+		SELECT
+			COALESCE(SUM(b.net_earning_cents), 0)::BIGINT AS total,
+			COALESCE(SUM(b.net_earning_cents) FILTER (WHERE b.occurrence_date <  NOW()), 0)::BIGINT AS event_passed,
+			COALESCE(SUM(b.net_earning_cents) FILTER (WHERE b.occurrence_date >= NOW()), 0)::BIGINT AS event_upcoming
+		FROM bookings b
+		JOIN events   e ON e.id = b.event_id
+		WHERE e.host_id = $1
+		  AND b.status  = 'confirmed'`
+	var b HostEarningsBreakdown
+	if err := r.db.QueryRowContext(ctx, query, hostID).Scan(&b.TotalCents, &b.EventPassedCents, &b.EventUpcomingCents); err != nil {
+		return nil, err
+	}
+	return &b, nil
 }
 
 // bookingColumns is the canonical column list for SELECT queries.

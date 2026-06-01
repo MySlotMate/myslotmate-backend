@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"myslotmate-backend/internal/models"
 	"time"
@@ -108,9 +107,11 @@ func (r *postgresTransactionLedgerRepository) Create(ctx context.Context, entry 
 	)
 
 	if err != nil {
-		// Check if unique constraint violation (idempotency)
+		// Unique-constraint violation on idempotency_key: another path raced
+		// us to insert this entry. Return a sentinel so callers can detect
+		// "already credited" and skip the side effect.
 		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
-			return nil, errors.New("idempotency key already exists")
+			return nil, ErrDuplicateKey
 		}
 		return nil, err
 	}
@@ -244,7 +245,17 @@ func (r *postgresTransactionLedgerRepository) RecordWebhookExecution(ctx context
 		exec.IdempotencyKey, exec.LedgerID, exec.Status, exec.ErrorMessage,
 		payloadJSON, exec.ReceivedAt, exec.ProcessedAt,
 	)
-	return err
+	if err != nil {
+		// Unique violation on (event_type, provider_id, external_event_id):
+		// this webhook (or its concurrent re-delivery) was already recorded.
+		// Caller treats this as "replay" and responds 200 OK without re-running
+		// side effects — see bug C5.
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			return ErrDuplicateWebhook
+		}
+		return err
+	}
+	return nil
 }
 
 // GetWebhookExecution retrieves a webhook record to check if already processed

@@ -14,6 +14,7 @@ const (
 	HostRejected         EventName = "host_rejected"
 	EventCreated         EventName = "event_created"
 	EventDeleted         EventName = "event_deleted"
+	EventCancelled       EventName = "event_cancelled"
 	BookingCreated       EventName = "booking_created"
 	BookingConfirmed     EventName = "booking_confirmed"
 	BookingCancelled     EventName = "booking_cancelled"

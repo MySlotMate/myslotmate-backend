@@ -81,6 +81,7 @@ func (c *EventController) RegisterRoutes(r chi.Router) {
 		r.Post("/{eventID}/publish", c.PublishEvent)
 		r.Post("/{eventID}/pause", c.PauseEvent)
 		r.Post("/{eventID}/resume", c.ResumeEvent)
+		r.Post("/{eventID}/cancel", c.CancelEvent)
 		r.Get("/{eventID}/attendees", c.GetEventAttendees)
 		r.Get("/{eventID}/availability", c.GetEventAvailability)
 		r.Get("/{eventID}/occurrences", c.GetEventOccurrencesForHost)
@@ -465,6 +466,34 @@ func (c *EventController) PauseEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	RespondSuccess(w, http.StatusOK, evt)
+}
+
+// CancelEvent — host-initiated soft cancel: refunds every upcoming confirmed
+// booking via F4 (CancelBookingByHost) and marks the event status=cancelled.
+// Past confirmed bookings are left alone (those attendees already attended).
+func (c *EventController) CancelEvent(w http.ResponseWriter, r *http.Request) {
+	eventID, err := uuid.Parse(chi.URLParam(r, "eventID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid event ID")
+		return
+	}
+	var body struct {
+		HostID uuid.UUID `json:"host_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	evt, err := c.eventService.CancelEvent(r.Context(), eventID, body.HostID)
+	if err != nil {
+		if err.Error() == "event not found" {
+			RespondError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	RespondSuccess(w, http.StatusOK, evt)
 }
 

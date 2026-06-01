@@ -20,6 +20,10 @@ type EventService interface {
 	CreateEvent(ctx context.Context, hostID uuid.UUID, req EventCreateRequest) (*models.Event, error)
 	UpdateEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID, req EventUpdateRequest) (*models.Event, error)
 	DeleteEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) error
+	// CancelEvent soft-cancels an event: marks status=cancelled, refunds every
+	// upcoming confirmed booking via F4 (CancelBookingByHost), and leaves the
+	// event row in place for history. Returns the updated event.
+	CancelEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error)
 	GetEvent(ctx context.Context, eventID uuid.UUID) (*models.Event, error)
 	GetHostEvents(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error)
 	GetHostEventsFiltered(ctx context.Context, hostID uuid.UUID, status *models.EventStatus, search string, sortBy string, limit, offset int) ([]*models.Event, error)
@@ -286,6 +290,14 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 	return evt, nil
 }
 
+// DeleteEvent hard-deletes an event. Allowed only when there are no active
+// (pending/confirmed) bookings left — the host must CancelEvent first to
+// refund those, OR wait until every booking is in a terminal state. This
+// guard prevents the previous behavior where deleting an event with confirmed
+// bookings ran an ad-hoc refund loop that bypassed F4 — that path was
+// broken: it skipped host_earnings decrement, missed the host/platform
+// cancellation_debit ledger entries, didn't reverse the booking payment,
+// AND refunded past attendees too.
 func (s *eventService) DeleteEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) error {
 	evt, err := s.eventRepo.GetByID(ctx, eventID)
 	if err != nil {
@@ -298,83 +310,83 @@ func (s *eventService) DeleteEvent(ctx context.Context, eventID uuid.UUID, hostI
 		return errors.New("unauthorized: you do not own this event")
 	}
 
-	// Get all bookings for this event to refund users
 	bookings, err := s.bookingRepo.ListByEventID(ctx, eventID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch bookings for refund: %w", err)
+		return fmt.Errorf("failed to fetch bookings: %w", err)
+	}
+	var active int
+	for _, b := range bookings {
+		if b.Status == models.BookingStatusPending || b.Status == models.BookingStatusConfirmed {
+			active++
+		}
+	}
+	if active > 0 {
+		return fmt.Errorf("cannot delete event: %d active booking(s) — cancel the event first so attendees are refunded, then delete it", active)
 	}
 
-	// Process refunds for each booking
-	for _, booking := range bookings {
-		// Skip if already cancelled or refunded
-		if booking.Status == models.BookingStatusCancelled || booking.Status == models.BookingStatusRefunded {
-			continue
-		}
-
-		// Refund amount should equal the original booking amount
-		refundAmount := int64(0)
-		if booking.AmountCents != nil {
-			refundAmount = *booking.AmountCents
-		}
-
-		if refundAmount <= 0 {
-			break // Skip bookings with no amount to refund
-		}
-
-		// 1. Get or create user account
-		userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, booking.UserID)
-		if err != nil {
-			fmt.Printf("[REFUND] Failed to fetch user account for user %s: %v\n", booking.UserID, err)
-			continue
-		}
-
-		if userAccount == nil {
-			fmt.Printf("[REFUND] User account not found for user %s (booking %s), skipping\n", booking.UserID, booking.ID)
-			continue
-		}
-
-		// 2. Create refund ledger entry (credit user's account)
-		now := time.Now()
-		refundLedger := &models.TransactionLedger{
-			ID:            uuid.New(),
-			AccountID:     userAccount.ID,
-			Type:          models.LedgerTypeRefundCredit,
-			AmountCents:   refundAmount, // Positive = credit
-			ReferenceID:   &booking.ID,
-			ReferenceType: strPtr("booking"),
-			Description:   strPtr(fmt.Sprintf("Event cancelled by host. Full refund for booking %s", booking.ID)),
-			Status:        models.LedgerStatusCompleted,
-			CreatedAt:     now,
-		}
-
-		_, err = s.ledgerRepo.Create(ctx, refundLedger)
-		if err != nil {
-			fmt.Printf("[REFUND] Failed to create refund ledger entry for booking %s: %v\n", booking.ID, err)
-			continue
-		}
-
-		// 3. Update user account balance (credit the refund amount)
-		if err := s.accountRepo.Credit(ctx, userAccount.ID, refundAmount); err != nil {
-			fmt.Printf("[REFUND] Failed to credit user account for booking %s: %v\n", booking.ID, err)
-			continue
-		}
-
-		// 4. Update booking status to refunded
-		if err := s.bookingRepo.UpdateStatus(ctx, booking.ID, models.BookingStatusRefunded); err != nil {
-			fmt.Printf("[REFUND] Failed to update booking status to refunded for booking %s: %v\n", booking.ID, err)
-		}
-
-		fmt.Printf("[REFUND] Successfully refunded %d cents to user %s for booking %s\n", refundAmount, booking.UserID, booking.ID)
-	}
-
-	// 5. Delete the event
 	if err := s.eventRepo.Delete(ctx, eventID); err != nil {
 		return err
 	}
-
 	s.dispatcher.Publish(event.EventDeleted, evt)
-	fmt.Printf("[EVENT] Event %s deleted successfully with all bookings refunded\n", eventID)
+	fmt.Printf("[EVENT] Event %s deleted (no active bookings)\n", eventID)
 	return nil
+}
+
+// CancelEvent marks the event cancelled and refunds every still-active booking
+// via the F4 path (CancelBookingByHost). Past confirmed bookings are LEFT AS
+// IS — those attendees already attended; refunding them would create money
+// out of thin air. Future / pending bookings get the full F4 treatment: user
+// wallet credited, host_earnings decremented, host + platform cancellation_debit
+// ledger entries written, original booking payment reversed.
+func (s *eventService) CancelEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error) {
+	evt, err := s.eventRepo.GetByID(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	if evt == nil {
+		return nil, errors.New("event not found")
+	}
+	if evt.HostID != hostID {
+		return nil, errors.New("unauthorized: you do not own this event")
+	}
+
+	bookings, err := s.bookingRepo.ListByEventID(ctx, eventID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch bookings: %w", err)
+	}
+
+	now := time.Now()
+	var refunded, skippedPast, errs int
+	for _, b := range bookings {
+		if b.Status != models.BookingStatusPending && b.Status != models.BookingStatusConfirmed {
+			continue
+		}
+		// Past confirmed bookings — attendees already showed up. Do NOT refund.
+		if b.OccurrenceDate.Before(now) {
+			skippedPast++
+			fmt.Printf("[EVENT CANCEL] booking %s skipped (event occurrence %s is in the past)\n", b.ID, b.OccurrenceDate)
+			continue
+		}
+		if _, err := s.bookingService.CancelBookingByHost(ctx, b.ID); err != nil {
+			errs++
+			fmt.Printf("[EVENT CANCEL] booking %s refund failed: %v\n", b.ID, err)
+			continue
+		}
+		refunded++
+	}
+	if errs > 0 {
+		// Surface as error so the host knows some refunds didn't go through.
+		// They can retry the cancel — the F4 idempotency keys make it safe.
+		return nil, fmt.Errorf("event cancel: %d refund(s) succeeded, %d failed; retry the cancel — F4 is idempotent", refunded, errs)
+	}
+
+	if err := s.eventRepo.UpdateStatus(ctx, eventID, models.EventStatusCancelled); err != nil {
+		return nil, fmt.Errorf("failed to mark event cancelled: %w", err)
+	}
+	evt.Status = models.EventStatusCancelled
+	s.dispatcher.Publish(event.EventCancelled, evt)
+	fmt.Printf("[EVENT CANCEL] event=%s refunded=%d skipped_past=%d\n", eventID, refunded, skippedPast)
+	return evt, nil
 }
 
 func (s *eventService) GetEvent(ctx context.Context, eventID uuid.UUID) (*models.Event, error) {

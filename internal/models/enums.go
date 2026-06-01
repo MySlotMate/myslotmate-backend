@@ -89,9 +89,10 @@ const (
 type EventStatus string
 
 const (
-	EventStatusDraft  EventStatus = "draft"
-	EventStatusLive   EventStatus = "live"
-	EventStatusPaused EventStatus = "paused"
+	EventStatusDraft     EventStatus = "draft"
+	EventStatusLive      EventStatus = "live"
+	EventStatusPaused    EventStatus = "paused"
+	EventStatusCancelled EventStatus = "cancelled" // host pulled the event; all upcoming bookings refunded via F4
 )
 
 // EventMood is the mood/category tag for an experience.

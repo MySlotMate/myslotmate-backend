@@ -187,7 +187,7 @@ func main() {
 	reviewService := service.NewReviewService(reviewRepo, eventRepo, hostRepo, dispatcher)
 	inboxService := service.NewInboxService(inboxRepo, eventRepo, socketService)
 	supportService := service.NewSupportService(supportRepo)
-	payoutService := service.NewPayoutService(payoutRepo, accountRepo, paymentRepo, hostRepo, ledgerRepo, payoutProvider, dispatcher)
+	payoutService := service.NewPayoutService(payoutRepo, accountRepo, paymentRepo, bookingRepo, hostRepo, ledgerRepo, payoutProvider, dispatcher)
 
 	// Initialize reminder scheduler
 	var reminderScheduler *notification.ReminderScheduler

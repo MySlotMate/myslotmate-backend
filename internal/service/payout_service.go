@@ -28,6 +28,7 @@ type PayoutService interface {
 
 	// Earnings Dashboard (Host)
 	GetEarningsSummary(ctx context.Context, hostID uuid.UUID) (*EarningsSummary, error)
+	GetHostSales(ctx context.Context, hostID uuid.UUID, limit, offset int, fromDate *time.Time) ([]*repository.HostSale, error)
 
 	// Payment History (Host)
 	GetPayoutHistory(ctx context.Context, hostID uuid.UUID, limit, offset int) ([]*models.Payment, error)
@@ -66,12 +67,34 @@ type WithdrawalRequest struct {
 	IdempotencyKey string
 }
 
+// EarningsSummary is the host-facing earnings + balance view, computed live
+// from the bookings table (the authoritative source) and the payments table
+// (for in-flight withdrawals). The numbers always satisfy:
+//
+//	TotalEarningsCents     = PendingClearanceCents + AvailableBalanceCents + InFlightPayoutsCents
+//	CurrentBalanceCents    = TotalEarningsCents - InFlightPayoutsCents
+//	                       = PendingClearanceCents + AvailableBalanceCents
+//
+// Tab 1 ("Earnings") usually shows TotalEarningsCents + AvailableBalanceCents.
+// Tab 2 ("Balance")  usually shows CurrentBalanceCents + PendingClearanceCents.
 type EarningsSummary struct {
-	AvailableBalanceCents int64                     `json:"available_balance_cents"`
-	TotalEarningsCents    int64                     `json:"total_earnings_cents"`
-	PendingClearanceCents int64                     `json:"pending_clearance_cents"`
-	EstimatedClearanceAt  *time.Time                `json:"estimated_clearance_at,omitempty"`
-	PlatformFee           *models.PlatformFeeConfig `json:"platform_fee"`
+	// Lifetime net earnings (refunds / cancellations already deducted —
+	// only confirmed bookings count).
+	TotalEarningsCents int64 `json:"total_earnings_cents"`
+	// Earnings ready to withdraw right now: confirmed bookings whose event
+	// has already happened, minus payouts already in flight or completed.
+	AvailableBalanceCents int64 `json:"available_balance_cents"`
+	// Earnings still locked because the event has not happened yet.
+	PendingClearanceCents int64 `json:"pending_clearance_cents"`
+	// Total still owed to the host (Pending + Available) — i.e. the
+	// lifetime net minus what's been paid out.
+	CurrentBalanceCents int64 `json:"current_balance_cents"`
+	// Amount currently in flight or already paid out (status pending /
+	// processing / completed on payout-type payments).
+	InFlightPayoutsCents int64 `json:"in_flight_payouts_cents"`
+
+	EstimatedClearanceAt *time.Time                `json:"estimated_clearance_at,omitempty"`
+	PlatformFee          *models.PlatformFeeConfig `json:"platform_fee"`
 }
 
 type PlatformBalanceInfo struct {
@@ -86,6 +109,7 @@ type payoutService struct {
 	payoutRepo  repository.PayoutRepository
 	accountRepo repository.AccountRepository
 	paymentRepo repository.PaymentRepository
+	bookingRepo repository.BookingRepository
 	hostRepo    repository.HostRepository
 	ledgerRepo  repository.TransactionLedgerRepository
 	provider    payout.Provider
@@ -96,6 +120,7 @@ func NewPayoutService(
 	pr repository.PayoutRepository,
 	ar repository.AccountRepository,
 	pmr repository.PaymentRepository,
+	br repository.BookingRepository,
 	hr repository.HostRepository,
 	lr repository.TransactionLedgerRepository,
 	provider payout.Provider,
@@ -105,6 +130,7 @@ func NewPayoutService(
 		payoutRepo:  pr,
 		accountRepo: ar,
 		paymentRepo: pmr,
+		bookingRepo: br,
 		hostRepo:    hr,
 		ledgerRepo:  lr,
 		provider:    provider,
@@ -350,31 +376,30 @@ func (s *payoutService) RequestWithdrawal(ctx context.Context, hostID uuid.UUID,
 	//   "Case B" — withdrawing a booking's earning before the cancellation
 	//         window has passed (pending_clearance_cents holds that back).
 	//
-	// available = total_earnings − pending_clearance − active_payouts
-	// where active_payouts is the sum of payout/withdrawal payments whose
-	// status is pending / processing / completed.
-	earnings, err := s.payoutRepo.GetHostEarnings(ctx, hostID)
+	// available = event_passed_earnings − active_payouts
+	// where event_passed_earnings is the sum of net_earning_cents on confirmed
+	// bookings whose occurrence_date < now() (computed live from the bookings
+	// table — single source of truth), and active_payouts is the sum of
+	// payout/withdrawal payments whose status is pending / processing / completed.
+	breakdown, err := s.bookingRepo.GetHostEarningsBreakdown(ctx, hostID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load host earnings: %w", err)
-	}
-	if earnings == nil {
-		return nil, errors.New("host earnings record not found")
+		return nil, fmt.Errorf("failed to compute earnings breakdown: %w", err)
 	}
 	activePayouts, err := s.paymentRepo.SumActivePayoutAmountByAccount(ctx, account.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute active payouts: %w", err)
 	}
-	available := earnings.TotalEarningsCents - earnings.PendingClearanceCents - activePayouts
-	fmt.Printf("[PAYOUT] Available check: total=%d, pending=%d, in_flight=%d => available=%d, requested=%d\n",
-		earnings.TotalEarningsCents, earnings.PendingClearanceCents, activePayouts, available, req.AmountCents)
+	available := breakdown.EventPassedCents - activePayouts
+	fmt.Printf("[PAYOUT] Available check: total=%d, event_passed=%d, event_upcoming=%d, in_flight=%d => available=%d, requested=%d\n",
+		breakdown.TotalCents, breakdown.EventPassedCents, breakdown.EventUpcomingCents, activePayouts, available, req.AmountCents)
 	if available < 0 {
 		// Defensive — should never happen, but don't let a corrupted aggregate
 		// allow a withdrawal.
 		return nil, errors.New("withdrawable balance is negative; contact support")
 	}
 	if req.AmountCents > available {
-		return nil, fmt.Errorf("insufficient withdrawable balance: requested %d, available %d (cleared earnings minus payouts in flight)",
-			req.AmountCents, available)
+		return nil, fmt.Errorf("insufficient withdrawable balance: requested %d, available %d (event-passed earnings minus payouts in flight; pending %d will unlock as events occur)",
+			req.AmountCents, available, breakdown.EventUpcomingCents)
 	}
 
 	// 4. Determine payout method
@@ -594,53 +619,74 @@ func (s *payoutService) RequestWithdrawal(ctx context.Context, hostID uuid.UUID,
 func (s *payoutService) GetEarningsSummary(ctx context.Context, hostID uuid.UUID) (*EarningsSummary, error) {
 	fmt.Printf("[PAYOUT] GetEarningsSummary: hostID=%s\n", hostID)
 
-	// Get host account balance
+	// Need the host account ID to scope the in-flight-payouts sum.
 	account, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerHost, hostID)
 	if err != nil {
-		fmt.Printf("[PAYOUT] GetEarningsSummary: account fetch error: %v\n", err)
-		return nil, err
+		return nil, fmt.Errorf("load host account: %w", err)
 	}
 	if account == nil {
-		fmt.Printf("[PAYOUT] GetEarningsSummary: host account not found\n")
 		return nil, errors.New("host account not found")
 	}
-	fmt.Printf("[PAYOUT] GetEarningsSummary: account found - accountID=%s, balance=%d\n", account.ID, account.BalanceCents)
 
-	// Get host earnings aggregate
-	earnings, err := s.payoutRepo.GetHostEarnings(ctx, hostID)
+	// Live breakdown from the bookings table — the single source of truth.
+	// Cancelled / refunded bookings are naturally excluded.
+	breakdown, err := s.bookingRepo.GetHostEarningsBreakdown(ctx, hostID)
 	if err != nil {
-		fmt.Printf("[PAYOUT] GetEarningsSummary: earnings fetch error: %v\n", err)
-		return nil, err
+		return nil, fmt.Errorf("compute earnings breakdown: %w", err)
 	}
 
-	// Get platform fee config
+	// Amount paid out or in flight (pending / processing / completed payouts).
+	inFlight, err := s.paymentRepo.SumActivePayoutAmountByAccount(ctx, account.ID)
+	if err != nil {
+		return nil, fmt.Errorf("sum active payouts: %w", err)
+	}
+
+	// Earnings still owed to host = lifetime − paid out.
+	currentBalance := breakdown.TotalCents - inFlight
+	if currentBalance < 0 {
+		currentBalance = 0
+	}
+	// Withdrawable right now = event-passed earnings − payouts already made.
+	available := breakdown.EventPassedCents - inFlight
+	if available < 0 {
+		available = 0
+	}
+
 	feeConfig, err := s.payoutRepo.GetPlatformFeeConfig(ctx)
 	if err != nil {
-		fmt.Printf("[PAYOUT] GetEarningsSummary: fee config fetch error: %v\n", err)
-		return nil, err
+		return nil, fmt.Errorf("load platform fee config: %w", err)
+	}
+
+	// host_earnings aggregate is kept for legacy /  back-compat reads; the
+	// authoritative numbers come from the bookings breakdown above.
+	var estimatedClearanceAt *time.Time
+	if earnings, _ := s.payoutRepo.GetHostEarnings(ctx, hostID); earnings != nil {
+		estimatedClearanceAt = earnings.EstimatedClearanceAt
 	}
 
 	summary := &EarningsSummary{
-		AvailableBalanceCents: account.BalanceCents,
+		TotalEarningsCents:    breakdown.TotalCents,
+		AvailableBalanceCents: available,
+		PendingClearanceCents: breakdown.EventUpcomingCents,
+		CurrentBalanceCents:   currentBalance,
+		InFlightPayoutsCents:  inFlight,
+		EstimatedClearanceAt:  estimatedClearanceAt,
 		PlatformFee:           feeConfig,
 	}
-
-	if earnings != nil {
-		summary.TotalEarningsCents = earnings.TotalEarningsCents
-		summary.PendingClearanceCents = earnings.PendingClearanceCents
-		summary.EstimatedClearanceAt = earnings.EstimatedClearanceAt
-		fmt.Printf("[PAYOUT] GetEarningsSummary: earnings - total=%d, pending=%d, clearanceAt=%v\n",
-			earnings.TotalEarningsCents, earnings.PendingClearanceCents, earnings.EstimatedClearanceAt)
-	} else {
-		fmt.Printf("[PAYOUT] GetEarningsSummary: no earnings record found\n")
-	}
-
-	fmt.Printf("[PAYOUT] GetEarningsSummary: returning summary - available=%d, total=%d, pending=%d\n",
-		summary.AvailableBalanceCents, summary.TotalEarningsCents, summary.PendingClearanceCents)
+	fmt.Printf("[PAYOUT] GetEarningsSummary: host=%s total=%d available=%d pending=%d current=%d inflight=%d\n",
+		hostID, summary.TotalEarningsCents, summary.AvailableBalanceCents,
+		summary.PendingClearanceCents, summary.CurrentBalanceCents, summary.InFlightPayoutsCents)
 	return summary, nil
 }
 
 // ── Payment History ─────────────────────────────────────────────────────────
+
+// GetHostSales lists every booking on this host's events — buyer + event +
+// amount + status — so the dashboard can show "where the ₹X came from."
+// `fromDate` is optional; pass nil for all time.
+func (s *payoutService) GetHostSales(ctx context.Context, hostID uuid.UUID, limit, offset int, fromDate *time.Time) ([]*repository.HostSale, error) {
+	return s.bookingRepo.ListHostSales(ctx, hostID, limit, offset, fromDate)
+}
 
 func (s *payoutService) GetPayoutHistory(ctx context.Context, hostID uuid.UUID, limit, offset int) ([]*models.Payment, error) {
 	fmt.Printf("[PAYOUT] GetPayoutHistory: hostID=%s, limit=%d, offset=%d\n", hostID, limit, offset)

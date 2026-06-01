@@ -433,6 +433,13 @@ func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID,
 	if booking.Status == models.BookingStatusCancelled || booking.Status == models.BookingStatusRefunded {
 		return nil, errors.New("booking is already cancelled or refunded")
 	}
+	// Guard: cannot cancel after the event has already happened. The buyer has
+	// either attended or missed the event; refunding now would create money out
+	// of thin air on the host's side. (Same reason CancelEvent skips past
+	// bookings — see eventService.CancelEvent.)
+	if booking.OccurrenceDate.Before(time.Now()) {
+		return nil, errors.New("this event has already happened — cancellation is no longer available")
+	}
 
 	cancelled, err := s.performCancellation(ctx, booking)
 	if err != nil {

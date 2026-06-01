@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	fbauth "firebase.google.com/go/v4/auth"
 
@@ -59,6 +60,9 @@ func (c *PayoutController) RegisterRoutes(r chi.Router) {
 
 		// Earnings
 		r.Get("/earnings/{hostID}", c.GetEarningsSummary)
+
+		// Sales — list of bookings on the host's events (buyer + event + amount)
+		r.Get("/sales", c.GetHostSales)
 
 		// Payout History
 		r.Get("/history/{hostID}", c.GetPayoutHistory)
@@ -244,6 +248,41 @@ func (c *PayoutController) GetEarningsSummary(w http.ResponseWriter, r *http.Req
 	}
 
 	RespondSuccess(w, http.StatusOK, summary)
+}
+
+// ── Sales (incoming bookings on host's events) ──────────────────────────────
+
+func (c *PayoutController) GetHostSales(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	limit := 50
+	offset := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+	// Optional `from_date` (RFC 3339) — default range for the UI is last 90d.
+	var fromDate *time.Time
+	if s := r.URL.Query().Get("from_date"); s != "" {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			fromDate = &t
+		}
+	}
+	sales, err := c.payoutService.GetHostSales(r.Context(), hostID, limit, offset, fromDate)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, sales)
 }
 
 // ── Payout History ──────────────────────────────────────────────────────────

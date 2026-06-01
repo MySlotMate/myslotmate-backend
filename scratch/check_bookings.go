@@ -1,3 +1,8 @@
+//go:build ignore
+
+// Standalone debug script. Excluded from the regular build (the `ignore` tag)
+// so the other scratch/*.go files can each declare their own `func main()`.
+// Run with: go run scratch/check_bookings.go
 package main
 
 import (

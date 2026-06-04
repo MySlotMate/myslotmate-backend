@@ -77,3 +77,38 @@ func IsAdmin(firebaseAuth *auth.Client, adminEmail string) func(http.Handler) ht
 		})
 	}
 }
+
+// RequireAdmin authorizes a request as admin via EITHER the static admin-dashboard
+// JWT (signed with jwtSecret) OR a Firebase ID token whose email is on the admin
+// allow-list. It is a superset of IsAdmin: the static token is tried first, and
+// any non-static bearer token falls through to the existing Firebase check.
+//
+// This lets the admin dashboard (which logs in with static credentials) reuse the
+// same admin endpoints as Firebase-authenticated admins.
+func RequireAdmin(firebaseAuth *auth.Client, adminEmail, jwtSecret string) func(http.Handler) http.Handler {
+	firebaseMiddleware := IsAdmin(firebaseAuth, adminEmail)
+
+	return func(next http.Handler) http.Handler {
+		firebaseHandler := firebaseMiddleware(next)
+
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Try the static admin session token first.
+			if jwtSecret != "" {
+				authHeader := r.Header.Get("Authorization")
+				token := strings.TrimPrefix(authHeader, "Bearer ")
+				if token != "" && token != authHeader {
+					if claims, err := ParseAdminToken(jwtSecret, token); err == nil {
+						ctx := context.WithValue(r.Context(), ContextKeyAdminUser, claims.Username)
+						ctx = context.WithValue(ctx, ContextKeyAdminRole, claims.Role)
+						ctx = context.WithValue(ctx, ContextKeyEmail, claims.Username)
+						next.ServeHTTP(w, r.WithContext(ctx))
+						return
+					}
+				}
+			}
+
+			// Fall back to Firebase admin verification.
+			firebaseHandler.ServeHTTP(w, r)
+		})
+	}
+}

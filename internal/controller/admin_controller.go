@@ -20,22 +20,24 @@ type AdminController struct {
 	userService   service.UserService
 	firebaseAuth  *fbauth.Client
 	adminEmail    string
+	jwtSecret     string
 }
 
-func NewAdminController(hs service.HostService, ps service.PayoutService, us service.UserService, fa *fbauth.Client, adminEmail string) *AdminController {
+func NewAdminController(hs service.HostService, ps service.PayoutService, us service.UserService, fa *fbauth.Client, adminEmail, jwtSecret string) *AdminController {
 	return &AdminController{
 		hostService:   hs,
 		payoutService: ps,
 		userService:   us,
 		firebaseAuth:  fa,
 		adminEmail:    adminEmail,
+		jwtSecret:     jwtSecret,
 	}
 }
 
 func (c *AdminController) RegisterRoutes(r chi.Router) {
 	r.Route("/admin/hosts", func(r chi.Router) {
-		// All routes in this group require admin authentication
-		r.Use(auth.IsAdmin(c.firebaseAuth, c.adminEmail))
+		// Accepts the static admin-dashboard token OR a Firebase admin token.
+		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 
 		r.Get("/applications", c.ListPendingApplications)
 		r.Post("/{hostID}/approve", c.ApproveApplication)
@@ -43,8 +45,8 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 	})
 
 	r.Route("/admin/platform", func(r chi.Router) {
-		// All routes in this group require admin authentication
-		r.Use(auth.IsAdmin(c.firebaseAuth, c.adminEmail))
+		// Accepts the static admin-dashboard token OR a Firebase admin token.
+		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 
 		r.Get("/balance", c.GetPlatformBalance)
 		r.Post("/payout-methods", c.AddAdminPayoutMethod)
@@ -59,7 +61,7 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		// customer's original card/UPI via the Razorpay Refunds API. The default
 		// refund (cancellation → wallet) is unchanged; this is the escape hatch
 		// for special cases (disputes, chargebacks, regulatory).
-		r.Use(auth.IsAdmin(c.firebaseAuth, c.adminEmail))
+		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 		r.Post("/{paymentID}/source-refund", c.RequestSourceRefund)
 	})
 }

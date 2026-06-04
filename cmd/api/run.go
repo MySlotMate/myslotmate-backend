@@ -206,7 +206,15 @@ func main() {
 	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider)
 	supportController := controller.NewSupportController(supportService, uploadService)
 	uploadController := controller.NewUploadController(uploadService)
-	adminController := controller.NewAdminController(hostService, payoutService, userService, fbApp.Auth, cfg.AdminEmail)
+	adminController := controller.NewAdminController(hostService, payoutService, userService, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
+	adminAuthController := controller.NewAdminAuthController(
+		cfg.AdminAuth.Username,
+		cfg.AdminAuth.Password,
+		cfg.AdminAuth.JWTSecret,
+		cfg.AdminAuth.TokenTTL,
+	)
+	adminDirectoryRepo := repository.NewAdminDirectoryRepository(dbConn)
+	adminDirectoryController := controller.NewAdminDirectoryController(adminDirectoryRepo, cfg.AdminAuth.JWTSecret)
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail)
 	experienceTemplateController := controller.NewExperienceTemplateController(experienceTemplateRepo)
 
@@ -241,6 +249,8 @@ func main() {
 		supportController,
 		uploadController,
 		adminController,
+		adminAuthController,
+		adminDirectoryController,
 		blogController,
 		experienceTemplateController,
 		ragChatCtrl,

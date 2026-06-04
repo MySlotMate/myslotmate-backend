@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -91,10 +92,21 @@ type PineconeConfig struct {
 	Environment string
 }
 
+// AdminAuthConfig holds credentials and signing settings for the static
+// admin-dashboard login. The dashboard authenticates with a fixed
+// username/password and receives a signed JWT used for subsequent requests.
+type AdminAuthConfig struct {
+	Username  string        // ADMIN_USERNAME — static login identifier (email or username)
+	Password  string        // ADMIN_PASSWORD — static login password
+	JWTSecret string        // ADMIN_JWT_SECRET — HMAC secret used to sign session tokens
+	TokenTTL  time.Duration // session token lifetime (from ADMIN_TOKEN_TTL_HOURS)
+}
+
 type Config struct {
 	HTTPPort          string
 	AdminEmail        string
 	RenderExternalURL string // RENDER_EXTERNAL_URL, used for self-ping keep-alive
+	AdminAuth         AdminAuthConfig
 	Firebase          FirebaseConfig
 	Database          DatabaseConfig
 	Aadhar            AadharConfig
@@ -117,6 +129,12 @@ func Load() (*Config, error) {
 		HTTPPort:          getEnv("HTTP_PORT", "8080"),
 		AdminEmail:        getEnv("ADMIN_EMAIL", ""),
 		RenderExternalURL: getEnv("RENDER_EXTERNAL_URL", ""),
+		AdminAuth: AdminAuthConfig{
+			Username:  getEnv("ADMIN_USERNAME", "admin@myslotmate.com"),
+			Password:  getEnv("ADMIN_PASSWORD", "Admin@12345"),
+			JWTSecret: getEnv("ADMIN_JWT_SECRET", "dev-insecure-admin-secret-change-me"),
+			TokenTTL:  time.Duration(parseEnvInt("ADMIN_TOKEN_TTL_HOURS", 12)) * time.Hour,
+		},
 		Firebase: FirebaseConfig{
 			CredentialsFile: getEnv("FIREBASE_CREDENTIALS_FILE", "config/firebase-service-account.json"),
 			ProjectID:       getEnv("FIREBASE_PROJECT_ID", "myslotmate-25994"),

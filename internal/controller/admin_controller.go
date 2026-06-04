@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/models"
@@ -42,6 +43,7 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Get("/applications", c.ListPendingApplications)
 		r.Post("/{hostID}/approve", c.ApproveApplication)
 		r.Post("/{hostID}/reject", c.RejectApplication)
+		r.Put("/{hostID}/application-status", c.UpdateApplicationStatus)
 	})
 
 	r.Route("/admin/platform", func(r chi.Router) {
@@ -115,6 +117,51 @@ func (c *AdminController) RejectApplication(w http.ResponseWriter, r *http.Reque
 	}
 
 	host, err := c.hostService.RejectApplication(r.Context(), hostID, req.Reason)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, host)
+}
+
+// UpdateApplicationStatusRequestBody is the payload for setting a host's
+// application status directly.
+type UpdateApplicationStatusRequestBody struct {
+	Status string `json:"status"`
+}
+
+// validHostApplicationStatuses maps accepted request values to enum values.
+var validHostApplicationStatuses = map[string]models.HostApplicationStatus{
+	"draft":        models.HostApplicationDraft,
+	"pending":      models.HostApplicationPending,
+	"under_review": models.HostApplicationUnderReview,
+	"approved":     models.HostApplicationApproved,
+	"rejected":     models.HostApplicationRejected,
+}
+
+// UpdateApplicationStatus sets a host's application status to any valid value
+// (admin override from the dashboard's Hosts directory).
+func (c *AdminController) UpdateApplicationStatus(w http.ResponseWriter, r *http.Request) {
+	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		return
+	}
+
+	var req UpdateApplicationStatusRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	status, ok := validHostApplicationStatuses[strings.ToLower(strings.TrimSpace(req.Status))]
+	if !ok {
+		RespondError(w, http.StatusBadRequest, "Invalid application status")
+		return
+	}
+
+	host, err := c.hostService.SetApplicationStatus(r.Context(), hostID, status)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return

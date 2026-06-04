@@ -134,6 +134,134 @@ func (r *AdminDirectoryRepository) ListUsers(ctx context.Context, p ListUsersPar
 	return out, total, rows.Err()
 }
 
+// AdminEventRow is one row of the experiences/events directory, joined with the
+// owning host for display.
+type AdminEventRow struct {
+	ID            uuid.UUID
+	Title         string
+	Mood          sql.NullString
+	PriceCents    sql.NullInt64
+	IsFree        bool
+	TotalBookings int64
+	AvgRating     sql.NullFloat64
+	Status        string
+	HostFirstName sql.NullString
+	HostLastName  sql.NullString
+	HostCity      sql.NullString
+}
+
+// ListEventsParams controls pagination and server-side filtering of the events
+// directory.
+type ListEventsParams struct {
+	Limit  int
+	Offset int
+	Search string // matches title / host name / city / mood
+	Status string // exact event status: draft | live | paused | cancelled
+}
+
+// ListEvents returns a page of all events (any status) joined with their host,
+// newest first, plus the total count matching the filters.
+func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsParams) ([]AdminEventRow, int, error) {
+	var conds []string
+	var args []any
+
+	if s := strings.TrimSpace(p.Search); s != "" {
+		args = append(args, "%"+s+"%")
+		i := len(args)
+		conds = append(conds, fmt.Sprintf(
+			"(e.title ILIKE $%d OR (COALESCE(h.first_name,'') || ' ' || COALESCE(h.last_name,'')) ILIKE $%d OR COALESCE(h.city,'') ILIKE $%d OR COALESCE(e.mood::text,'') ILIKE $%d)",
+			i, i, i, i))
+	}
+	if st := strings.TrimSpace(p.Status); st != "" {
+		args = append(args, st)
+		conds = append(conds, fmt.Sprintf("e.status = $%d", len(args)))
+	}
+
+	whereSQL := ""
+	if len(conds) > 0 {
+		whereSQL = "WHERE " + strings.Join(conds, " AND ")
+	}
+
+	countSQL := "SELECT COUNT(*) FROM events e LEFT JOIN hosts h ON h.id = e.host_id " + whereSQL
+	var total int
+	if err := r.db.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	pageArgs := append(append([]any{}, args...), p.Limit, p.Offset)
+	limitIdx, offsetIdx := len(args)+1, len(args)+2
+
+	pageSQL := fmt.Sprintf(`
+		SELECT
+			e.id,
+			e.title,
+			e.mood,
+			e.price_cents,
+			e.is_free,
+			e.total_bookings,
+			e.avg_rating,
+			e.status,
+			h.first_name,
+			h.last_name,
+			h.city
+		FROM events e
+		LEFT JOIN hosts h ON h.id = e.host_id
+		%s
+		ORDER BY e.created_at DESC
+		LIMIT $%d OFFSET $%d`, whereSQL, limitIdx, offsetIdx)
+
+	rows, err := r.db.QueryContext(ctx, pageSQL, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := make([]AdminEventRow, 0)
+	for rows.Next() {
+		var e AdminEventRow
+		if err := rows.Scan(
+			&e.ID, &e.Title, &e.Mood, &e.PriceCents, &e.IsFree,
+			&e.TotalBookings, &e.AvgRating, &e.Status,
+			&e.HostFirstName, &e.HostLastName, &e.HostCity,
+		); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, e)
+	}
+	return out, total, rows.Err()
+}
+
+// HostAggregates holds the dashboard stats for a single host.
+type HostAggregates struct {
+	ExperiencesCreated int64
+	BookingsGenerated  int64
+	RevenueCents       int64
+}
+
+// GetHostAggregates returns the experiences count, confirmed-booking count, and
+// net revenue for a single host.
+func (r *AdminDirectoryRepository) GetHostAggregates(ctx context.Context, hostID uuid.UUID) (HostAggregates, error) {
+	const query = `
+		SELECT
+			(SELECT COUNT(*) FROM events WHERE host_id = $1) AS experiences_created,
+			COALESCE((
+				SELECT COUNT(b.id)
+				FROM bookings b JOIN events e ON e.id = b.event_id
+				WHERE e.host_id = $1 AND b.status = 'confirmed'
+			), 0) AS bookings_generated,
+			COALESCE((
+				SELECT SUM(b.net_earning_cents)
+				FROM bookings b JOIN events e ON e.id = b.event_id
+				WHERE e.host_id = $1 AND b.status = 'confirmed'
+			), 0)::BIGINT AS revenue_cents`
+
+	var a HostAggregates
+	err := r.db.QueryRowContext(ctx, query, hostID).Scan(
+		&a.ExperiencesCreated, &a.BookingsGenerated, &a.RevenueCents,
+	)
+	return a, err
+}
+
 // AdminHostRow is one row of the hosts directory with listing/booking/revenue
 // aggregates.
 type AdminHostRow struct {

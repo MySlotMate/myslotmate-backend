@@ -24,6 +24,10 @@ type HostService interface {
 	// Admin — approve / reject applications
 	ApproveApplication(ctx context.Context, hostID uuid.UUID) (*models.Host, error)
 	RejectApplication(ctx context.Context, hostID uuid.UUID, reason string) (*models.Host, error)
+	// SetApplicationStatus is an admin override that moves a host to any
+	// application status (used by the admin dashboard). It applies the same
+	// side effects as approve/reject when entering those states.
+	SetApplicationStatus(ctx context.Context, hostID uuid.UUID, status models.HostApplicationStatus) (*models.Host, error)
 	ListPendingApplications(ctx context.Context) ([]*models.Host, error)
 
 	// Public
@@ -440,6 +444,52 @@ func (s *hostService) RejectApplication(ctx context.Context, hostID uuid.UUID, r
 	}
 
 	s.dispatcher.Publish(event.HostRejected, host)
+	return host, nil
+}
+
+// SetApplicationStatus moves a host to an arbitrary application status (admin
+// override). Unlike Approve/Reject it has no "reviewable state" guard, so an
+// admin can correct a status from any state. Entering approved/rejected applies
+// the same side effects as the dedicated handlers.
+func (s *hostService) SetApplicationStatus(ctx context.Context, hostID uuid.UUID, status models.HostApplicationStatus) (*models.Host, error) {
+	host, err := s.hostRepo.GetByID(ctx, hostID)
+	if err != nil {
+		return nil, err
+	}
+	if host == nil {
+		return nil, errors.New("host not found")
+	}
+
+	// No-op if already in the requested state.
+	if host.ApplicationStatus == status {
+		return host, nil
+	}
+
+	now := time.Now()
+	host.ApplicationStatus = status
+	switch status {
+	case models.HostApplicationApproved:
+		host.ApprovedAt = &now
+		host.IsIdentityVerified = true
+	case models.HostApplicationRejected:
+		host.RejectedAt = &now
+	}
+
+	if err := s.hostRepo.Update(ctx, host); err != nil {
+		return nil, err
+	}
+
+	// Side effects when entering a terminal review state.
+	switch status {
+	case models.HostApplicationApproved:
+		if err := s.userRepo.SetVerified(ctx, host.UserID); err != nil {
+			return nil, fmt.Errorf("failed to mark user as verified: %w", err)
+		}
+		s.dispatcher.Publish(event.HostApproved, host)
+	case models.HostApplicationRejected:
+		s.dispatcher.Publish(event.HostRejected, host)
+	}
+
 	return host, nil
 }
 

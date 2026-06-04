@@ -214,7 +214,7 @@ func main() {
 		cfg.AdminAuth.TokenTTL,
 	)
 	adminDirectoryRepo := repository.NewAdminDirectoryRepository(dbConn)
-	adminDirectoryController := controller.NewAdminDirectoryController(adminDirectoryRepo, cfg.AdminAuth.JWTSecret)
+	adminDirectoryController := controller.NewAdminDirectoryController(adminDirectoryRepo, hostRepo, userRepo, cfg.AdminAuth.JWTSecret)
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail)
 	experienceTemplateController := controller.NewExperienceTemplateController(experienceTemplateRepo)
 

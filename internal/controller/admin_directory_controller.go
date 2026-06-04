@@ -6,9 +6,11 @@ import (
 	"strconv"
 
 	"myslotmate-backend/internal/auth"
+	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 const (
@@ -20,11 +22,18 @@ const (
 // with real, aggregated data. All routes require a valid admin session token.
 type AdminDirectoryController struct {
 	repo      *repository.AdminDirectoryRepository
+	hostRepo  repository.HostRepository
+	userRepo  repository.UserRepository
 	jwtSecret string
 }
 
-func NewAdminDirectoryController(repo *repository.AdminDirectoryRepository, jwtSecret string) *AdminDirectoryController {
-	return &AdminDirectoryController{repo: repo, jwtSecret: jwtSecret}
+func NewAdminDirectoryController(
+	repo *repository.AdminDirectoryRepository,
+	hostRepo repository.HostRepository,
+	userRepo repository.UserRepository,
+	jwtSecret string,
+) *AdminDirectoryController {
+	return &AdminDirectoryController{repo: repo, hostRepo: hostRepo, userRepo: userRepo, jwtSecret: jwtSecret}
 }
 
 func (c *AdminDirectoryController) RegisterRoutes(r chi.Router) {
@@ -32,6 +41,8 @@ func (c *AdminDirectoryController) RegisterRoutes(r chi.Router) {
 		r.Use(auth.RequireAdminToken(c.jwtSecret))
 		r.Get("/users", c.ListUsers)
 		r.Get("/hosts", c.ListHosts)
+		r.Get("/hosts/{hostID}", c.GetHost)
+		r.Get("/events", c.ListEvents)
 	})
 }
 
@@ -78,6 +89,40 @@ type adminUserDTO struct {
 	Status        string `json:"status"` // Active | Watchlist | Suspended | VIP
 }
 
+// adminHostDetailDTO is the full host profile returned for the detail page.
+type adminHostDetailDTO struct {
+	Host  *models.Host       `json:"host"`
+	User  *adminHostUserDTO  `json:"user"`
+	Stats adminHostStatsDTO  `json:"stats"`
+}
+
+type adminHostUserDTO struct {
+	Name       string `json:"name"`
+	Email      string `json:"email"`
+	Phone      string `json:"phone"`
+	City       string `json:"city"`
+	IsVerified bool   `json:"isVerified"`
+}
+
+type adminHostStatsDTO struct {
+	ExperiencesCreated int64 `json:"experiencesCreated"`
+	BookingsGenerated  int64 `json:"bookingsGenerated"`
+	RevenueGenerated   int64 `json:"revenueGenerated"`
+}
+
+type adminEventDTO struct {
+	ID       string  `json:"id"`
+	Title    string  `json:"title"`
+	HostName string  `json:"hostName"`
+	City     string  `json:"city"`
+	Category string  `json:"category"`
+	Price    int64   `json:"price"`
+	IsFree   bool    `json:"isFree"`
+	Bookings int64   `json:"bookings"`
+	Rating   float64 `json:"rating"`
+	Status   string  `json:"status"` // draft | live | paused | cancelled
+}
+
 type adminHostDTO struct {
 	ID                 string  `json:"id"`
 	Name               string  `json:"name"`
@@ -88,6 +133,7 @@ type adminHostDTO struct {
 	AverageRating      float64 `json:"averageRating"`
 	RevenueGenerated   int64   `json:"revenueGenerated"`
 	VerificationStatus string  `json:"verificationStatus"` // Verified | Pending review | Re-verification | Suspended
+	ApplicationStatus  string  `json:"applicationStatus"`  // raw: draft | pending | under_review | approved | rejected
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -175,6 +221,7 @@ func (c *AdminDirectoryController) ListHosts(w http.ResponseWriter, r *http.Requ
 			AverageRating:      rating,
 			RevenueGenerated:   centsToMajor(h.RevenueCents),
 			VerificationStatus: hostVerificationStatus(h.ApplicationStatus),
+			ApplicationStatus:  h.ApplicationStatus,
 		})
 	}
 
@@ -186,7 +233,130 @@ func (c *AdminDirectoryController) ListHosts(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+// GetHost returns a single host's full profile, linked user contact, and stats.
+func (c *AdminDirectoryController) GetHost(w http.ResponseWriter, r *http.Request) {
+	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		return
+	}
+
+	host, err := c.hostRepo.GetByID(r.Context(), hostID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if host == nil {
+		RespondError(w, http.StatusNotFound, "Host not found")
+		return
+	}
+
+	var userPayload *adminHostUserDTO
+	if u, uerr := c.userRepo.GetByID(r.Context(), host.UserID); uerr == nil && u != nil {
+		city := ""
+		if u.City != nil {
+			city = *u.City
+		}
+		userPayload = &adminHostUserDTO{
+			Name:       u.Name,
+			Email:      u.Email,
+			Phone:      u.PhnNumber,
+			City:       city,
+			IsVerified: u.IsVerified,
+		}
+	}
+
+	stats, err := c.repo.GetHostAggregates(r.Context(), hostID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, adminHostDetailDTO{
+		Host: host,
+		User: userPayload,
+		Stats: adminHostStatsDTO{
+			ExperiencesCreated: stats.ExperiencesCreated,
+			BookingsGenerated:  stats.BookingsGenerated,
+			RevenueGenerated:   centsToMajor(stats.RevenueCents),
+		},
+	})
+}
+
+// ListEvents returns a page of all events (any status) with host name + city.
+func (c *AdminDirectoryController) ListEvents(w http.ResponseWriter, r *http.Request) {
+	page, pageSize, offset := parsePagination(r)
+	q := r.URL.Query()
+
+	rows, total, err := c.repo.ListEvents(r.Context(), repository.ListEventsParams{
+		Limit:  pageSize,
+		Offset: offset,
+		Search: q.Get("search"),
+		Status: q.Get("status"),
+	})
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	events := make([]adminEventDTO, 0, len(rows))
+	for _, e := range rows {
+		hostName := joinName(e.HostFirstName.String, e.HostLastName.String)
+		if hostName == "" {
+			hostName = "Unknown host"
+		}
+		city := e.HostCity.String
+		if city == "" {
+			city = "—"
+		}
+		category := e.Mood.String
+		if category == "" {
+			category = "—"
+		}
+		var price int64
+		if !e.IsFree && e.PriceCents.Valid {
+			price = centsToMajor(e.PriceCents.Int64)
+		}
+		rating := 0.0
+		if e.AvgRating.Valid {
+			rating = math.Round(e.AvgRating.Float64*100) / 100
+		}
+
+		events = append(events, adminEventDTO{
+			ID:       e.ID.String(),
+			Title:    e.Title,
+			HostName: hostName,
+			City:     city,
+			Category: category,
+			Price:    price,
+			IsFree:   e.IsFree,
+			Bookings: e.TotalBookings,
+			Rating:   rating,
+			Status:   e.Status,
+		})
+	}
+
+	RespondSuccess(w, http.StatusOK, paginatedResponse{
+		Items:    events,
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
+	})
+}
+
 // ── Mapping helpers ──────────────────────────────────────────────────────────
+
+// joinName combines first and last name, trimming extra space.
+func joinName(first, last string) string {
+	name := first
+	if last != "" {
+		if name != "" {
+			name += " "
+		}
+		name += last
+	}
+	return name
+}
 
 // centsToMajor converts integer cents to whole major-currency units for display.
 func centsToMajor(cents int64) int64 {

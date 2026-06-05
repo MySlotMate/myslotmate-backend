@@ -34,6 +34,8 @@ type PayoutRepository interface {
 
 	// Platform Settings
 	GetPlatformFeeConfig(ctx context.Context) (*models.PlatformFeeConfig, error)
+	GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error)
+	SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error
 
 	// Fraud Flags
 	HasActiveFraudFlag(ctx context.Context, userID uuid.UUID) (bool, error)
@@ -308,6 +310,29 @@ func (r *postgresPayoutRepository) GetPlatformFeeConfig(ctx context.Context) (*m
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func (r *postgresPayoutRepository) GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error) {
+	var raw []byte
+	query := `SELECT value FROM platform_settings WHERE key = $1`
+	err := r.db.QueryRowContext(ctx, query, key).Scan(&raw)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return raw, nil
+}
+
+func (r *postgresPayoutRepository) SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error {
+	query := `
+		INSERT INTO platform_settings (key, value, updated_at)
+		VALUES ($1, $2, now())
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+	`
+	_, err := r.db.ExecContext(ctx, query, key, value)
+	return err
 }
 
 // ── Fraud Flags ─────────────────────────────────────────────────────────────

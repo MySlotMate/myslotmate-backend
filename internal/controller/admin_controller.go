@@ -66,6 +66,13 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 		r.Post("/{paymentID}/source-refund", c.RequestSourceRefund)
 	})
+
+	r.Get("/platform-settings/{key}", c.GetPlatformSetting)
+
+	r.Route("/admin/platform-settings", func(r chi.Router) {
+		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
+		r.Put("/{key}", c.SavePlatformSetting)
+	})
 }
 
 // ── Request types ───────────────────────────────────────────────────────────
@@ -339,4 +346,47 @@ func (c *AdminController) RequestSourceRefund(w http.ResponseWriter, r *http.Req
 	}
 
 	RespondSuccess(w, http.StatusCreated, refund)
+}
+
+func (c *AdminController) GetPlatformSetting(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	if key == "" {
+		RespondError(w, http.StatusBadRequest, "Missing key parameter")
+		return
+	}
+
+	setting, err := c.payoutService.GetPlatformSetting(r.Context(), key)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if setting == nil {
+		RespondSuccess(w, http.StatusOK, json.RawMessage("{}"))
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, setting)
+}
+
+func (c *AdminController) SavePlatformSetting(w http.ResponseWriter, r *http.Request) {
+	key := chi.URLParam(r, "key")
+	if key == "" {
+		RespondError(w, http.StatusBadRequest, "Missing key parameter")
+		return
+	}
+
+	var value json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&value); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+
+	err := c.payoutService.SavePlatformSetting(r.Context(), key, value)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, map[string]string{"message": "Setting saved successfully"})
 }

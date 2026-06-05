@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -47,6 +48,10 @@ type PayoutService interface {
 
 	// Webhook
 	HandlePayoutWebhook(ctx context.Context, paymentID uuid.UUID, status string, providerError string) error
+
+	// Platform Settings Settings
+	GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error)
+	SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error
 }
 
 // ── Request / Response types ────────────────────────────────────────────────
@@ -1146,4 +1151,12 @@ func (s *payoutService) GetPlatformBalance(ctx context.Context) (*PlatformBalanc
 		BalanceCents:         account.BalanceCents,
 		CollectedFromBooking: account.BalanceCents,
 	}, nil
+}
+
+func (s *payoutService) GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error) {
+	return s.payoutRepo.GetPlatformSetting(ctx, key)
+}
+
+func (s *payoutService) SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error {
+	return s.payoutRepo.SavePlatformSetting(ctx, key, value)
 }

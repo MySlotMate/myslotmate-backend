@@ -50,6 +50,7 @@ func NewRouter(
 	adminCtrl *controller.AdminController,
 	adminAuthCtrl *controller.AdminAuthController,
 	adminDirectoryCtrl *controller.AdminDirectoryController,
+	adminDashboardCtrl *controller.AdminDashboardController,
 	blogCtrl *controller.BlogController,
 	experienceTemplateCtrl *controller.ExperienceTemplateController,
 	ragChatCtrl *controller.RAGChatController,
@@ -137,6 +138,10 @@ func NewRouter(
 
 	if adminDirectoryCtrl != nil {
 		adminDirectoryCtrl.RegisterRoutes(r)
+	}
+
+	if adminDashboardCtrl != nil {
+		adminDashboardCtrl.RegisterRoutes(r)
 	}
 
 	if blogCtrl != nil {

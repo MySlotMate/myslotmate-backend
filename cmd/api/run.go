@@ -215,6 +215,7 @@ func main() {
 	)
 	adminDirectoryRepo := repository.NewAdminDirectoryRepository(dbConn)
 	adminDirectoryController := controller.NewAdminDirectoryController(adminDirectoryRepo, hostRepo, userRepo, cfg.AdminAuth.JWTSecret)
+	adminDashboardController := controller.NewAdminDashboardController(adminDirectoryRepo, cfg.AdminAuth.JWTSecret)
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail)
 	experienceTemplateController := controller.NewExperienceTemplateController(experienceTemplateRepo)
 
@@ -251,6 +252,7 @@ func main() {
 		adminController,
 		adminAuthController,
 		adminDirectoryController,
+		adminDashboardController,
 		blogController,
 		experienceTemplateController,
 		ragChatCtrl,

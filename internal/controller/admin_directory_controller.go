@@ -43,6 +43,7 @@ func (c *AdminDirectoryController) RegisterRoutes(r chi.Router) {
 		r.Get("/hosts", c.ListHosts)
 		r.Get("/hosts/{hostID}", c.GetHost)
 		r.Get("/events", c.ListEvents)
+		r.Get("/bookings", c.ListBookings)
 	})
 }
 
@@ -108,6 +109,19 @@ type adminHostStatsDTO struct {
 	ExperiencesCreated int64 `json:"experiencesCreated"`
 	BookingsGenerated  int64 `json:"bookingsGenerated"`
 	RevenueGenerated   int64 `json:"revenueGenerated"`
+}
+
+type adminBookingDTO struct {
+	ID            string `json:"id"`
+	User          string `json:"user"`
+	Experience    string `json:"experience"`
+	Host          string `json:"host"`
+	City          string `json:"city"`
+	Date          string `json:"date"`
+	Amount        int64  `json:"amount"`
+	Quantity      int64  `json:"quantity"`
+	PaymentStatus string `json:"paymentStatus"`
+	BookingStatus string `json:"bookingStatus"`
 }
 
 type adminEventDTO struct {
@@ -344,7 +358,116 @@ func (c *AdminDirectoryController) ListEvents(w http.ResponseWriter, r *http.Req
 	})
 }
 
+// ListBookings returns a page of all bookings with guest, experience, host,
+// city, amount, and payment/booking status.
+func (c *AdminDirectoryController) ListBookings(w http.ResponseWriter, r *http.Request) {
+	page, pageSize, offset := parsePagination(r)
+	q := r.URL.Query()
+
+	rows, total, err := c.repo.ListBookings(r.Context(), repository.ListBookingsParams{
+		Limit:  pageSize,
+		Offset: offset,
+		Search: q.Get("search"),
+		Status: q.Get("status"),
+	})
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	bookings := make([]adminBookingDTO, 0, len(rows))
+	for _, b := range rows {
+		guest := b.UserName.String
+		if guest == "" {
+			guest = "Unknown guest"
+		}
+		experience := b.EventTitle.String
+		if experience == "" {
+			experience = "—"
+		}
+		host := joinName(b.HostFirstName.String, b.HostLastName.String)
+		if host == "" {
+			host = "—"
+		}
+		city := b.HostCity.String
+		if city == "" {
+			city = "—"
+		}
+		// Prefer the occurrence date; fall back to when the booking was made.
+		date := b.CreatedAt
+		if b.OccurrenceDate.Valid {
+			date = b.OccurrenceDate.Time
+		}
+		var amount int64
+		if b.AmountCents.Valid {
+			amount = centsToMajor(b.AmountCents.Int64)
+		}
+
+		bookings = append(bookings, adminBookingDTO{
+			ID:            b.ID.String(),
+			User:          guest,
+			Experience:    experience,
+			Host:          host,
+			City:          city,
+			Date:          date.Format("02 Jan 2006"),
+			Amount:        amount,
+			Quantity:      b.Quantity,
+			PaymentStatus: paymentStatusLabel(b.PaymentStatus.String, b.Status),
+			BookingStatus: bookingStatusLabel(b.Status),
+		})
+	}
+
+	RespondSuccess(w, http.StatusOK, paginatedResponse{
+		Items:    bookings,
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
+	})
+}
+
 // ── Mapping helpers ──────────────────────────────────────────────────────────
+
+// bookingStatusLabel humanizes the raw booking status.
+func bookingStatusLabel(status string) string {
+	switch status {
+	case "confirmed":
+		return "Confirmed"
+	case "pending":
+		return "Pending"
+	case "cancelled":
+		return "Cancelled"
+	case "refunded":
+		return "Refunded"
+	default:
+		return status
+	}
+}
+
+// paymentStatusLabel maps the payment row's status to a display label, falling
+// back to the booking status when there is no linked payment row.
+func paymentStatusLabel(paymentStatus, bookingStatus string) string {
+	switch paymentStatus {
+	case "completed":
+		return "Paid"
+	case "pending", "processing":
+		return "Pending"
+	case "reversed":
+		return "Refunded"
+	case "failed":
+		return "Failed"
+	}
+	// No (or unknown) payment row — infer from the booking lifecycle.
+	switch bookingStatus {
+	case "confirmed":
+		return "Paid"
+	case "refunded":
+		return "Refunded"
+	case "cancelled":
+		return "Cancelled"
+	default:
+		return "Pending"
+	}
+}
 
 // joinName combines first and last name, trimming extra space.
 func joinName(first, last string) string {

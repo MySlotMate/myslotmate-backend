@@ -365,10 +365,11 @@ func (c *AdminDirectoryController) ListBookings(w http.ResponseWriter, r *http.R
 	q := r.URL.Query()
 
 	rows, total, err := c.repo.ListBookings(r.Context(), repository.ListBookingsParams{
-		Limit:  pageSize,
-		Offset: offset,
-		Search: q.Get("search"),
-		Status: q.Get("status"),
+		Limit:   pageSize,
+		Offset:  offset,
+		Search:  q.Get("search"),
+		Status:  q.Get("status"),
+		EventID: q.Get("event_id"),
 	})
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())

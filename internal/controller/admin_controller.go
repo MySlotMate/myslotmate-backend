@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/models"
+	"myslotmate-backend/internal/repository"
 	"myslotmate-backend/internal/service"
 
 	fbauth "firebase.google.com/go/v4/auth"
@@ -19,16 +21,18 @@ type AdminController struct {
 	hostService   service.HostService
 	payoutService service.PayoutService
 	userService   service.UserService
+	dirRepo       *repository.AdminDirectoryRepository
 	firebaseAuth  *fbauth.Client
 	adminEmail    string
 	jwtSecret     string
 }
 
-func NewAdminController(hs service.HostService, ps service.PayoutService, us service.UserService, fa *fbauth.Client, adminEmail, jwtSecret string) *AdminController {
+func NewAdminController(hs service.HostService, ps service.PayoutService, us service.UserService, dir *repository.AdminDirectoryRepository, fa *fbauth.Client, adminEmail, jwtSecret string) *AdminController {
 	return &AdminController{
 		hostService:   hs,
 		payoutService: ps,
 		userService:   us,
+		dirRepo:       dir,
 		firebaseAuth:  fa,
 		adminEmail:    adminEmail,
 		jwtSecret:     jwtSecret,
@@ -65,6 +69,12 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		// for special cases (disputes, chargebacks, regulatory).
 		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 		r.Post("/{paymentID}/source-refund", c.RequestSourceRefund)
+
+		// Read-only admin Payments dashboard views.
+		r.Get("/list", c.ListPayments)
+		r.Get("/ledger", c.ListLedger)
+		r.Get("/balances", c.ListBalances)
+		r.Get("/summary", c.GetPaymentsSummary)
 	})
 
 	r.Get("/platform-settings/{key}", c.GetPlatformSetting)
@@ -389,4 +399,123 @@ func (c *AdminController) SavePlatformSetting(w http.ResponseWriter, r *http.Req
 	}
 
 	RespondSuccess(w, http.StatusOK, map[string]string{"message": "Setting saved successfully"})
+}
+
+// ── Payments dashboard (read-only views) ──────────────────────────────────────
+
+type adminPaymentDTO struct {
+	ID               string `json:"id"`
+	Type             string `json:"type"`
+	AmountCents      int64  `json:"amount_cents"`
+	Status           string `json:"status"`
+	DisplayReference string `json:"display_reference"`
+	ReferenceID      string `json:"reference_id"`
+	OwnerType        string `json:"owner_type"`
+	OwnerName        string `json:"owner_name"`
+	OwnerEmail       string `json:"owner_email"`
+	CreatedAt        string `json:"created_at"`
+}
+
+// ListPayments returns a filtered, paginated feed of every payment. The `search`
+// filter (owner name/email) doubles as the per-user view.
+func (c *AdminController) ListPayments(w http.ResponseWriter, r *http.Request) {
+	page, pageSize, offset := parsePagination(r)
+	q := r.URL.Query()
+	rows, total, err := c.dirRepo.ListPayments(r.Context(), repository.ListPaymentsParams{
+		Limit: pageSize, Offset: offset,
+		Search: q.Get("search"), Type: q.Get("type"), Status: q.Get("status"),
+		From: q.Get("from"), To: q.Get("to"),
+	})
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	items := make([]adminPaymentDTO, 0, len(rows))
+	for _, p := range rows {
+		items = append(items, adminPaymentDTO{
+			ID: p.ID.String(), Type: p.Type, AmountCents: p.AmountCents, Status: p.Status,
+			DisplayReference: p.DisplayReference.String, ReferenceID: p.ReferenceID.String,
+			OwnerType: p.OwnerType, OwnerName: p.OwnerName.String, OwnerEmail: p.OwnerEmail.String,
+			CreatedAt: p.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	RespondSuccess(w, http.StatusOK, paginatedResponse{Items: items, Total: total, Page: page, PageSize: pageSize})
+}
+
+type adminLedgerDTO struct {
+	ID                string `json:"id"`
+	Type              string `json:"type"`
+	AmountCents       int64  `json:"amount_cents"`
+	BalanceAfterCents int64  `json:"balance_after_cents"`
+	ReferenceType     string `json:"reference_type"`
+	Description       string `json:"description"`
+	Status            string `json:"status"`
+	OwnerType         string `json:"owner_type"`
+	OwnerName         string `json:"owner_name"`
+	CreatedAt         string `json:"created_at"`
+}
+
+// ListLedger returns a filtered, paginated feed of transaction_ledger entries.
+func (c *AdminController) ListLedger(w http.ResponseWriter, r *http.Request) {
+	page, pageSize, offset := parsePagination(r)
+	q := r.URL.Query()
+	rows, total, err := c.dirRepo.ListLedgerEntries(r.Context(), repository.ListLedgerParams{
+		Limit: pageSize, Offset: offset,
+		Search: q.Get("search"), Type: q.Get("type"),
+		From: q.Get("from"), To: q.Get("to"),
+	})
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	items := make([]adminLedgerDTO, 0, len(rows))
+	for _, l := range rows {
+		items = append(items, adminLedgerDTO{
+			ID: l.ID.String(), Type: l.Type, AmountCents: l.AmountCents, BalanceAfterCents: l.BalanceAfterCents,
+			ReferenceType: l.ReferenceType.String, Description: l.Description.String, Status: l.Status,
+			OwnerType: l.OwnerType, OwnerName: l.OwnerName.String, CreatedAt: l.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	RespondSuccess(w, http.StatusOK, paginatedResponse{Items: items, Total: total, Page: page, PageSize: pageSize})
+}
+
+type adminBalanceDTO struct {
+	AccountID    string `json:"account_id"`
+	OwnerType    string `json:"owner_type"`
+	OwnerName    string `json:"owner_name"`
+	BalanceCents int64  `json:"balance_cents"`
+	LedgerCents  int64  `json:"ledger_cents"`
+	DriftCents   int64  `json:"drift_cents"`
+}
+
+// ListBalances returns a paginated view of account balances vs ledger sums.
+func (c *AdminController) ListBalances(w http.ResponseWriter, r *http.Request) {
+	page, pageSize, offset := parsePagination(r)
+	q := r.URL.Query()
+	rows, total, err := c.dirRepo.ListAccountBalances(r.Context(), repository.ListBalancesParams{
+		Limit: pageSize, Offset: offset,
+		Search: q.Get("search"), OwnerType: q.Get("owner_type"),
+	})
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	items := make([]adminBalanceDTO, 0, len(rows))
+	for _, b := range rows {
+		items = append(items, adminBalanceDTO{
+			AccountID: b.AccountID.String(), OwnerType: b.OwnerType, OwnerName: b.OwnerName.String,
+			BalanceCents: b.BalanceCents, LedgerCents: b.LedgerCents, DriftCents: b.DriftCents,
+		})
+	}
+	RespondSuccess(w, http.StatusOK, paginatedResponse{Items: items, Total: total, Page: page, PageSize: pageSize})
+}
+
+// GetPaymentsSummary returns reconciliation/health aggregates for the tab header.
+func (c *AdminController) GetPaymentsSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := c.dirRepo.GetPaymentsSummary(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, summary)
 }

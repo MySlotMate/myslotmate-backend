@@ -252,10 +252,11 @@ type AdminBookingRow struct {
 // ListBookingsParams controls pagination and server-side filtering of the
 // bookings directory.
 type ListBookingsParams struct {
-	Limit  int
-	Offset int
-	Search string // matches guest name/email, experience title, or host name
-	Status string // exact booking status: pending | confirmed | cancelled | refunded
+	Limit   int
+	Offset  int
+	Search  string // matches guest name/email, experience title, or host name
+	Status  string // exact booking status: pending | confirmed | cancelled | refunded
+	EventID string // exact event (experience) UUID
 }
 
 // ListBookings returns a page of all bookings (newest first) joined with guest,
@@ -274,6 +275,10 @@ func (r *AdminDirectoryRepository) ListBookings(ctx context.Context, p ListBooki
 	if st := strings.TrimSpace(p.Status); st != "" {
 		args = append(args, st)
 		conds = append(conds, fmt.Sprintf("b.status = $%d", len(args)))
+	}
+	if e := strings.TrimSpace(p.EventID); e != "" {
+		args = append(args, e)
+		conds = append(conds, fmt.Sprintf("b.event_id = $%d::uuid", len(args)))
 	}
 
 	whereSQL := ""
@@ -615,4 +620,313 @@ func (r *AdminDirectoryRepository) ListHosts(ctx context.Context, p ListHostsPar
 		out = append(out, h)
 	}
 	return out, total, rows.Err()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Admin Payments tab — payments feed, ledger, balances, reconciliation summary
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ownerJoins resolves an account's owner display name across users/hosts/platform.
+const ownerJoins = `
+	JOIN accounts a ON a.id = %s.account_id
+	LEFT JOIN users u ON a.owner_type = 'user' AND u.id = a.owner_id
+	LEFT JOIN hosts h ON a.owner_type = 'host' AND h.id = a.owner_id`
+
+const ownerNameExpr = `CASE a.owner_type
+		WHEN 'host'     THEN COALESCE(h.first_name,'') || ' ' || COALESCE(h.last_name,'')
+		WHEN 'user'     THEN COALESCE(u.name,'')
+		ELSE 'Platform' END`
+
+const ownerSearchExpr = `(COALESCE(u.name,'') ILIKE $%d OR COALESCE(u.email,'') ILIKE $%d OR (COALESCE(h.first_name,'') || ' ' || COALESCE(h.last_name,'')) ILIKE $%d)`
+
+// AdminPaymentRow is one row of the global payments feed with its owner.
+type AdminPaymentRow struct {
+	ID               uuid.UUID
+	Type             string
+	AmountCents      int64
+	Status           string
+	DisplayReference sql.NullString
+	ReferenceID      sql.NullString
+	CreatedAt        time.Time
+	OwnerType        string
+	OwnerName        sql.NullString
+	OwnerEmail       sql.NullString
+}
+
+// ListPaymentsParams controls pagination and filtering of the payments feed.
+type ListPaymentsParams struct {
+	Limit, Offset int
+	Search        string // owner name / email
+	Type          string // payment_type
+	Status        string // payment_status
+	From, To      string // YYYY-MM-DD (inclusive)
+}
+
+// ListPayments returns a page of all payments (newest first) joined to the
+// owning account's user/host, plus the total count matching the filters.
+func (r *AdminDirectoryRepository) ListPayments(ctx context.Context, p ListPaymentsParams) ([]AdminPaymentRow, int, error) {
+	var conds []string
+	var args []any
+	if s := strings.TrimSpace(p.Search); s != "" {
+		args = append(args, "%"+s+"%")
+		i := len(args)
+		conds = append(conds, fmt.Sprintf(ownerSearchExpr, i, i, i))
+	}
+	if t := strings.TrimSpace(p.Type); t != "" {
+		args = append(args, t)
+		conds = append(conds, fmt.Sprintf("pm.type = $%d", len(args)))
+	}
+	if st := strings.TrimSpace(p.Status); st != "" {
+		args = append(args, st)
+		conds = append(conds, fmt.Sprintf("pm.status = $%d", len(args)))
+	}
+	if f := strings.TrimSpace(p.From); f != "" {
+		args = append(args, f)
+		conds = append(conds, fmt.Sprintf("pm.created_at >= $%d::date", len(args)))
+	}
+	if t := strings.TrimSpace(p.To); t != "" {
+		args = append(args, t)
+		conds = append(conds, fmt.Sprintf("pm.created_at < ($%d::date + 1)", len(args)))
+	}
+	whereSQL := ""
+	if len(conds) > 0 {
+		whereSQL = "WHERE " + strings.Join(conds, " AND ")
+	}
+	joins := "FROM payments pm" + fmt.Sprintf(ownerJoins, "pm")
+
+	var total int
+	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) "+joins+" "+whereSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	pageArgs := append(append([]any{}, args...), p.Limit, p.Offset)
+	pageSQL := fmt.Sprintf(`
+		SELECT pm.id, pm.type, pm.amount_cents, pm.status,
+		       pm.display_reference, pm.reference_id::text, pm.created_at,
+		       a.owner_type, %s,
+		       CASE a.owner_type WHEN 'user' THEN u.email ELSE NULL END
+		%s %s
+		ORDER BY pm.created_at DESC
+		LIMIT $%d OFFSET $%d`, ownerNameExpr, joins, whereSQL, len(args)+1, len(args)+2)
+
+	rows, err := r.db.QueryContext(ctx, pageSQL, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := make([]AdminPaymentRow, 0)
+	for rows.Next() {
+		var p AdminPaymentRow
+		if err := rows.Scan(&p.ID, &p.Type, &p.AmountCents, &p.Status,
+			&p.DisplayReference, &p.ReferenceID, &p.CreatedAt,
+			&p.OwnerType, &p.OwnerName, &p.OwnerEmail); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, p)
+	}
+	return out, total, rows.Err()
+}
+
+// AdminLedgerRow is one transaction_ledger entry with its account owner.
+type AdminLedgerRow struct {
+	ID                uuid.UUID
+	Type              string
+	AmountCents       int64
+	BalanceAfterCents int64
+	ReferenceType     sql.NullString
+	Description       sql.NullString
+	Status            string
+	CreatedAt         time.Time
+	OwnerType         string
+	OwnerName         sql.NullString
+}
+
+// ListLedgerParams controls pagination and filtering of the ledger feed.
+type ListLedgerParams struct {
+	Limit, Offset int
+	Search        string // owner name / email
+	Type          string // ledger transaction type
+	From, To      string // YYYY-MM-DD (inclusive)
+}
+
+// ListLedgerEntries returns a page of ledger entries (newest first) joined to
+// the owning account's user/host, plus the total count matching the filters.
+func (r *AdminDirectoryRepository) ListLedgerEntries(ctx context.Context, p ListLedgerParams) ([]AdminLedgerRow, int, error) {
+	var conds []string
+	var args []any
+	if s := strings.TrimSpace(p.Search); s != "" {
+		args = append(args, "%"+s+"%")
+		i := len(args)
+		conds = append(conds, fmt.Sprintf(ownerSearchExpr, i, i, i))
+	}
+	if t := strings.TrimSpace(p.Type); t != "" {
+		args = append(args, t)
+		conds = append(conds, fmt.Sprintf("l.type = $%d", len(args)))
+	}
+	if f := strings.TrimSpace(p.From); f != "" {
+		args = append(args, f)
+		conds = append(conds, fmt.Sprintf("l.created_at >= $%d::date", len(args)))
+	}
+	if t := strings.TrimSpace(p.To); t != "" {
+		args = append(args, t)
+		conds = append(conds, fmt.Sprintf("l.created_at < ($%d::date + 1)", len(args)))
+	}
+	whereSQL := ""
+	if len(conds) > 0 {
+		whereSQL = "WHERE " + strings.Join(conds, " AND ")
+	}
+	joins := "FROM transaction_ledger l" + fmt.Sprintf(ownerJoins, "l")
+
+	var total int
+	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) "+joins+" "+whereSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	pageArgs := append(append([]any{}, args...), p.Limit, p.Offset)
+	pageSQL := fmt.Sprintf(`
+		SELECT l.id, l.type, l.amount_cents, l.balance_after_cents,
+		       l.reference_type, l.description, l.status, l.created_at,
+		       a.owner_type, %s
+		%s %s
+		ORDER BY l.created_at DESC
+		LIMIT $%d OFFSET $%d`, ownerNameExpr, joins, whereSQL, len(args)+1, len(args)+2)
+
+	rows, err := r.db.QueryContext(ctx, pageSQL, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := make([]AdminLedgerRow, 0)
+	for rows.Next() {
+		var l AdminLedgerRow
+		if err := rows.Scan(&l.ID, &l.Type, &l.AmountCents, &l.BalanceAfterCents,
+			&l.ReferenceType, &l.Description, &l.Status, &l.CreatedAt,
+			&l.OwnerType, &l.OwnerName); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, l)
+	}
+	return out, total, rows.Err()
+}
+
+// AdminBalanceRow is one account's stored balance vs its ledger sum (drift).
+type AdminBalanceRow struct {
+	AccountID    uuid.UUID
+	OwnerType    string
+	OwnerName    sql.NullString
+	BalanceCents int64
+	LedgerCents  int64
+	DriftCents   int64
+}
+
+// ListBalancesParams controls pagination and filtering of the balances view.
+type ListBalancesParams struct {
+	Limit, Offset int
+	Search        string // owner name / email
+	OwnerType     string // user | host | platform
+}
+
+// ListAccountBalances returns a page of accounts with their stored balance, the
+// sum of their ledger entries, and the drift between the two (largest drift first).
+func (r *AdminDirectoryRepository) ListAccountBalances(ctx context.Context, p ListBalancesParams) ([]AdminBalanceRow, int, error) {
+	var conds []string
+	var args []any
+	if s := strings.TrimSpace(p.Search); s != "" {
+		args = append(args, "%"+s+"%")
+		i := len(args)
+		conds = append(conds, fmt.Sprintf(ownerSearchExpr, i, i, i))
+	}
+	if ot := strings.TrimSpace(p.OwnerType); ot != "" {
+		args = append(args, ot)
+		conds = append(conds, fmt.Sprintf("a.owner_type = $%d", len(args)))
+	}
+	whereSQL := ""
+	if len(conds) > 0 {
+		whereSQL = "WHERE " + strings.Join(conds, " AND ")
+	}
+	ownerOnly := `
+		FROM accounts a
+		LEFT JOIN users u ON a.owner_type = 'user' AND u.id = a.owner_id
+		LEFT JOIN hosts h ON a.owner_type = 'host' AND h.id = a.owner_id`
+
+	var total int
+	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) "+ownerOnly+" "+whereSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	pageArgs := append(append([]any{}, args...), p.Limit, p.Offset)
+	pageSQL := fmt.Sprintf(`
+		SELECT a.id, a.owner_type, %s, a.balance_cents,
+		       COALESCE((SELECT SUM(amount_cents) FROM transaction_ledger l WHERE l.account_id = a.id), 0)::bigint AS ledger_cents,
+		       (a.balance_cents - COALESCE((SELECT SUM(amount_cents) FROM transaction_ledger l WHERE l.account_id = a.id), 0))::bigint AS drift_cents
+		%s %s
+		ORDER BY ABS(a.balance_cents - COALESCE((SELECT SUM(amount_cents) FROM transaction_ledger l WHERE l.account_id = a.id), 0)) DESC, a.balance_cents DESC
+		LIMIT $%d OFFSET $%d`, ownerNameExpr, ownerOnly, whereSQL, len(args)+1, len(args)+2)
+
+	rows, err := r.db.QueryContext(ctx, pageSQL, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := make([]AdminBalanceRow, 0)
+	for rows.Next() {
+		var b AdminBalanceRow
+		if err := rows.Scan(&b.AccountID, &b.OwnerType, &b.OwnerName,
+			&b.BalanceCents, &b.LedgerCents, &b.DriftCents); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, b)
+	}
+	return out, total, rows.Err()
+}
+
+// PaymentsSummary holds the reconciliation/health figures for the Payments tab.
+type PaymentsSummary struct {
+	TopupsInCents    int64 `json:"topups_in_cents"`
+	PayoutsOutCents  int64 `json:"payouts_out_cents"`
+	RefundsCents     int64 `json:"refunds_cents"`
+	BookingVolCents  int64 `json:"booking_volume_cents"`
+	PlatformBalCents int64 `json:"platform_balance_cents"`
+	PendingCount     int64 `json:"pending_count"`
+	FailedCount      int64 `json:"failed_count"`
+	DriftAccounts    int64 `json:"drift_accounts"`
+}
+
+// GetPaymentsSummary computes money-in/out totals, pending/failed counts, the
+// retained platform balance, and the number of accounts whose stored balance
+// disagrees with their ledger sum.
+func (r *AdminDirectoryRepository) GetPaymentsSummary(ctx context.Context) (*PaymentsSummary, error) {
+	s := &PaymentsSummary{}
+	err := r.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(amount_cents) FILTER (WHERE type='topup' AND status='completed'), 0),
+			COALESCE(SUM(amount_cents) FILTER (WHERE type IN ('payout','withdrawal') AND status='completed'), 0),
+			COALESCE(SUM(amount_cents) FILTER (WHERE type='refund' AND status='completed'), 0),
+			COALESCE(SUM(amount_cents) FILTER (WHERE type='booking' AND status='completed'), 0),
+			COUNT(*) FILTER (WHERE status='pending'),
+			COUNT(*) FILTER (WHERE status='failed')
+		FROM payments`).Scan(
+		&s.TopupsInCents, &s.PayoutsOutCents, &s.RefundsCents, &s.BookingVolCents,
+		&s.PendingCount, &s.FailedCount)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(balance_cents),0) FROM accounts WHERE owner_type='platform'`).Scan(&s.PlatformBalCents); err != nil {
+		return nil, err
+	}
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM (
+			SELECT a.id
+			FROM accounts a
+			LEFT JOIN transaction_ledger l ON l.account_id = a.id
+			GROUP BY a.id, a.balance_cents
+			HAVING a.balance_cents <> COALESCE(SUM(l.amount_cents), 0)
+		) t`).Scan(&s.DriftAccounts); err != nil {
+		return nil, err
+	}
+	return s, nil
 }

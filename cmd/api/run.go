@@ -206,14 +206,14 @@ func main() {
 	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider)
 	supportController := controller.NewSupportController(supportService, uploadService)
 	uploadController := controller.NewUploadController(uploadService)
-	adminController := controller.NewAdminController(hostService, payoutService, userService, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
+	adminDirectoryRepo := repository.NewAdminDirectoryRepository(dbConn)
+	adminController := controller.NewAdminController(hostService, payoutService, userService, adminDirectoryRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	adminAuthController := controller.NewAdminAuthController(
 		cfg.AdminAuth.Username,
 		cfg.AdminAuth.Password,
 		cfg.AdminAuth.JWTSecret,
 		cfg.AdminAuth.TokenTTL,
 	)
-	adminDirectoryRepo := repository.NewAdminDirectoryRepository(dbConn)
 	adminDirectoryController := controller.NewAdminDirectoryController(adminDirectoryRepo, hostRepo, userRepo, cfg.AdminAuth.JWTSecret)
 	adminDashboardController := controller.NewAdminDashboardController(adminDirectoryRepo, cfg.AdminAuth.JWTSecret)
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail)

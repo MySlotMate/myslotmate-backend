@@ -1,11 +1,16 @@
 package controller
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
+	"time"
 
 	"myslotmate-backend/internal/auth"
+	"myslotmate-backend/internal/lib/notification"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 
@@ -21,19 +26,33 @@ const (
 // AdminDirectoryController serves the admin dashboard's Users and Hosts tabs
 // with real, aggregated data. All routes require a valid admin session token.
 type AdminDirectoryController struct {
-	repo      *repository.AdminDirectoryRepository
-	hostRepo  repository.HostRepository
-	userRepo  repository.UserRepository
-	jwtSecret string
+	repo         *repository.AdminDirectoryRepository
+	hostRepo     repository.HostRepository
+	userRepo     repository.UserRepository
+	bookingRepo  repository.BookingRepository
+	eventRepo    repository.EventRepository
+	notifService notification.NotificationService
+	jwtSecret    string
 }
 
 func NewAdminDirectoryController(
 	repo *repository.AdminDirectoryRepository,
 	hostRepo repository.HostRepository,
 	userRepo repository.UserRepository,
+	bookingRepo repository.BookingRepository,
+	eventRepo repository.EventRepository,
+	notifService notification.NotificationService,
 	jwtSecret string,
 ) *AdminDirectoryController {
-	return &AdminDirectoryController{repo: repo, hostRepo: hostRepo, userRepo: userRepo, jwtSecret: jwtSecret}
+	return &AdminDirectoryController{
+		repo:         repo,
+		hostRepo:     hostRepo,
+		userRepo:     userRepo,
+		bookingRepo:  bookingRepo,
+		eventRepo:    eventRepo,
+		notifService: notifService,
+		jwtSecret:    jwtSecret,
+	}
 }
 
 func (c *AdminDirectoryController) RegisterRoutes(r chi.Router) {
@@ -44,6 +63,9 @@ func (c *AdminDirectoryController) RegisterRoutes(r chi.Router) {
 		r.Get("/hosts/{hostID}", c.GetHost)
 		r.Get("/events", c.ListEvents)
 		r.Get("/bookings", c.ListBookings)
+		r.Get("/bookings/{bookingID}/reminder-preview", c.GetBookingReminderPreview)
+		r.Post("/bookings/{bookingID}/send-reminder", c.SendBookingReminder)
+		r.Post("/marketing/events/{eventID}/bulk-notify", c.BulkNotifyEventGuests)
 	})
 }
 
@@ -113,12 +135,15 @@ type adminHostStatsDTO struct {
 
 type adminBookingDTO struct {
 	ID            string `json:"id"`
+	EventID       string `json:"event_id"`
 	User          string `json:"user"`
 	Experience    string `json:"experience"`
 	Host          string `json:"host"`
 	City          string `json:"city"`
 	Date          string `json:"date"`
+	OccurrenceDate string `json:"occurrence_date"` // RFC3339, for ticket generation
 	Amount        int64  `json:"amount"`
+	AmountCents   int64  `json:"amount_cents"`
 	Quantity      int64  `json:"quantity"`
 	PaymentStatus string `json:"paymentStatus"`
 	BookingStatus string `json:"bookingStatus"`
@@ -404,17 +429,24 @@ func (c *AdminDirectoryController) ListBookings(w http.ResponseWriter, r *http.R
 			amount = centsToMajor(b.AmountCents.Int64)
 		}
 
+		var amountCents int64
+		if b.AmountCents.Valid {
+			amountCents = b.AmountCents.Int64
+		}
 		bookings = append(bookings, adminBookingDTO{
-			ID:            b.ID.String(),
-			User:          guest,
-			Experience:    experience,
-			Host:          host,
-			City:          city,
-			Date:          date.Format("02 Jan 2006"),
-			Amount:        amount,
-			Quantity:      b.Quantity,
-			PaymentStatus: paymentStatusLabel(b.PaymentStatus.String, b.Status),
-			BookingStatus: bookingStatusLabel(b.Status),
+			ID:             b.ID.String(),
+			EventID:        b.EventID.String(),
+			User:           guest,
+			Experience:     experience,
+			Host:           host,
+			City:           city,
+			Date:           date.Format("02 Jan 2006"),
+			OccurrenceDate: date.Format(time.RFC3339),
+			Amount:         amount,
+			AmountCents:    amountCents,
+			Quantity:       b.Quantity,
+			PaymentStatus:  paymentStatusLabel(b.PaymentStatus.String, b.Status),
+			BookingStatus:  bookingStatusLabel(b.Status),
 		})
 	}
 
@@ -519,4 +551,253 @@ func hostVerificationStatus(applicationStatus string) string {
 	default: // pending / submitted
 		return "Pending review"
 	}
+}
+
+func (c *AdminDirectoryController) GetBookingReminderPreview(w http.ResponseWriter, r *http.Request) {
+	bookingIDStr := chi.URLParam(r, "bookingID")
+	bookingID, err := uuid.Parse(bookingIDStr)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid booking ID")
+		return
+	}
+
+	booking, err := c.bookingRepo.GetByID(r.Context(), bookingID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if booking == nil {
+		RespondError(w, http.StatusNotFound, "Booking not found")
+		return
+	}
+
+	user, err := c.userRepo.GetByID(r.Context(), booking.UserID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if user == nil {
+		RespondError(w, http.StatusNotFound, "User not found")
+		return
+	}
+
+	event, err := c.eventRepo.GetByID(r.Context(), booking.EventID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if event == nil {
+		RespondError(w, http.StatusNotFound, "Event not found")
+		return
+	}
+
+	eventTimeStr := event.Time.Format("Jan 2, 2006 3:04 PM")
+	if !booking.OccurrenceDate.IsZero() {
+		eventTimeStr = booking.OccurrenceDate.Format("Jan 2, 2006 3:04 PM")
+	}
+
+	whatsappBody := fmt.Sprintf(
+		"⏰ Event Starting Soon!\n\nEvent: %s\nTime: %s\n\nYour booking is confirmed. See you soon!",
+		event.Title,
+		eventTimeStr,
+	)
+
+	emailSubject := "Upcoming Event Reminder - MySlotMate"
+	emailBody := fmt.Sprintf(`
+<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+	<h2>📅 Upcoming Event Reminder</h2>
+	<p>Hi %s,</p>
+	<p>This is a reminder that your event "<strong>%s</strong>" is scheduled for %s.</p>
+	<p>Please review your event details and ensure all preparations are in place for a smooth experience.</p>
+	<p>We wish you a successful event! 🎉</p>
+	<hr style="margin: 30px 0;">
+	<p style="font-size: 12px; color: #666;">MySlotMate - Event Management Made Easy</p>
+</body>
+</html>
+`, user.Name, event.Title, eventTimeStr)
+
+	RespondSuccess(w, http.StatusOK, map[string]string{
+		"whatsapp_body": whatsappBody,
+		"email_subject": emailSubject,
+		"email_body":    emailBody,
+		"user_email":    user.Email,
+		"user_phone":    user.PhnNumber,
+	})
+}
+
+func (c *AdminDirectoryController) SendBookingReminder(w http.ResponseWriter, r *http.Request) {
+	bookingIDStr := chi.URLParam(r, "bookingID")
+	bookingID, err := uuid.Parse(bookingIDStr)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid booking ID")
+		return
+	}
+
+	booking, err := c.bookingRepo.GetByID(r.Context(), bookingID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if booking == nil {
+		RespondError(w, http.StatusNotFound, "Booking not found")
+		return
+	}
+
+	user, err := c.userRepo.GetByID(r.Context(), booking.UserID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if user == nil {
+		RespondError(w, http.StatusNotFound, "User not found")
+		return
+	}
+
+	event, err := c.eventRepo.GetByID(r.Context(), booking.EventID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if event == nil {
+		RespondError(w, http.StatusNotFound, "Event not found")
+		return
+	}
+
+	// Send notifications
+	var whatsappErr error
+	if user.PhnNumber != "" && c.notifService != nil {
+		whatsappErr = c.notifService.SendEventReminderWhatsapp(r.Context(), booking, user, event)
+	}
+
+	var emailErr error
+	if user.Email != "" && c.notifService != nil {
+		emailErr = c.notifService.SendEventReminderEmail(r.Context(), booking, user, event)
+	}
+
+	if whatsappErr != nil && emailErr != nil {
+		RespondError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to send WhatsApp (%v) and Email (%v)", whatsappErr, emailErr))
+		return
+	}
+
+	statusMsg := "Reminder sent successfully"
+	if whatsappErr != nil {
+		statusMsg = fmt.Sprintf("Reminder sent via email, but WhatsApp failed: %v", whatsappErr)
+	} else if emailErr != nil {
+		statusMsg = fmt.Sprintf("Reminder sent via WhatsApp, but Email failed: %v", emailErr)
+	}
+
+	RespondSuccess(w, http.StatusOK, map[string]string{
+		"message": statusMsg,
+	})
+}
+
+type BulkNotifyRequest struct {
+	Message string `json:"message"`
+	Channel string `json:"channel"` // "both" | "whatsapp" | "email"
+}
+
+func (c *AdminDirectoryController) BulkNotifyEventGuests(w http.ResponseWriter, r *http.Request) {
+	eventIDStr := chi.URLParam(r, "eventID")
+	eventID, err := uuid.Parse(eventIDStr)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid event ID")
+		return
+	}
+
+	var req BulkNotifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	event, err := c.eventRepo.GetByID(r.Context(), eventID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if event == nil {
+		RespondError(w, http.StatusNotFound, "Event not found")
+		return
+	}
+
+	bookings, err := c.bookingRepo.ListByEventID(r.Context(), eventID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Filter active bookings: confirmed, pending
+	var targetBookings []*models.Booking
+	for _, b := range bookings {
+		if b.Status == "confirmed" || b.Status == "pending" {
+			targetBookings = append(targetBookings, b)
+		}
+	}
+
+	if len(targetBookings) == 0 {
+		RespondSuccess(w, http.StatusOK, map[string]interface{}{
+			"message":        "No active bookings found for this event",
+			"notified_count": 0,
+		})
+		return
+	}
+
+	// Queue notification broadcasts in the background
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+
+		for _, booking := range targetBookings {
+			user, err := c.userRepo.GetByID(bgCtx, booking.UserID)
+			if err != nil || user == nil {
+				continue
+			}
+
+			// WhatsApp Notification
+			if (req.Channel == "both" || req.Channel == "whatsapp") && user.PhnNumber != "" && c.notifService != nil {
+				if req.Message != "" {
+					kapso := c.notifService.GetKapsoClient()
+					if kapso != nil {
+						_ = kapso.SendTextMessage(bgCtx, user.PhnNumber, req.Message)
+					} else {
+						// Fall back to standard template reminder on Twilio if Kapso is missing
+						_ = c.notifService.SendEventReminderWhatsapp(bgCtx, booking, user, event)
+					}
+				} else {
+					// Send standard reminder
+					_ = c.notifService.SendEventReminderWhatsapp(bgCtx, booking, user, event)
+				}
+			}
+
+			// Email Notification
+			if (req.Channel == "both" || req.Channel == "email") && user.Email != "" && c.notifService != nil {
+				if req.Message != "" {
+					// Send custom email announcement
+					subject := fmt.Sprintf("Announcement: %s", event.Title)
+					emailBody := fmt.Sprintf(`
+<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+	<h2>Announcement regarding: %s</h2>
+	<p>Hi %s,</p>
+	<p>%s</p>
+	<hr style="margin: 30px 0;">
+	<p style="font-size: 12px; color: #666;">MySlotMate - Event Management Made Easy</p>
+</body>
+</html>
+`, event.Title, user.Name, req.Message)
+					
+					_ = c.notifService.SendCustomEmail(bgCtx, user.Email, subject, emailBody)
+				} else {
+					// Send standard reminder email
+					_ = c.notifService.SendEventReminderEmail(bgCtx, booking, user, event)
+				}
+			}
+		}
+	}()
+
+	RespondSuccess(w, http.StatusOK, map[string]interface{}{
+		"message":        fmt.Sprintf("Bulk notifications successfully queued to %d users", len(targetBookings)),
+		"notified_count": len(targetBookings),
+	})
 }

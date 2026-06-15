@@ -50,8 +50,16 @@ func main() {
 	}
 	defer dbConn.Close()
 
+	// Pool tuning: keep connections warm. Opening a connection to a remote DB
+	// (Supabase) costs ~1.5–2s, so without this every request can re-dial and
+	// stack those handshakes into multi-second latency.
+	db.ConfigurePool(dbConn)
+
 	if err := dbConn.PingContext(ctx); err != nil {
 		log.Printf("Warning: failed to ping database (is it running?): %v", err)
+	} else {
+		db.WarmPool(ctx, dbConn, 5)
+		log.Println("✓ Database connection pool warmed")
 	}
 
 	// Observer Pattern: Event Dispatcher (Singleton)
@@ -175,7 +183,7 @@ func main() {
 	log.Println("Using Razorpay Payment Collection Provider")
 
 	// Initialize notification service
-	notifService, err := initializeNotificationService(&cfg.Twilio, &cfg.SMTP, dbConn)
+	notifService, err := initializeNotificationService(&cfg.Twilio, &cfg.SMTP, &cfg.Kapso, dbConn)
 	if err != nil {
 		log.Printf("Warning: failed to initialize notification service: %v", err)
 	}
@@ -200,6 +208,8 @@ func main() {
 	hostController := controller.NewHostController(hostService)
 	eventController := controller.NewEventController(eventService)
 	bookingController := controller.NewBookingController(bookingService)
+	walkInService := service.NewWalkInService(userRepo, bookingRepo, eventRepo, userService, bookingService)
+	walkInController := controller.NewWalkInController(walkInService, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	reviewController := controller.NewReviewController(reviewService)
 	inboxController := controller.NewInboxController(inboxService)
 	payoutController := controller.NewPayoutController(payoutService, userRepo, hostRepo, fbApp.Auth)
@@ -214,7 +224,15 @@ func main() {
 		cfg.AdminAuth.JWTSecret,
 		cfg.AdminAuth.TokenTTL,
 	)
-	adminDirectoryController := controller.NewAdminDirectoryController(adminDirectoryRepo, hostRepo, userRepo, cfg.AdminAuth.JWTSecret)
+	adminDirectoryController := controller.NewAdminDirectoryController(
+		adminDirectoryRepo,
+		hostRepo,
+		userRepo,
+		bookingRepo,
+		eventRepo,
+		notifService,
+		cfg.AdminAuth.JWTSecret,
+	)
 	adminDashboardController := controller.NewAdminDashboardController(adminDirectoryRepo, cfg.AdminAuth.JWTSecret)
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail)
 	experienceTemplateController := controller.NewExperienceTemplateController(experienceTemplateRepo)
@@ -243,6 +261,7 @@ func main() {
 		hostController,
 		eventController,
 		bookingController,
+		walkInController,
 		reviewController,
 		inboxController,
 		payoutController,
@@ -363,10 +382,11 @@ func ensurePlatformAccount(ctx context.Context, accountRepo repository.AccountRe
 func initializeNotificationService(
 	twilioConfig *config.TwilioConfig,
 	smtpConfig *config.SMTPConfig,
+	kapsoConfig *config.KapsoConfig,
 	db *sql.DB,
 ) (notification.NotificationService, error) {
-	if twilioConfig.AccountSID == "" || twilioConfig.AuthToken == "" {
-		log.Println("Warning: Twilio credentials not configured — notifications disabled")
+	if (twilioConfig.AccountSID == "" || twilioConfig.AuthToken == "") && (kapsoConfig.APIKey == "" || kapsoConfig.PhoneNumberID == "") {
+		log.Println("Warning: Neither Twilio nor Kapso credentials configured — notifications disabled")
 		return nil, nil
 	}
 
@@ -379,6 +399,7 @@ func initializeNotificationService(
 	svc := notification.NewTwilioNotificationService(
 		twilioConfig,
 		smtpConfig,
+		kapsoConfig,
 		bookingRepo,
 		eventRepo,
 		userRepo,

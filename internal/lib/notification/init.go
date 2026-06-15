@@ -10,6 +10,7 @@ import (
 func InitializeNotificationService(
 	twilioConfig *config.TwilioConfig,
 	smtpConfig *config.SMTPConfig,
+	kapsoConfig *config.KapsoConfig,
 	db *sql.DB,
 ) (NotificationService, error) {
 	// Create repositories
@@ -21,6 +22,7 @@ func InitializeNotificationService(
 	return NewTwilioNotificationService(
 		twilioConfig,
 		smtpConfig,
+		kapsoConfig,
 		bookingRepo,
 		eventRepo,
 		userRepo,

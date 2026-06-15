@@ -92,6 +92,16 @@ type PineconeConfig struct {
 	Environment string
 }
 
+// KapsoConfig holds Kapso AI WhatsApp notifications settings.
+type KapsoConfig struct {
+	APIKey               string
+	PhoneNumberID        string
+	TicketTemplateName   string
+	TicketTemplateLang   string
+	ReminderTemplateName string
+	ReminderTemplateLang string
+}
+
 // AdminAuthConfig holds credentials and signing settings for the static
 // admin-dashboard login. The dashboard authenticates with a fixed
 // username/password and receives a signed JWT used for subsequent requests.
@@ -118,6 +128,7 @@ type Config struct {
 	SMTP              SMTPConfig
 	Gemini            GeminiConfig
 	Pinecone          PineconeConfig
+	Kapso             KapsoConfig
 }
 
 // Load reads configuration from environment variables (optionally via .env).
@@ -203,6 +214,14 @@ func Load() (*Config, error) {
 			Host:        getEnv("PINECONE_HOST", ""),
 			IndexName:   getEnv("PINECONE_INDEX_NAME", "myslotmate-rag"),
 			Environment: getEnv("PINECONE_ENVIRONMENT", "us-east-1"),
+		},
+		Kapso: KapsoConfig{
+			APIKey:               getEnv("KAPSO_API_KEY", ""),
+			PhoneNumberID:        getEnv("KAPSO_PHONE_NUMBER_ID", ""),
+			TicketTemplateName:   getEnv("KAPSO_TICKET_TEMPLATE_NAME", "ticket_confirmation"),
+			TicketTemplateLang:   getEnv("KAPSO_TICKET_TEMPLATE_LANG", "en_US"),
+			ReminderTemplateName: getEnv("KAPSO_REMINDER_TEMPLATE_NAME", "event_reminder"),
+			ReminderTemplateLang: getEnv("KAPSO_REMINDER_TEMPLATE_LANG", "en_US"),
 		},
 	}
 

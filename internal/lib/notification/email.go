@@ -70,24 +70,20 @@ func (s *EmailService) SendBookingConfirmationEmail(to, userName, eventTitle, ev
 
 // SendEventReminderEmail sends event reminder email
 func (s *EmailService) SendEventReminderEmail(to, userName, eventTitle, eventTime string) error {
-	subject := "Event Starting Soon - MySlotMate"
+	subject := "Upcoming Event Reminder - MySlotMate"
 	htmlBody := fmt.Sprintf(`
 <html>
 <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-	<h2>⏰ Event Starting Soon!</h2>
+	<h2>📅 Upcoming Event Reminder</h2>
 	<p>Hi %s,</p>
-	<p>Your event <strong>%s</strong> is starting soon!</p>
-	<div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
-		<p><strong>Event:</strong> %s</p>
-		<p><strong>Date & Time:</strong> %s</p>
-	</div>
-	<p>Make sure you don't miss it!</p>
-	<p>See you soon!</p>
+	<p>This is a reminder that your event "<strong>%s</strong>" is scheduled for %s.</p>
+	<p>Please review your event details and ensure all preparations are in place for a smooth experience.</p>
+	<p>We wish you a successful event! 🎉</p>
 	<hr style="margin: 30px 0;">
 	<p style="font-size: 12px; color: #666;">MySlotMate - Event Management Made Easy</p>
 </body>
 </html>
-`, userName, eventTitle, eventTitle, eventTime)
+`, userName, eventTitle, eventTime)
 
 	return s.SendEmail(to, subject, htmlBody)
 }

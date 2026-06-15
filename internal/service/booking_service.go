@@ -18,10 +18,15 @@ import (
 type BookingService interface {
 	CreateBooking(ctx context.Context, userID uuid.UUID, req BookingCreateRequest) (*models.Booking, error)
 	ConfirmBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
+	// ConfirmBookingSilent confirms a booking without sending the guest any
+	// WhatsApp/email confirmation. Used by admin on-spot bookings, whose guest
+	// has only a synthetic contact on file.
+	ConfirmBookingSilent(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
 	CancelBooking(ctx context.Context, bookingID uuid.UUID, userID uuid.UUID, refundDestination RefundDestination) (*models.Booking, error)
 	CancelBookingByHost(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
 	GetUserBookings(ctx context.Context, userID uuid.UUID) ([]*models.Booking, error)
 	GetBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
+	SendTicketNotification(ctx context.Context, bookingID uuid.UUID, fileName string, pdfBytes []byte) error
 }
 
 type BookingCreateRequest struct {
@@ -29,6 +34,13 @@ type BookingCreateRequest struct {
 	Quantity       int
 	IdempotencyKey string
 	OccurrenceDate *time.Time // which specific date the user is booking for
+
+	// AutoConfirm makes the booking commit as `confirmed` in the same transaction
+	// instead of `pending`, removing the fragile separate confirm call that could
+	// leave a paid booking stuck at pending. Notify controls whether the guest
+	// gets the WhatsApp/email confirmation (false for admin on-spot bookings).
+	AutoConfirm bool
+	Notify      bool
 }
 
 // RefundDestination is where the refund money ends up on a user-initiated
@@ -291,14 +303,20 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		}
 	}
 
-	// Create the booking record.
+	// Create the booking record. When AutoConfirm is set the booking is written
+	// as `confirmed` directly in this transaction — so a paid booking is never
+	// left stranded at `pending` if a later, separate confirm call fails.
+	bookingStatus := models.BookingStatusPending
+	if req.AutoConfirm {
+		bookingStatus = models.BookingStatusConfirmed
+	}
 	newBooking := &models.Booking{
 		ID:              uuid.New(),
 		EventID:         req.EventID,
 		UserID:          userID,
 		OccurrenceDate:  occurrenceDate,
 		Quantity:        req.Quantity,
-		Status:          models.BookingStatusPending,
+		Status:          bookingStatus,
 		IdempotencyKey:  &idempotencyKey,
 		AmountCents:     &totalAmount,
 		ServiceFeeCents: &platformFee,
@@ -341,8 +359,22 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 
 	s.dispatcher.Publish(event.BookingCreated, newBooking)
 
-	fmt.Printf("[BOOKING] CreateBooking SUCCESS: id=%s, user=%s, event=%s, total=%d, host_earning=%d, platform_fee=%d\n",
-		newBooking.ID, userID, req.EventID, totalAmount, hostEarning, platformFee)
+	fmt.Printf("[BOOKING] CreateBooking SUCCESS: id=%s, user=%s, event=%s, total=%d, host_earning=%d, platform_fee=%d, autoconfirm=%t\n",
+		newBooking.ID, userID, req.EventID, totalAmount, hostEarning, platformFee, req.AutoConfirm)
+
+	// Auto-confirm side effects: the status is already `confirmed` (committed
+	// above), so here we only bump the event's booking counter, optionally notify
+	// the guest, and publish the confirmed event. These are non-fatal — the
+	// booking is already valid and paid.
+	if req.AutoConfirm {
+		if err := s.eventRepo.IncrementBookingCount(ctx, newBooking.EventID, newBooking.Quantity); err != nil {
+			fmt.Printf("[BOOKING] ERROR: IncrementBookingCount failed: %v\n", err)
+		}
+		if req.Notify {
+			s.sendConfirmationNotificationsAsync(newBooking)
+		}
+		s.dispatcher.Publish(event.BookingConfirmed, newBooking)
+	}
 
 	return newBooking, nil
 }
@@ -353,7 +385,16 @@ func strPtr(s string) *string {
 }
 
 func (s *bookingService) ConfirmBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error) {
-	fmt.Printf("[BOOKING] ConfirmBooking: bookingID=%s\n", bookingID)
+	return s.confirmBooking(ctx, bookingID, true)
+}
+
+// ConfirmBookingSilent confirms a booking but skips the guest notifications.
+func (s *bookingService) ConfirmBookingSilent(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error) {
+	return s.confirmBooking(ctx, bookingID, false)
+}
+
+func (s *bookingService) confirmBooking(ctx context.Context, bookingID uuid.UUID, notify bool) (*models.Booking, error) {
+	fmt.Printf("[BOOKING] ConfirmBooking: bookingID=%s notify=%t\n", bookingID, notify)
 
 	booking, err := s.bookingRepo.GetByID(ctx, bookingID)
 	if err != nil {
@@ -363,6 +404,13 @@ func (s *bookingService) ConfirmBooking(ctx context.Context, bookingID uuid.UUID
 	if booking == nil {
 		fmt.Printf("[BOOKING] ConfirmBooking: booking not found\n")
 		return nil, errors.New("booking not found")
+	}
+	// Idempotent: an already-confirmed booking is a no-op success. This makes the
+	// frontend's separate confirm call harmless now that paid bookings are
+	// auto-confirmed at creation (no double-notify, no error).
+	if booking.Status == models.BookingStatusConfirmed {
+		fmt.Printf("[BOOKING] ConfirmBooking: already confirmed, no-op\n")
+		return booking, nil
 	}
 	if booking.Status != models.BookingStatusPending {
 		fmt.Printf("[BOOKING] ConfirmBooking: cannot confirm from status=%s\n", booking.Status)
@@ -385,38 +433,40 @@ func (s *bookingService) ConfirmBooking(ctx context.Context, bookingID uuid.UUID
 		// Non-critical — booking already confirmed, counter reconciliation can happen in background
 	}
 
-	// Send booking confirmation notification (async, non-blocking)
-	fmt.Printf("[BOOKING] ConfirmBooking: sending notifications\n")
+	// Send booking confirmation notification (async, non-blocking). Skipped for
+	// silent confirmations (admin on-spot bookings have only a synthetic contact).
+	if notify {
+		s.sendConfirmationNotificationsAsync(booking)
+	}
+
+	fmt.Printf("[BOOKING] ConfirmBooking: SUCCESS (notify=%t)\n", notify)
+	s.dispatcher.Publish(event.BookingConfirmed, booking)
+	return booking, nil
+}
+
+// sendConfirmationNotificationsAsync sends the WhatsApp + email booking
+// confirmation in the background. Best-effort; failures are logged, not fatal.
+func (s *bookingService) sendConfirmationNotificationsAsync(booking *models.Booking) {
 	go func() {
-		// Fetch user and event for notification
 		user, err := s.userRepo.GetByID(context.Background(), booking.UserID)
 		if err != nil || user == nil {
 			fmt.Printf("[BOOKING] ERROR: Failed to fetch user for notification: %v\n", err)
 			return
 		}
-
 		evt, err := s.eventRepo.GetByID(context.Background(), booking.EventID)
 		if err != nil || evt == nil {
 			fmt.Printf("[BOOKING] ERROR: Failed to fetch event for notification: %v\n", err)
 			return
 		}
-
-		// Send WhatsApp confirmation notification
-		if err := s.notificationService.SendBookingConfirmationWhatsapp(context.Background(), booking, user, evt); err != nil {
-			fmt.Printf("[BOOKING] ERROR: Failed to send WhatsApp notification: %v\n", err)
-			// Non-critical — continue anyway
+		if s.notificationService.GetKapsoClient() == nil {
+			if err := s.notificationService.SendBookingConfirmationWhatsapp(context.Background(), booking, user, evt); err != nil {
+				fmt.Printf("[BOOKING] ERROR: Failed to send WhatsApp notification: %v\n", err)
+			}
 		}
-
-		// Send Email confirmation notification
 		if err := s.notificationService.SendBookingConfirmationEmail(context.Background(), booking, user, evt); err != nil {
 			fmt.Printf("[BOOKING] ERROR: Failed to send Email notification: %v\n", err)
-			// Non-critical — continue anyway
 		}
 	}()
-
-	fmt.Printf("[BOOKING] ConfirmBooking: SUCCESS\n")
-	s.dispatcher.Publish(event.BookingConfirmed, booking)
-	return booking, nil
 }
 
 func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID, userID uuid.UUID, refundDestination RefundDestination) (*models.Booking, error) {
@@ -746,4 +796,32 @@ func (s *bookingService) GetUserBookings(ctx context.Context, userID uuid.UUID) 
 
 func (s *bookingService) GetBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error) {
 	return s.bookingRepo.GetByID(ctx, bookingID)
+}
+
+func (s *bookingService) SendTicketNotification(ctx context.Context, bookingID uuid.UUID, fileName string, pdfBytes []byte) error {
+	booking, err := s.bookingRepo.GetByID(ctx, bookingID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch booking: %w", err)
+	}
+	if booking == nil {
+		return fmt.Errorf("booking not found")
+	}
+
+	user, err := s.userRepo.GetByID(ctx, booking.UserID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch user: %w", err)
+	}
+	if user == nil {
+		return fmt.Errorf("user not found")
+	}
+
+	event, err := s.eventRepo.GetByID(ctx, booking.EventID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch event: %w", err)
+	}
+	if event == nil {
+		return fmt.Errorf("event not found")
+	}
+
+	return s.notificationService.SendBookingConfirmationWhatsappWithPDF(ctx, booking, user, event, fileName, pdfBytes)
 }

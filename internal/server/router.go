@@ -1,8 +1,12 @@
 package server
 
 import (
+	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -41,6 +45,7 @@ func NewRouter(
 	hostCtrl *controller.HostController,
 	eventCtrl *controller.EventController,
 	bookingCtrl *controller.BookingController,
+	walkInCtrl *controller.WalkInController,
 	reviewCtrl *controller.ReviewController,
 	inboxCtrl *controller.InboxController,
 	payoutCtrl *controller.PayoutController,
@@ -68,6 +73,11 @@ func NewRouter(
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+
+	// Server-side image proxy so browser clients (e.g. the admin ticket
+	// generator) can embed remote images without hitting CORS. Restricted to
+	// https + an allowlist of hosts to avoid SSRF.
+	r.Get("/image-proxy", imageProxyHandler)
 
 	// Swagger UI & spec
 	r.Get("/docs", func(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +112,10 @@ func NewRouter(
 
 	if bookingCtrl != nil {
 		bookingCtrl.RegisterRoutes(r)
+	}
+
+	if walkInCtrl != nil {
+		walkInCtrl.RegisterRoutes(r)
 	}
 
 	if reviewCtrl != nil {
@@ -170,6 +184,48 @@ func NewRouter(
 	}
 
 	return r
+}
+
+// imageProxyHandler fetches an allowed remote image server-side and streams it
+// back, so browser clients can embed it (e.g. in a generated PDF) without CORS
+// problems. Limited to https + an allowlist of hosts to avoid SSRF.
+func imageProxyHandler(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("url")
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" {
+		http.Error(w, "invalid url", http.StatusBadRequest)
+		return
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "api.qrserver.com" && !strings.HasSuffix(host, ".amazonaws.com") {
+		http.Error(w, "host not allowed", http.StatusForbidden)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, raw, nil)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "fetch failed", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "image/") {
+		http.Error(w, "not an image", http.StatusUnsupportedMediaType)
+		return
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // corsMiddlewareAllowAll enables CORS for all origins.

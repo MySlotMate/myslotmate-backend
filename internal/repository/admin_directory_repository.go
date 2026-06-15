@@ -235,6 +235,7 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 // experience, owning host, and payment for display.
 type AdminBookingRow struct {
 	ID             uuid.UUID
+	EventID        uuid.UUID
 	OccurrenceDate sql.NullTime
 	CreatedAt      time.Time
 	Quantity       int64
@@ -303,7 +304,7 @@ func (r *AdminDirectoryRepository) ListBookings(ctx context.Context, p ListBooki
 
 	pageSQL := fmt.Sprintf(`
 		SELECT
-			b.id, b.occurrence_date, b.created_at, b.quantity, b.amount_cents, b.status,
+			b.id, b.event_id, b.occurrence_date, b.created_at, b.quantity, b.amount_cents, b.status,
 			u.name, u.email,
 			e.title,
 			h.first_name, h.last_name, h.city,
@@ -324,7 +325,7 @@ func (r *AdminDirectoryRepository) ListBookings(ctx context.Context, p ListBooki
 	for rows.Next() {
 		var b AdminBookingRow
 		if err := rows.Scan(
-			&b.ID, &b.OccurrenceDate, &b.CreatedAt, &b.Quantity, &b.AmountCents, &b.Status,
+			&b.ID, &b.EventID, &b.OccurrenceDate, &b.CreatedAt, &b.Quantity, &b.AmountCents, &b.Status,
 			&b.UserName, &b.UserEmail,
 			&b.EventTitle,
 			&b.HostFirstName, &b.HostLastName, &b.HostCity,

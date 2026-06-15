@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -26,6 +27,7 @@ func (c *BookingController) RegisterRoutes(r chi.Router) {
 		r.Post("/{bookingID}/cancel", c.CancelBooking)
 		r.Get("/{bookingID}", c.GetBooking)
 		r.Get("/user/{userID}", c.GetUserBookings)
+		r.Post("/{bookingID}/ticket-notification", c.SendTicketNotification)
 	})
 }
 
@@ -48,6 +50,10 @@ func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request
 		EventID:        req.EventID,
 		Quantity:       req.Quantity,
 		IdempotencyKey: req.IdempotencyKey,
+		// Confirm in the same transaction so a paid booking can't get stuck at
+		// `pending` if the separate confirm call fails. Notify the guest as before.
+		AutoConfirm: true,
+		Notify:      true,
 	}
 
 	// Parse occurrence_date if provided (for recurring events)
@@ -79,7 +85,6 @@ func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request
 
 	RespondSuccess(w, http.StatusCreated, booking)
 }
-
 
 func (c *BookingController) GetUserBookings(w http.ResponseWriter, r *http.Request) {
 	userIDStr := chi.URLParam(r, "userID")
@@ -158,4 +163,39 @@ func (c *BookingController) GetBooking(w http.ResponseWriter, r *http.Request) {
 	}
 
 	RespondSuccess(w, http.StatusOK, booking)
+}
+
+func (c *BookingController) SendTicketNotification(w http.ResponseWriter, r *http.Request) {
+	bookingID, err := uuid.Parse(chi.URLParam(r, "bookingID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid booking ID")
+		return
+	}
+
+	// Parse multipart form (max 10MB memory)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		RespondError(w, http.StatusBadRequest, "Failed to parse multipart form")
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Missing file field")
+		return
+	}
+	defer file.Close()
+
+	pdfBytes, err := io.ReadAll(file)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, "Failed to read file contents")
+		return
+	}
+
+	err = c.bookingService.SendTicketNotification(r.Context(), bookingID, header.Filename, pdfBytes)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, map[string]interface{}{"success": true})
 }

@@ -14,6 +14,7 @@ import (
 type UserRepository interface {
 	Create(ctx context.Context, user *models.User) error
 	GetByEmail(ctx context.Context, email string) (*models.User, error)
+	GetByPhone(ctx context.Context, phone string) (*models.User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	ExistsByEmail(ctx context.Context, email string) (bool, error)
 	SetVerified(ctx context.Context, id uuid.UUID) error
@@ -124,6 +125,14 @@ func scanUser(row interface {
 func (r *postgresUserRepository) GetByEmail(ctx context.Context, email string) (*models.User, error) {
 	query := `SELECT ` + userColumns + ` FROM users WHERE email = $1`
 	return scanUser(r.db.QueryRowContext(ctx, query, email))
+}
+
+// GetByPhone returns the oldest user with the given phone number, or (nil, nil)
+// if none exists. Walk-in/on-spot bookings reuse an existing guest by phone so
+// the same person isn't duplicated across repeat visits.
+func (r *postgresUserRepository) GetByPhone(ctx context.Context, phone string) (*models.User, error) {
+	query := `SELECT ` + userColumns + ` FROM users WHERE phn_number = $1 ORDER BY created_at ASC LIMIT 1`
+	return scanUser(r.db.QueryRowContext(ctx, query, phone))
 }
 
 func (r *postgresUserRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.User, error) {

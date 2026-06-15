@@ -20,6 +20,10 @@ type BookingRepository interface {
 	ListAttendeesByEventOccurrence(ctx context.Context, eventID uuid.UUID, occurrenceDate time.Time) ([]*models.Attendee, error)
 	GetTotalBookedQuantity(ctx context.Context, eventID uuid.UUID) (int, error)
 	GetTotalBookedQuantityForOccurrence(ctx context.Context, eventID uuid.UUID, occurrenceDate time.Time) (int, error)
+	// HasActiveBookingForOccurrence reports whether the user already holds an
+	// active (pending/confirmed) booking for this exact event occurrence. Used to
+	// stop the same guest (matched by phone) double-booking the same slot.
+	HasActiveBookingForOccurrence(ctx context.Context, userID, eventID uuid.UUID, occurrenceDate time.Time) (bool, error)
 	GetBookedQuantitySince(ctx context.Context, eventID uuid.UUID, since time.Time) (int, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status models.BookingStatus) error
 	UpdatePaymentID(ctx context.Context, id uuid.UUID, paymentID uuid.UUID) error
@@ -303,6 +307,19 @@ func (r *postgresBookingRepository) GetTotalBookedQuantityForOccurrence(ctx cont
 	var total int
 	err := r.db.QueryRowContext(ctx, query, eventID, occurrenceDate).Scan(&total)
 	return total, err
+}
+
+// HasActiveBookingForOccurrence reports whether userID already has a
+// pending/confirmed booking for the exact (eventID, occurrenceDate) slot.
+func (r *postgresBookingRepository) HasActiveBookingForOccurrence(ctx context.Context, userID, eventID uuid.UUID, occurrenceDate time.Time) (bool, error) {
+	const query = `SELECT EXISTS(
+		SELECT 1 FROM bookings
+		WHERE user_id = $1 AND event_id = $2 AND occurrence_date = $3
+		  AND status IN ('pending', 'confirmed')
+	)`
+	var exists bool
+	err := r.db.QueryRowContext(ctx, query, userID, eventID, occurrenceDate).Scan(&exists)
+	return exists, err
 }
 
 // GetBookedQuantitySince returns the total booked quantity (people count, summing

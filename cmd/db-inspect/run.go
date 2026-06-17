@@ -7,46 +7,46 @@ import (
 
 // This prints the step-by-step instructions for manual database inspection
 func main() {
-	fmt.Println("=== DATABASE INSPECTION INSTRUCTIONS ===\n")
+	fmt.Print("=== DATABASE INSPECTION INSTRUCTIONS ===\n\n")
 
-	fmt.Println("To check the migration status and payout_methods schema, connect to your")
-	fmt.Println("PostgreSQL database and run these queries:\n")
+	fmt.Print("To check the migration status and payout_methods schema, connect to your\n")
+	fmt.Print("PostgreSQL database and run these queries:\n\n")
 
-	fmt.Println("1. CHECK APPLIED MIGRATIONS:")
-	fmt.Println("   SELECT version, applied_at FROM schema_migrations ORDER BY version;\n")
+	fmt.Print("1. CHECK APPLIED MIGRATIONS:\n")
+	fmt.Print("   SELECT version, applied_at FROM schema_migrations ORDER BY version;\n\n")
 
-	fmt.Println("2. CHECK IF make_payout_methods_host_id_nullable WAS APPLIED:")
-	fmt.Println("   SELECT * FROM schema_migrations")
-	fmt.Println("   WHERE version = '20260324130000_make_payout_methods_host_id_nullable.sql';\n")
+	fmt.Print("2. CHECK IF make_payout_methods_host_id_nullable WAS APPLIED:\n")
+	fmt.Print("   SELECT * FROM schema_migrations\n")
+	fmt.Print("   WHERE version = '20260324130000_make_payout_methods_host_id_nullable.sql';\n\n")
 
-	fmt.Println("3. CHECK PAYOUT_METHODS HOST_ID COLUMN:")
-	fmt.Println("   SELECT column_name, data_type, is_nullable")
-	fmt.Println("   FROM information_schema.columns")
-	fmt.Println("   WHERE table_name = 'payout_methods' AND column_name = 'host_id';\n")
+	fmt.Print("3. CHECK PAYOUT_METHODS HOST_ID COLUMN:\n")
+	fmt.Print("   SELECT column_name, data_type, is_nullable\n")
+	fmt.Print("   FROM information_schema.columns\n")
+	fmt.Print("   WHERE table_name = 'payout_methods' AND column_name = 'host_id';\n\n")
 
-	fmt.Println("4. CHECK ALL PAYOUT_METHODS COLUMNS:")
-	fmt.Println("   SELECT column_name, data_type, is_nullable")
-	fmt.Println("   FROM information_schema.columns")
-	fmt.Println("   WHERE table_name = 'payout_methods'")
-	fmt.Println("   ORDER BY ordinal_position;\n")
+	fmt.Print("4. CHECK ALL PAYOUT_METHODS COLUMNS:\n")
+	fmt.Print("   SELECT column_name, data_type, is_nullable\n")
+	fmt.Print("   FROM information_schema.columns\n")
+	fmt.Print("   WHERE table_name = 'payout_methods'\n")
+	fmt.Print("   ORDER BY ordinal_position;\n\n")
 
-	fmt.Println("5. CHECK FOREIGN KEY CONSTRAINTS ON PAYOUT_METHODS:")
-	fmt.Println("   SELECT constraint_name, column_name")
-	fmt.Println("   FROM information_schema.key_column_usage")
-	fmt.Println("   WHERE table_name = 'payout_methods'")
-	fmt.Println("   AND constraint_name LIKE '%host%';\n")
+	fmt.Print("5. CHECK FOREIGN KEY CONSTRAINTS ON PAYOUT_METHODS:\n")
+	fmt.Print("   SELECT constraint_name, column_name\n")
+	fmt.Print("   FROM information_schema.key_column_usage\n")
+	fmt.Print("   WHERE table_name = 'payout_methods'\n")
+	fmt.Print("   AND constraint_name LIKE '%host%';\n\n")
 
-	fmt.Println("6. CHECK ALL CONSTRAINTS ON PAYOUT_METHODS:")
-	fmt.Println("   SELECT constraint_name, constraint_type")
-	fmt.Println("   FROM information_schema.table_constraints")
-	fmt.Println("   WHERE table_name = 'payout_methods';\n")
+	fmt.Print("6. CHECK ALL CONSTRAINTS ON PAYOUT_METHODS:\n")
+	fmt.Print("   SELECT constraint_name, constraint_type\n")
+	fmt.Print("   FROM information_schema.table_constraints\n")
+	fmt.Print("   WHERE table_name = 'payout_methods';\n\n")
 
-	fmt.Println("\nEnvironment:")
+	fmt.Print("\nEnvironment:\n")
 	fmt.Printf("DATABASE_URL is set: %v\n", os.Getenv("DATABASE_URL") != "")
 
 	if os.Getenv("DATABASE_URL") != "" {
-		fmt.Println("\n✓ DATABASE_URL is available. You can run: go run ./cmd/checkdb")
+		fmt.Print("\n✓ DATABASE_URL is available. You can run: go run ./cmd/checkdb\n")
 	} else {
-		fmt.Println("\n✗ DATABASE_URL is not set. Set it in your .env file.")
+		fmt.Print("\n✗ DATABASE_URL is not set. Set it in your .env file.\n")
 	}
 }

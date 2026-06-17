@@ -25,6 +25,7 @@ type PayoutController struct {
 	userRepo      repository.UserRepository
 	hostRepo      repository.HostRepository
 	firebaseAuth  *fbauth.Client
+	jwtSecret     string
 }
 
 func NewPayoutController(
@@ -32,12 +33,14 @@ func NewPayoutController(
 	ur repository.UserRepository,
 	hr repository.HostRepository,
 	fa *fbauth.Client,
+	jwtSecret string,
 ) *PayoutController {
 	return &PayoutController{
 		payoutService: s,
 		userRepo:      ur,
 		hostRepo:      hr,
 		firebaseAuth:  fa,
+		jwtSecret:     jwtSecret,
 	}
 }
 
@@ -47,7 +50,7 @@ func (c *PayoutController) RegisterRoutes(r chi.Router) {
 		// identity is derived from the auth context (resolveHostID) — body
 		// fields and URL params named host_id are IGNORED for ownership.
 		// Closes bug C1 (unauthenticated payout drain).
-		r.Use(auth.RequireUser(c.firebaseAuth))
+		r.Use(auth.RequireUser(c.firebaseAuth, c.jwtSecret))
 
 		// Payout Methods
 		r.Post("/methods", c.AddPayoutMethod)

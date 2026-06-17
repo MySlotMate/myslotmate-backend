@@ -23,7 +23,7 @@ import (
 //	    r.Post("/withdraw", c.RequestWithdrawal)
 //	    // ...
 //	})
-func RequireUser(firebaseAuth *auth.Client) func(http.Handler) http.Handler {
+func RequireUser(firebaseAuth *auth.Client, jwtSecret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -35,6 +35,16 @@ func RequireUser(firebaseAuth *auth.Client) func(http.Handler) http.Handler {
 			if idToken == authHeader { // no "Bearer " prefix found
 				http.Error(w, `{"success":false,"error":"invalid Authorization header format"}`, http.StatusUnauthorized)
 				return
+			}
+
+			// Try to verify as custom user JWT first if secret is configured
+			if jwtSecret != "" {
+				if claims, err := ParseUserToken(jwtSecret, idToken); err == nil {
+					ctx := context.WithValue(r.Context(), ContextKeyEmail, claims.Email)
+					ctx = context.WithValue(ctx, ContextKeyUID, claims.UID)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
 			}
 
 			token, err := firebaseAuth.VerifyIDToken(r.Context(), idToken)

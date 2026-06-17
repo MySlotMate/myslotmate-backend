@@ -27,6 +27,7 @@ import (
 	"myslotmate-backend/internal/lib/rag"
 	"myslotmate-backend/internal/lib/realtime"
 	"myslotmate-backend/internal/lib/storage"
+	"myslotmate-backend/internal/lib/messagecentral"
 	"myslotmate-backend/internal/lib/worker"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
@@ -188,7 +189,10 @@ func main() {
 		log.Printf("Warning: failed to initialize notification service: %v", err)
 	}
 
-	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, ledgerRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService)
+	// Initialize Message Central VerifyNow client for phone login OTP
+	otpClient := messagecentral.NewClient(cfg.MessageCentral.CustomerID, cfg.MessageCentral.Password)
+
+	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, ledgerRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService, otpClient, cfg.AdminAuth.JWTSecret, fbApp.Auth)
 	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, dispatcher)
 	bookingService := service.NewBookingService(dbConn, bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, userService, dispatcher, notifService)
 	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, dispatcher, bookingService)
@@ -212,7 +216,7 @@ func main() {
 	walkInController := controller.NewWalkInController(walkInService, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	reviewController := controller.NewReviewController(reviewService)
 	inboxController := controller.NewInboxController(inboxService)
-	payoutController := controller.NewPayoutController(payoutService, userRepo, hostRepo, fbApp.Auth)
+	payoutController := controller.NewPayoutController(payoutService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider)
 	supportController := controller.NewSupportController(supportService, uploadService)
 	uploadController := controller.NewUploadController(uploadService)

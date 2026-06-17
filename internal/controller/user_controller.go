@@ -30,6 +30,8 @@ func (c *UserController) RegisterRoutes(r chi.Router) {
 	r.Post("/auth/verify-aadhar/complete", c.CompleteAadharVerification)
 	r.Post("/auth/otp/send", c.SendPhoneOTP)
 	r.Post("/auth/otp/verify", c.VerifyPhoneOTP)
+	r.Post("/auth/otp/login/send", c.SendLoginOTP)
+	r.Post("/auth/otp/login/verify", c.VerifyLoginOTP)
 	r.Route("/users", func(r chi.Router) {
 		r.Get("/me", c.GetProfile)
 		r.Get("/by-firebase/{firebaseID}", c.GetUserByFirebaseID)
@@ -510,4 +512,65 @@ func (c *UserController) VerifyPhoneOTP(w http.ResponseWriter, r *http.Request) 
 	}
 
 	RespondSuccess(w, http.StatusOK, map[string]string{"message": "OTP verified successfully"})
+}
+
+type SendLoginOTPRequest struct {
+	Phone string `json:"phone"`
+}
+
+type VerifyLoginOTPRequest struct {
+	Phone     string `json:"phone"`
+	SessionID string `json:"session_id"`
+	OTP       string `json:"otp"`
+}
+
+// SendLoginOTP handles initiating OTP flow via 2Factor
+func (c *UserController) SendLoginOTP(w http.ResponseWriter, r *http.Request) {
+	var req SendLoginOTPRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	if req.Phone == "" {
+		RespondError(w, http.StatusBadRequest, "Phone number is required")
+		return
+	}
+
+	sessionID, err := c.userService.SendLoginOTP(r.Context(), req.Phone)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, map[string]string{
+		"session_id": sessionID,
+		"message":    "OTP sent successfully",
+	})
+}
+
+// VerifyLoginOTP handles verifying the OTP and issuing JWT
+func (c *UserController) VerifyLoginOTP(w http.ResponseWriter, r *http.Request) {
+	var req VerifyLoginOTPRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	if req.Phone == "" || req.SessionID == "" || req.OTP == "" {
+		RespondError(w, http.StatusBadRequest, "phone, session_id, and otp are required")
+		return
+	}
+
+	user, token, firebaseCustomToken, err := c.userService.VerifyLoginOTP(r.Context(), req.Phone, req.SessionID, req.OTP)
+	if err != nil {
+		RespondError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, map[string]interface{}{
+		"user":                  user,
+		"token":                 token,
+		"firebase_custom_token": firebaseCustomToken,
+	})
 }

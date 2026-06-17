@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"myslotmate-backend/internal/models"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -131,8 +132,33 @@ func (r *postgresUserRepository) GetByEmail(ctx context.Context, email string) (
 // if none exists. Walk-in/on-spot bookings reuse an existing guest by phone so
 // the same person isn't duplicated across repeat visits.
 func (r *postgresUserRepository) GetByPhone(ctx context.Context, phone string) (*models.User, error) {
-	query := `SELECT ` + userColumns + ` FROM users WHERE phn_number = $1 ORDER BY created_at ASC LIMIT 1`
-	return scanUser(r.db.QueryRowContext(ctx, query, phone))
+	// Extract the last 10 digits
+	var sb strings.Builder
+	for _, char := range phone {
+		if char >= '0' && char <= '9' {
+			sb.WriteRune(char)
+		}
+	}
+	digits := sb.String()
+	var clean10 string
+	if len(digits) >= 10 {
+		clean10 = digits[len(digits)-10:]
+	}
+
+	if clean10 == "" {
+		query := `SELECT ` + userColumns + ` FROM users WHERE phn_number = $1 ORDER BY created_at ASC LIMIT 1`
+		return scanUser(r.db.QueryRowContext(ctx, query, phone))
+	}
+
+	query := `SELECT ` + userColumns + ` FROM users 
+              WHERE phn_number = $1 
+                 OR phn_number = $2 
+                 OR phn_number = '+91' || $2 
+                 OR phn_number = '91' || $2 
+                 OR phn_number = '0' || $2 
+                 OR RIGHT(REGEXP_REPLACE(phn_number, '[^0-9]', '', 'g'), 10) = $2
+              ORDER BY created_at ASC LIMIT 1`
+	return scanUser(r.db.QueryRowContext(ctx, query, phone, clean10))
 }
 
 func (r *postgresUserRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.User, error) {

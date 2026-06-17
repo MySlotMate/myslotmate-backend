@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"time"
 
+	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/lib/event"
 	"myslotmate-backend/internal/lib/identity"
 	"myslotmate-backend/internal/lib/payment"
 	"myslotmate-backend/internal/lib/notification"
+	"myslotmate-backend/internal/lib/messagecentral"
 	"myslotmate-backend/internal/lib/validation"
 	"myslotmate-backend/internal/lib/worker"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 
+	fbauth "firebase.google.com/go/v4/auth"
 	"github.com/google/uuid"
 )
 
@@ -39,6 +42,8 @@ type UserService interface {
 	GetByAuthUID(ctx context.Context, authUID string) (*models.User, error)
 	SendPhoneOTP(ctx context.Context, userID uuid.UUID) error
 	VerifyPhoneOTP(ctx context.Context, userID uuid.UUID, otp string) error
+	SendLoginOTP(ctx context.Context, phone string) (string, error)
+	VerifyLoginOTP(ctx context.Context, phone, sessionID, otp string) (*models.User, string, string, error)
 }
 
 type SignUpRequest struct {
@@ -108,9 +113,12 @@ type userService struct {
 	aadharProvider  identity.AadharProvider
 	paymentProvider payment.Provider
 	notifService    notification.NotificationService
+	otpClient       messagecentral.Client
+	jwtSecret       string
+	firebaseAuth    *fbauth.Client
 }
 
-// NewUserService Factory for UserService
+// NewUserService Factory for creating a UserService
 func NewUserService(
 	repo repository.UserRepository,
 	hostRepo repository.HostRepository,
@@ -123,6 +131,9 @@ func NewUserService(
 	ap identity.AadharProvider,
 	pp payment.Provider,
 	ns notification.NotificationService,
+	tfClient messagecentral.Client,
+	jwtSecret string,
+	firebaseAuth *fbauth.Client,
 ) UserService {
 	return &userService{
 		repo:            repo,
@@ -136,6 +147,9 @@ func NewUserService(
 		aadharProvider:  ap,
 		paymentProvider: pp,
 		notifService:    ns,
+		otpClient:       tfClient,
+		jwtSecret:       jwtSecret,
+		firebaseAuth:    firebaseAuth,
 	}
 }
 
@@ -854,4 +868,80 @@ func (s *userService) GetByAuthUID(ctx context.Context, authUID string) (*models
 		return nil, errors.New("user not found")
 	}
 	return user, nil
+}
+
+// SendLoginOTP sends a verification code via 2Factor
+func (s *userService) SendLoginOTP(ctx context.Context, phone string) (string, error) {
+	if phone == "" {
+		return "", errors.New("phone number is required")
+	}
+	return s.otpClient.SendOTP(ctx, phone)
+}
+
+// VerifyLoginOTP verifies OTP and returns signed token, Firebase Custom Token, and user profile
+func (s *userService) VerifyLoginOTP(ctx context.Context, phone string, sessionID string, otp string) (*models.User, string, string, error) {
+	if phone == "" || sessionID == "" || otp == "" {
+		return nil, "", "", errors.New("phone, session_id, and otp are required")
+	}
+
+	verified, err := s.otpClient.VerifyOTP(ctx, sessionID, otp)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if !verified {
+		return nil, "", "", errors.New("invalid or expired OTP")
+	}
+
+	// OTP verified! Find or create user.
+	user, err := s.repo.GetByPhone(ctx, phone)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to lookup user: %w", err)
+	}
+
+	if user == nil {
+		// Create a new user
+		user = &models.User{
+			ID:              uuid.New(),
+			AuthUID:         "phone:" + phone,
+			Name:            "Guest User",
+			PhnNumber:       phone,
+			Email:           "",
+			IsVerified:      false,
+			IsPhoneVerified: true,
+			CreatedAt:       time.Now(),
+			UpdatedAt:       time.Now(),
+		}
+		if err := s.repo.Create(ctx, user); err != nil {
+			return nil, "", "", fmt.Errorf("failed to create user: %w", err)
+		}
+
+		// Publish Event (Observer Pattern) - "User Created"
+		s.dispatcher.Publish(event.UserCreated, user)
+
+		s.workerPool.Submit(func() {
+			fmt.Printf("User registered via phone: %s (ID: %s)\n", user.PhnNumber, user.ID)
+		})
+	} else if !user.IsPhoneVerified {
+		if err := s.repo.SetPhoneVerified(ctx, user.ID); err == nil {
+			user.IsPhoneVerified = true
+		}
+	}
+
+	// Issue user token (signed JWT) valid for 30 days
+	token, _, err := auth.IssueUserToken(s.jwtSecret, user.AuthUID, user.Email, user.PhnNumber, 30*24*time.Hour)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to issue JWT token: %w", err)
+	}
+
+	var firebaseCustomToken string
+	if s.firebaseAuth != nil {
+		fbToken, err := s.firebaseAuth.CustomToken(ctx, user.AuthUID)
+		if err != nil {
+			fmt.Printf("[FIREBASE] Warning: failed to generate custom token: %v\n", err)
+		} else {
+			firebaseCustomToken = fbToken
+		}
+	}
+
+	return user, token, firebaseCustomToken, nil
 }

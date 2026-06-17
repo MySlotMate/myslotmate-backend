@@ -102,6 +102,12 @@ type KapsoConfig struct {
 	ReminderTemplateLang string
 }
 
+// MessageCentralConfig holds Message Central VerifyNow credentials.
+type MessageCentralConfig struct {
+	CustomerID string
+	Password   string
+}
+
 // AdminAuthConfig holds credentials and signing settings for the static
 // admin-dashboard login. The dashboard authenticates with a fixed
 // username/password and receives a signed JWT used for subsequent requests.
@@ -129,6 +135,7 @@ type Config struct {
 	Gemini            GeminiConfig
 	Pinecone          PineconeConfig
 	Kapso             KapsoConfig
+	MessageCentral    MessageCentralConfig
 }
 
 // Load reads configuration from environment variables (optionally via .env).
@@ -222,6 +229,10 @@ func Load() (*Config, error) {
 			TicketTemplateLang:   getEnv("KAPSO_TICKET_TEMPLATE_LANG", "en_US"),
 			ReminderTemplateName: getEnv("KAPSO_REMINDER_TEMPLATE_NAME", "event_reminder"),
 			ReminderTemplateLang: getEnv("KAPSO_REMINDER_TEMPLATE_LANG", "en_US"),
+		},
+		MessageCentral: MessageCentralConfig{
+			CustomerID: getEnv("MSGCENTRAL_CUSTOMER_ID", ""),
+			Password:   getEnv("MSGCENTRAL_PASSWORD", ""),
 		},
 	}
 

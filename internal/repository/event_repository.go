@@ -257,7 +257,7 @@ func (r *postgresEventRepository) UpdateStatus(ctx context.Context, id uuid.UUID
 }
 
 func (r *postgresEventRepository) ListPublished(ctx context.Context, limit, offset int) ([]*models.Event, error) {
-	query := `SELECT ` + eventColumns + ` FROM events WHERE status IN ('live', 'paused') ORDER BY time ASC LIMIT $1 OFFSET $2`
+	query := `SELECT ` + eventColumns + ` FROM events WHERE status IN ('live', 'paused') ORDER BY created_at DESC LIMIT $1 OFFSET $2`
 	return r.scanEvents(ctx, query, limit, offset)
 }
 

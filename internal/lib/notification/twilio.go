@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"myslotmate-backend/internal/config"
+	"myslotmate-backend/internal/lib/timeutil"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 	"strings"
@@ -104,7 +105,7 @@ func (s *TwilioNotificationService) SendBookingConfirmationWhatsapp(ctx context.
 	message := fmt.Sprintf(
 		"🎉 Booking Confirmed!\n\nEvent: %s\nTime: %s\nTickets: %d\n\nThank you for booking with MySlotMate!",
 		event.Title,
-		event.Time.Format("Jan 2, 2006 3:04 PM"),
+		timeutil.FormatEventTime(event.Time),
 		booking.Quantity,
 	)
 
@@ -147,7 +148,7 @@ func (s *TwilioNotificationService) SendBookingConfirmationEmail(ctx context.Con
 		user.Email,
 		user.Name,
 		event.Title,
-		event.Time.Format("Jan 2, 2006 3:04 PM"),
+		timeutil.FormatEventTime(event.Time),
 		fmt.Sprintf("%d", booking.Quantity),
 	)
 	if err != nil {
@@ -169,9 +170,9 @@ func (s *TwilioNotificationService) SendEventReminderWhatsapp(ctx context.Contex
 		return fmt.Errorf("user phone not available")
 	}
 
-	eventTimeStr := event.Time.Format("Jan 2, 2006 3:04 PM")
+	eventTimeStr := timeutil.FormatEventTime(event.Time)
 	if !booking.OccurrenceDate.IsZero() {
-		eventTimeStr = booking.OccurrenceDate.Format("Jan 2, 2006 3:04 PM")
+		eventTimeStr = timeutil.FormatEventTime(booking.OccurrenceDate)
 	}
 
 	if s.kapsoClient != nil {
@@ -270,7 +271,7 @@ func (s *TwilioNotificationService) SendEventReminderEmail(ctx context.Context, 
 		user.Email,
 		user.Name,
 		event.Title,
-		event.Time.Format("Jan 2, 2006 3:04 PM"),
+		timeutil.FormatEventTime(event.Time),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to send reminder email: %w", err)

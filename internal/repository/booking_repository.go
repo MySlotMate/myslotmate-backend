@@ -385,9 +385,13 @@ func (r *postgresBookingRepository) MarkEmailReminderNotificationSent(ctx contex
 }
 
 func (r *postgresBookingRepository) ListPendingReminderNotifications(ctx context.Context, limit int) ([]*models.Booking, error) {
+	// Select bookings where AT LEAST ONE channel reminder is still unsent.
+	// Gating on email alone caused WhatsApp to be re-sent on every tick for
+	// users without an email (the email send fails before the email flag is set).
 	query := `SELECT ` + bookingColumns + `
-		FROM bookings 
-		WHERE status IN ('pending', 'confirmed') AND reminder_notification_sent_email = false
+		FROM bookings
+		WHERE status IN ('pending', 'confirmed')
+		  AND (reminder_notification_sent_email = false OR reminder_notification_sent_whatsapp = false)
 		LIMIT $1`
 	rows, err := r.db.QueryContext(ctx, query, limit)
 	if err != nil {

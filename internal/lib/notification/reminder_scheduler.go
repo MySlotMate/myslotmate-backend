@@ -101,8 +101,15 @@ func (rs *ReminderScheduler) processReminders() error {
 			continue
 		}
 
-		// If event already started or notification already sent, skip
-		if booking.ReminderNotificationSentEmail || now.After(evt.Time) {
+		// If the event has already started, skip both channels
+		if now.After(evt.Time) {
+			continue
+		}
+
+		// If both channel reminders have already been sent, nothing to do.
+		// Each channel is gated independently below so that a failure on one
+		// (e.g. user has no email) never causes the other to be re-sent.
+		if booking.ReminderNotificationSentWhatsapp && booking.ReminderNotificationSentEmail {
 			continue
 		}
 
@@ -116,18 +123,23 @@ func (rs *ReminderScheduler) processReminders() error {
 		fmt.Printf("[REMINDER] Sending reminder for booking %s (event %s at %s)\n",
 			booking.ID, evt.Title, evt.Time.Format("2006-01-02 15:04:05"))
 
-		// Send WhatsApp reminder (error doesn't block email)
-		if err := rs.notifService.SendEventReminderWhatsapp(ctx, booking, user, evt); err != nil {
-			fmt.Printf("[REMINDER] Error sending WhatsApp reminder for booking %s: %v\n",
-				booking.ID, err)
-			// Continue to email anyway — non-critical failure
+		// Send WhatsApp reminder only if not already sent. The send call marks
+		// the booking's WhatsApp flag on success, so it won't be re-sent next tick.
+		if !booking.ReminderNotificationSentWhatsapp {
+			if err := rs.notifService.SendEventReminderWhatsapp(ctx, booking, user, evt); err != nil {
+				fmt.Printf("[REMINDER] Error sending WhatsApp reminder for booking %s: %v\n",
+					booking.ID, err)
+				// Non-critical failure — independent of email below
+			}
 		}
 
-		// Send Email reminder (independent of WhatsApp result)
-		if err := rs.notifService.SendEventReminderEmail(ctx, booking, user, evt); err != nil {
-			fmt.Printf("[REMINDER] Error sending Email reminder for booking %s: %v\n",
-				booking.ID, err)
-			// Non-critical failure — continue to next booking
+		// Send Email reminder only if not already sent (independent of WhatsApp result)
+		if !booking.ReminderNotificationSentEmail {
+			if err := rs.notifService.SendEventReminderEmail(ctx, booking, user, evt); err != nil {
+				fmt.Printf("[REMINDER] Error sending Email reminder for booking %s: %v\n",
+					booking.ID, err)
+				// Non-critical failure — continue to next booking
+			}
 		}
 	}
 

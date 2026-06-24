@@ -11,6 +11,7 @@ import (
 
 	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/lib/notification"
+	"myslotmate-backend/internal/lib/timeutil"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 
@@ -591,9 +592,9 @@ func (c *AdminDirectoryController) GetBookingReminderPreview(w http.ResponseWrit
 		return
 	}
 
-	eventTimeStr := event.Time.Format("Jan 2, 2006 3:04 PM")
+	eventTimeStr := timeutil.FormatEventTime(event.Time)
 	if !booking.OccurrenceDate.IsZero() {
-		eventTimeStr = booking.OccurrenceDate.Format("Jan 2, 2006 3:04 PM")
+		eventTimeStr = timeutil.FormatEventTime(booking.OccurrenceDate)
 	}
 
 	whatsappBody := fmt.Sprintf(

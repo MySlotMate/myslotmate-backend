@@ -238,7 +238,7 @@ func main() {
 		cfg.AdminAuth.JWTSecret,
 	)
 	adminDashboardController := controller.NewAdminDashboardController(adminDirectoryRepo, cfg.AdminAuth.JWTSecret)
-	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail)
+	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	experienceTemplateController := controller.NewExperienceTemplateController(experienceTemplateRepo)
 
 	// Initialize RAG components

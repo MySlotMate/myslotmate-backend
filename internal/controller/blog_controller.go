@@ -21,28 +21,31 @@ type BlogController struct {
 	userRepo     repository.UserRepository
 	firebaseAuth *fbauth.Client
 	adminEmail   string
+	jwtSecret    string
 }
 
 // NewBlogController Factory for BlogController
-func NewBlogController(br repository.BlogRepository, ur repository.UserRepository, fa *fbauth.Client, adminEmail string) *BlogController {
+func NewBlogController(br repository.BlogRepository, ur repository.UserRepository, fa *fbauth.Client, adminEmail, jwtSecret string) *BlogController {
 	return &BlogController{
 		blogRepo:     br,
 		userRepo:     ur,
 		firebaseAuth: fa,
 		adminEmail:   adminEmail,
+		jwtSecret:    jwtSecret,
 	}
 }
 
 // RegisterRoutes registers routes for the blog controller on the provided router
 func (c *BlogController) RegisterRoutes(r chi.Router) {
 	r.Route("/blogs", func(r chi.Router) {
-		// Admin-only routes (registered first for priority)
-		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Post("/", c.CreateBlog)
-		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Get("/admin", c.ListAllBlogs)
-		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Put("/{blogID}", c.UpdateBlog)
-		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Delete("/{blogID}", c.DeleteBlog)
-		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Post("/{blogID}/publish", c.PublishBlog)
-		r.With(auth.IsAdmin(c.firebaseAuth, c.adminEmail)).Post("/{blogID}/unpublish", c.UnpublishBlog)
+		// Admin-only routes — accept both static admin JWT and Firebase tokens
+		adminMW := auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret)
+		r.With(adminMW).Post("/", c.CreateBlog)
+		r.With(adminMW).Get("/admin", c.ListAllBlogs)
+		r.With(adminMW).Put("/{blogID}", c.UpdateBlog)
+		r.With(adminMW).Delete("/{blogID}", c.DeleteBlog)
+		r.With(adminMW).Post("/{blogID}/publish", c.PublishBlog)
+		r.With(adminMW).Post("/{blogID}/unpublish", c.UnpublishBlog)
 
 		// Public routes
 		r.Get("/category/{category}", c.ListBlogsByCategory)
@@ -81,22 +84,39 @@ func (c *BlogController) CreateBlog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get admin email from context
-	// email, _ := r.Context().Value(auth.ContextKeyEmail).(string)
+	// Resolve admin identity — works with both Firebase and static JWT auth.
+	// Firebase path sets ContextKeyUID; static JWT path sets ContextKeyEmail.
+	var authorID uuid.UUID
+	var authorName string
+
 	authUID, _ := r.Context().Value(auth.ContextKeyUID).(string)
+	authEmail, _ := r.Context().Value(auth.ContextKeyEmail).(string)
 
-	if authUID == "" {
-		RespondError(w, http.StatusUnauthorized, "missing authenticated admin uid")
-		return
-	}
-
-	adminUser, err := c.userRepo.GetByAuthUID(r.Context(), authUID)
-	if err != nil {
-		RespondError(w, http.StatusInternalServerError, "failed to resolve admin user")
-		return
-	}
-	if adminUser == nil {
-		RespondError(w, http.StatusBadRequest, "Blog creation failed because the admin account is authenticated but its app user record is out of sync. Sign in with the admin email and finish signup once, then retry.")
+	if authUID != "" {
+		// Firebase auth path — look up user by Firebase UID
+		adminUser, err := c.userRepo.GetByAuthUID(r.Context(), authUID)
+		if err != nil {
+			RespondError(w, http.StatusInternalServerError, "failed to resolve admin user")
+			return
+		}
+		if adminUser == nil {
+			RespondError(w, http.StatusBadRequest, "Blog creation failed because the admin account is authenticated but its app user record is out of sync. Sign in with the admin email and finish signup once, then retry.")
+			return
+		}
+		authorID = adminUser.ID
+		authorName = adminUser.Name
+	} else if authEmail != "" {
+		// Static JWT auth path — look up user by email
+		adminUser, err := c.userRepo.GetByEmail(r.Context(), authEmail)
+		if err != nil || adminUser == nil {
+			// Fallback: use the admin email as author name with a nil UUID
+			authorName = authEmail
+		} else {
+			authorID = adminUser.ID
+			authorName = adminUser.Name
+		}
+	} else {
+		RespondError(w, http.StatusUnauthorized, "missing authenticated admin identity")
 		return
 	}
 
@@ -112,8 +132,8 @@ func (c *BlogController) CreateBlog(w http.ResponseWriter, r *http.Request) {
 		Content:         req.Content,
 		CoverImageURL:   req.CoverImageURL,
 		ReadTimeMinutes: req.ReadTimeMinutes,
-		AuthorID:        adminUser.ID,
-		AuthorName:      adminUser.Name,
+		AuthorID:        authorID,
+		AuthorName:      authorName,
 	}
 
 	if err := c.blogRepo.Create(r.Context(), blog); err != nil {
@@ -333,3 +353,4 @@ func (c *BlogController) UnpublishBlog(w http.ResponseWriter, r *http.Request) {
 	blog, _ := c.blogRepo.GetByID(r.Context(), blogID)
 	RespondSuccess(w, http.StatusOK, blog)
 }
+

@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"myslotmate-backend/internal/lib/event"
+	"myslotmate-backend/internal/lib/instagram"
+	"myslotmate-backend/internal/lib/storage"
 	"myslotmate-backend/internal/lib/validation"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
@@ -50,6 +53,11 @@ type HostService interface {
 
 	// Earnings breakdown
 	GetEarningsBreakdown(ctx context.Context, hostID uuid.UUID) (*HostEarningsBreakdown, error)
+
+	// SetPlatformFeePercentage sets this host's commission override — the
+	// platform's cut of each of their bookings (host keeps the remainder).
+	// Pass nil to clear the override and fall back to the global default.
+	SetPlatformFeePercentage(ctx context.Context, hostID uuid.UUID, platformPercentage *int) (*models.Host, error)
 }
 
 // HostApplicationRequest maps to the "Become a Host" form (Steps 1 & 2).
@@ -141,6 +149,7 @@ type hostService struct {
 	reviewRepo  repository.ReviewRepository
 	payoutRepo  repository.PayoutRepository
 	accountRepo repository.AccountRepository
+	uploads     *storage.UploadService // nil when S3 is not configured
 	dispatcher  *event.Dispatcher
 }
 
@@ -152,6 +161,7 @@ func NewHostService(
 	rr repository.ReviewRepository,
 	pr repository.PayoutRepository,
 	ar repository.AccountRepository,
+	us *storage.UploadService,
 	d *event.Dispatcher,
 ) HostService {
 	return &hostService{
@@ -162,6 +172,7 @@ func NewHostService(
 		reviewRepo:  rr,
 		payoutRepo:  pr,
 		accountRepo: ar,
+		uploads:     us,
 		dispatcher:  d,
 	}
 }
@@ -219,6 +230,9 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		if err := s.hostRepo.Update(ctx, existing); err != nil {
 			return nil, err
 		}
+		if status == models.HostApplicationPending {
+			s.maybeScrapeInstagramMedia(existing)
+		}
 		return existing, nil
 	}
 
@@ -256,9 +270,88 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 
 	if status == models.HostApplicationPending {
 		s.dispatcher.Publish(event.HostCreated, newHost)
+		s.maybeScrapeInstagramMedia(newHost)
 	}
 
 	return newHost, nil
+}
+
+// maybeScrapeInstagramMedia runs the one-time Instagram scrape in the
+// background when a host applies without a profile photo but with an
+// Instagram link: it re-hosts the profile photo (used as the avatar) and up
+// to 3 recent post photos (shown in the host page gallery) on S3. Strictly
+// best-effort — any failure is logged and the application proceeds untouched.
+func (s *hostService) maybeScrapeInstagramMedia(host *models.Host) {
+	if s.uploads == nil || host.InstagramScrapedAt != nil {
+		return
+	}
+	hasAvatar := host.AvatarURL != nil && *host.AvatarURL != ""
+	if hasAvatar || host.SocialInstagram == nil {
+		return
+	}
+	snapshot := *host // copy so the goroutine is not affected by later mutation
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if _, _, err := ScrapeInstagramMedia(ctx, s.uploads, s.hostRepo, &snapshot); err != nil {
+			log.Printf("[instagram-scrape] host=%s: %v", snapshot.ID, err)
+		}
+	}()
+}
+
+// ScrapeInstagramMedia fetches a host's public Instagram profile photo and up
+// to 3 recent post photos, re-hosts them on S3, and persists them via
+// SaveInstagramMedia (which stamps instagram_scraped_at so it never repeats).
+// Synchronous and self-contained so both the create-time goroutine and the
+// backfill job can call it. Best-effort: a fetch/upload failure returns an
+// error but any media that did succeed is still saved.
+func ScrapeInstagramMedia(ctx context.Context, uploads *storage.UploadService, hostRepo repository.HostRepository, host *models.Host) (avatarSet bool, galleryCount int, err error) {
+	if uploads == nil {
+		return false, 0, errors.New("upload service not configured")
+	}
+	if host.SocialInstagram == nil {
+		return false, 0, errors.New("host has no instagram link")
+	}
+	username := instagram.UsernameFromURL(*host.SocialInstagram)
+	if username == "" {
+		return false, 0, fmt.Errorf("could not extract username from %q", *host.SocialInstagram)
+	}
+
+	profile, err := instagram.FetchProfile(ctx, username, 3)
+	if err != nil {
+		return false, 0, fmt.Errorf("user=%s: fetch failed: %w", username, err)
+	}
+
+	hasAvatar := host.AvatarURL != nil && *host.AvatarURL != ""
+	var avatarURL *string
+	if !hasAvatar {
+		if res, upErr := uploads.UploadFromURL(ctx, "hosts/avatars", profile.ProfilePicURL, username+"_profile"); upErr != nil {
+			log.Printf("[instagram-scrape] host=%s user=%s: avatar upload failed: %v", host.ID, username, upErr)
+		} else {
+			avatarURL = &res.URL
+		}
+	}
+
+	var galleryURLs []string
+	for i, postURL := range profile.RecentPosts {
+		res, upErr := uploads.UploadFromURL(ctx, "hosts/gallery", postURL, fmt.Sprintf("%s_post_%d", username, i+1))
+		if upErr != nil {
+			log.Printf("[instagram-scrape] host=%s user=%s: post %d upload failed: %v", host.ID, username, i+1, upErr)
+			continue
+		}
+		galleryURLs = append(galleryURLs, res.URL)
+	}
+
+	if avatarURL == nil && len(galleryURLs) == 0 {
+		// Nothing worth persisting; leave instagram_scraped_at unset so a
+		// later retry (re-submission or a re-run of the backfill) can try again.
+		return false, 0, fmt.Errorf("user=%s: nothing usable scraped", username)
+	}
+	if err := hostRepo.SaveInstagramMedia(ctx, host.ID, avatarURL, galleryURLs); err != nil {
+		return false, 0, fmt.Errorf("user=%s: save failed: %w", username, err)
+	}
+	log.Printf("[instagram-scrape] host=%s user=%s: saved avatar=%t gallery=%d", host.ID, username, avatarURL != nil, len(galleryURLs))
+	return avatarURL != nil, len(galleryURLs), nil
 }
 
 func (s *hostService) GetApplicationStatus(ctx context.Context, userID uuid.UUID) (*models.Host, error) {
@@ -308,6 +401,8 @@ func (s *hostService) UpdateProfile(ctx context.Context, hostID uuid.UUID, req H
 			return nil, err
 		}
 		host.AvatarURL = req.AvatarURL
+		// Host is now supplying their own photo, so it's no longer from Instagram.
+		host.AvatarFromInstagram = false
 	}
 	if req.Tagline != nil {
 		host.Tagline = req.Tagline
@@ -388,6 +483,28 @@ func (s *hostService) GetDashboardOverview(ctx context.Context, hostID uuid.UUID
 	fmt.Printf("[DASHBOARD] GetDashboardOverview: returning overview - events=%d, bookings=%d\n",
 		overview.TotalEvents, overview.TotalBookings)
 	return overview, nil
+}
+
+// ── Admin: Commission override ──────────────────────────────────────────────
+
+func (s *hostService) SetPlatformFeePercentage(ctx context.Context, hostID uuid.UUID, platformPercentage *int) (*models.Host, error) {
+	if platformPercentage != nil && (*platformPercentage < 0 || *platformPercentage > 100) {
+		return nil, errors.New("platform_percentage must be between 0 and 100")
+	}
+
+	host, err := s.hostRepo.GetByID(ctx, hostID)
+	if err != nil {
+		return nil, err
+	}
+	if host == nil {
+		return nil, errors.New("host not found")
+	}
+
+	if err := s.hostRepo.SetPlatformFeePercentage(ctx, hostID, platformPercentage); err != nil {
+		return nil, err
+	}
+	host.PlatformFeePercentage = platformPercentage
+	return host, nil
 }
 
 // ── Admin: Approve / Reject ─────────────────────────────────────────────────

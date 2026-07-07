@@ -52,6 +52,12 @@ type PayoutService interface {
 	// Platform Settings Settings
 	GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error)
 	SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error
+
+	// GetPlatformFeeConfig returns the effective global commission split
+	// (falls back to the 70/30 default when platform_settings has no
+	// 'platform_fee' row seeded yet) — used to show admins what "default"
+	// actually resolves to for hosts without a per-host override.
+	GetPlatformFeeConfig(ctx context.Context) (*models.PlatformFeeConfig, error)
 }
 
 // ── Request / Response types ────────────────────────────────────────────────
@@ -661,6 +667,11 @@ func (s *payoutService) GetEarningsSummary(ctx context.Context, hostID uuid.UUID
 	if err != nil {
 		return nil, fmt.Errorf("load platform fee config: %w", err)
 	}
+	if host, err := s.hostRepo.GetByID(ctx, hostID); err != nil {
+		return nil, fmt.Errorf("load host: %w", err)
+	} else if host != nil {
+		feeConfig = models.EffectiveFeeConfig(feeConfig, host.PlatformFeePercentage)
+	}
 
 	// host_earnings aggregate is kept for legacy /  back-compat reads; the
 	// authoritative numbers come from the bookings breakdown above.
@@ -1155,6 +1166,10 @@ func (s *payoutService) GetPlatformBalance(ctx context.Context) (*PlatformBalanc
 
 func (s *payoutService) GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error) {
 	return s.payoutRepo.GetPlatformSetting(ctx, key)
+}
+
+func (s *payoutService) GetPlatformFeeConfig(ctx context.Context) (*models.PlatformFeeConfig, error) {
+	return s.payoutRepo.GetPlatformFeeConfig(ctx)
 }
 
 func (s *payoutService) SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error {

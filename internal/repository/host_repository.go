@@ -17,6 +17,17 @@ type HostRepository interface {
 	UpdateApplicationStatus(ctx context.Context, id uuid.UUID, status models.HostApplicationStatus) error
 	ListByStatus(ctx context.Context, status models.HostApplicationStatus) ([]*models.Host, error)
 	UpdateAverageRating(ctx context.Context, hostID uuid.UUID, avgRating float64, totalReviews int) error
+	// SetPlatformFeePercentage sets this host's commission override (the
+	// platform's cut). Pass nil to clear the override and fall back to the
+	// global platform_settings default.
+	SetPlatformFeePercentage(ctx context.Context, hostID uuid.UUID, platformPercentage *int) error
+	// SaveInstagramMedia stores the result of the one-time Instagram scrape.
+	// avatarURL only overwrites an empty avatar_url; instagram_scraped_at is
+	// always stamped so the scrape never runs twice.
+	SaveInstagramMedia(ctx context.Context, hostID uuid.UUID, avatarURL *string, galleryURLs []string) error
+	// ListNeedingInstagramScrape returns hosts with no avatar, an Instagram
+	// link, and no prior scrape — the candidates for the backfill job.
+	ListNeedingInstagramScrape(ctx context.Context) ([]*models.Host, error)
 }
 
 type postgresHostRepository struct {
@@ -33,7 +44,8 @@ var hostColumns = `id, user_id, account_id,
 	government_id_url, submitted_at, approved_at, rejected_at,
 	is_identity_verified, is_super_host, is_community_champ,
 	expertise_tags, social_instagram, social_linkedin, social_website,
-	avg_rating, total_reviews,
+	gallery_urls, instagram_scraped_at, avatar_from_instagram,
+	avg_rating, total_reviews, platform_fee_percentage,
 	created_at, updated_at`
 
 func scanHost(row interface {
@@ -47,7 +59,8 @@ func scanHost(row interface {
 		&h.GovernmentIDURL, &h.SubmittedAt, &h.ApprovedAt, &h.RejectedAt,
 		&h.IsIdentityVerified, &h.IsSuperHost, &h.IsCommunityChamp,
 		&h.ExpertiseTags, &h.SocialInstagram, &h.SocialLinkedin, &h.SocialWebsite,
-		&h.AvgRating, &h.TotalReviews,
+		&h.GalleryURLs, &h.InstagramScrapedAt, &h.AvatarFromInstagram,
+		&h.AvgRating, &h.TotalReviews, &h.PlatformFeePercentage,
 		&h.CreatedAt, &h.UpdatedAt,
 	)
 	if err != nil {
@@ -109,8 +122,9 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 			government_id_url = $14, submitted_at = $15, approved_at = $16, rejected_at = $17,
 			is_identity_verified = $18, is_super_host = $19, is_community_champ = $20,
 			expertise_tags = $21, social_instagram = $22, social_linkedin = $23, social_website = $24,
-			avg_rating = $25, total_reviews = $26
-		WHERE id = $27
+			avg_rating = $25, total_reviews = $26, platform_fee_percentage = $27,
+			avatar_from_instagram = $28
+		WHERE id = $29
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		host.FirstName, host.LastName, host.PhnNumber, host.City, host.AvatarURL, host.Tagline, host.Bio,
@@ -118,7 +132,8 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 		host.GovernmentIDURL, host.SubmittedAt, host.ApprovedAt, host.RejectedAt,
 		host.IsIdentityVerified, host.IsSuperHost, host.IsCommunityChamp,
 		pq.Array(host.ExpertiseTags), host.SocialInstagram, host.SocialLinkedin, host.SocialWebsite,
-		host.AvgRating, host.TotalReviews,
+		host.AvgRating, host.TotalReviews, host.PlatformFeePercentage,
+		host.AvatarFromInstagram,
 		host.ID,
 	)
 	return err
@@ -152,5 +167,48 @@ func (r *postgresHostRepository) ListByStatus(ctx context.Context, status models
 func (r *postgresHostRepository) UpdateAverageRating(ctx context.Context, hostID uuid.UUID, avgRating float64, totalReviews int) error {
 	query := `UPDATE hosts SET avg_rating = $1, total_reviews = $2, updated_at = now() WHERE id = $3`
 	_, err := r.db.ExecContext(ctx, query, avgRating, totalReviews, hostID)
+	return err
+}
+
+func (r *postgresHostRepository) SaveInstagramMedia(ctx context.Context, hostID uuid.UUID, avatarURL *string, galleryURLs []string) error {
+	// Both CASE expressions read the pre-update avatar_url, so the flag is set
+	// only when this call actually fills an empty avatar from Instagram.
+	query := `UPDATE hosts SET
+		avatar_from_instagram = CASE WHEN (avatar_url IS NULL OR avatar_url = '') AND $1::text IS NOT NULL THEN true ELSE avatar_from_instagram END,
+		avatar_url = CASE WHEN avatar_url IS NULL OR avatar_url = '' THEN $1::text ELSE avatar_url END,
+		gallery_urls = $2,
+		instagram_scraped_at = now(),
+		updated_at = now()
+	WHERE id = $3`
+	_, err := r.db.ExecContext(ctx, query, avatarURL, pq.Array(galleryURLs), hostID)
+	return err
+}
+
+func (r *postgresHostRepository) ListNeedingInstagramScrape(ctx context.Context) ([]*models.Host, error) {
+	query := `SELECT ` + hostColumns + ` FROM hosts
+		WHERE (avatar_url IS NULL OR avatar_url = '')
+		  AND social_instagram IS NOT NULL AND social_instagram <> ''
+		  AND instagram_scraped_at IS NULL
+		ORDER BY created_at ASC`
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []*models.Host
+	for rows.Next() {
+		h, err := scanHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, h)
+	}
+	return hosts, rows.Err()
+}
+
+func (r *postgresHostRepository) SetPlatformFeePercentage(ctx context.Context, hostID uuid.UUID, platformPercentage *int) error {
+	query := `UPDATE hosts SET platform_fee_percentage = $1, updated_at = now() WHERE id = $2`
+	_, err := r.db.ExecContext(ctx, query, platformPercentage, hostID)
 	return err
 }

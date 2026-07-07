@@ -48,6 +48,7 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Post("/{hostID}/approve", c.ApproveApplication)
 		r.Post("/{hostID}/reject", c.RejectApplication)
 		r.Put("/{hostID}/application-status", c.UpdateApplicationStatus)
+		r.Put("/{hostID}/platform-fee", c.SetHostPlatformFee)
 	})
 
 	r.Route("/admin/platform", func(r chi.Router) {
@@ -55,6 +56,7 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 
 		r.Get("/balance", c.GetPlatformBalance)
+		r.Get("/fee-config", c.GetPlatformFeeConfig)
 		r.Post("/payout-methods", c.AddAdminPayoutMethod)
 		r.Get("/payout-methods", c.ListAdminPayoutMethods)
 		r.Put("/payout-methods/{methodID}/primary", c.SetAdminPrimaryMethod)
@@ -187,6 +189,38 @@ func (c *AdminController) UpdateApplicationStatus(w http.ResponseWriter, r *http
 	RespondSuccess(w, http.StatusOK, host)
 }
 
+// SetHostPlatformFeeRequestBody is the payload for overriding a host's
+// commission split. PlatformPercentage is the platform's cut (host keeps the
+// remainder); pass null to clear the override and fall back to the global
+// platform_settings default (currently 70/30).
+type SetHostPlatformFeeRequestBody struct {
+	PlatformPercentage *int `json:"platform_percentage"`
+}
+
+// SetHostPlatformFee lets an admin set a per-host commission override, e.g.
+// an 80/20 host-favorable split instead of the platform-wide default.
+func (c *AdminController) SetHostPlatformFee(w http.ResponseWriter, r *http.Request) {
+	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		return
+	}
+
+	var req SetHostPlatformFeeRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	host, err := c.hostService.SetPlatformFeePercentage(r.Context(), hostID, req.PlatformPercentage)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, host)
+}
+
 // ── Admin Platform Payout Handlers ──────────────────────────────────────────
 
 func (c *AdminController) GetPlatformBalance(w http.ResponseWriter, r *http.Request) {
@@ -196,6 +230,18 @@ func (c *AdminController) GetPlatformBalance(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	RespondSuccess(w, http.StatusOK, balance)
+}
+
+// GetPlatformFeeConfig returns the effective global commission split (the
+// fallback applied to any host without a per-host override) so the admin
+// dashboard can show what "default" actually means.
+func (c *AdminController) GetPlatformFeeConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := c.payoutService.GetPlatformFeeConfig(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, cfg)
 }
 
 func (c *AdminController) AddAdminPayoutMethod(w http.ResponseWriter, r *http.Request) {

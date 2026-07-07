@@ -45,9 +45,19 @@ type Host struct {
 	SocialLinkedin  *string        `db:"social_linkedin" json:"social_linkedin,omitempty"`
 	SocialWebsite   *string        `db:"social_website" json:"social_website,omitempty"`
 
+	// ── Instagram media (one-time scrape on application submit) ────────────
+	GalleryURLs         pq.StringArray `db:"gallery_urls" json:"gallery_urls"` // up to 3 recent IG post photos, re-hosted on S3
+	InstagramScrapedAt  *time.Time     `db:"instagram_scraped_at" json:"instagram_scraped_at,omitempty"`
+	AvatarFromInstagram bool           `db:"avatar_from_instagram" json:"avatar_from_instagram"` // avatar_url came from the IG scrape
+
 	// ── Aggregate stats (denormalized for dashboard) ────────────────────────
 	AvgRating    *float64 `db:"avg_rating" json:"avg_rating,omitempty"`
 	TotalReviews int      `db:"total_reviews" json:"total_reviews"`
+
+	// PlatformFeePercentage is this host's commission override — the
+	// platform's cut of each booking (host keeps the remainder). nil means
+	// "use the global platform_settings default" (see GetPlatformFeeConfig).
+	PlatformFeePercentage *int `db:"platform_fee_percentage" json:"platform_fee_percentage,omitempty"`
 
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`

@@ -156,18 +156,12 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		return nil, errors.New("event capacity exceeded")
 	}
 
-	// 6. Platform fee config + price calculation
-	feeConfig, err := s.payoutRepo.GetPlatformFeeConfig(ctx)
-	if err != nil {
-		return nil, err
-	}
+	// 6. Price calculation
 	var pricePerTicketCents int64 = 0
 	if evt.PriceCents != nil && *evt.PriceCents > 0 {
 		pricePerTicketCents = *evt.PriceCents
 	}
 	totalAmount := pricePerTicketCents * int64(req.Quantity)
-	platformFee := totalAmount * int64(feeConfig.PlatformPercentage) / 100
-	hostEarning := totalAmount - platformFee
 
 	// 7. Get user account (must exist)
 	userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, userID)
@@ -178,9 +172,13 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		return nil, errors.New("user account not found")
 	}
 
-	// 8. Platform & host accounts (paid events only)
+	// 8. Platform & host accounts + fee split (paid events only). Each host may
+	// have its own platform_fee_percentage override (set by admin); it falls
+	// back to the global platform_settings default when unset.
 	var platformAccount, hostAccount *models.Account
 	var host *models.Host
+	var platformFee, hostEarning int64
+	var appliedPlatformPercentage int
 	if totalAmount > 0 {
 		platformAccount, err = s.accountRepo.GetByOwner(ctx, models.AccountOwnerPlatform, uuid.Nil)
 		if err != nil {
@@ -194,6 +192,15 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		if err != nil {
 			return nil, fmt.Errorf("host account not found: %w", err)
 		}
+
+		feeConfig, err := s.payoutRepo.GetPlatformFeeConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		feeConfig = models.EffectiveFeeConfig(feeConfig, host.PlatformFeePercentage)
+		appliedPlatformPercentage = feeConfig.PlatformPercentage
+		platformFee = totalAmount * int64(feeConfig.PlatformPercentage) / 100
+		hostEarning = totalAmount - platformFee
 	}
 
 	// ── Transaction — every write below commits all-or-nothing ───────────
@@ -272,7 +279,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 			AmountCents:   -hostEarning, // NEGATIVE = host's share paid out of platform account
 			ReferenceID:   &req.EventID,
 			ReferenceType: strPtr("event"),
-			Description:   strPtr(fmt.Sprintf("Host earning disbursed (platform keeps %d%% commission)", feeConfig.PlatformPercentage)),
+			Description:   strPtr(fmt.Sprintf("Host earning disbursed (platform keeps %d%% commission)", appliedPlatformPercentage)),
 			Status:        models.LedgerStatusCompleted,
 			CreatedAt:     time.Now(),
 		}); err != nil {
@@ -287,7 +294,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 			AmountCents:   hostEarning, // POSITIVE = money reserved for host
 			ReferenceID:   &platformCredit.ID,
 			ReferenceType: strPtr("ledger"),
-			Description:   strPtr(fmt.Sprintf("Booking earning (after %d%% commission)", feeConfig.PlatformPercentage)),
+			Description:   strPtr(fmt.Sprintf("Booking earning (after %d%% commission)", appliedPlatformPercentage)),
 			Status:        models.LedgerStatusCompleted,
 			CreatedAt:     time.Now(),
 		}); err != nil {

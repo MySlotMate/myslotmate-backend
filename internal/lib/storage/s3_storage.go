@@ -1,10 +1,12 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -101,6 +103,71 @@ func (s *UploadService) UploadFile(ctx context.Context, folder string, fh *multi
 		FileName: fh.Filename,
 		URL:      publicURL,
 		Size:     fh.Size,
+	}, nil
+}
+
+// UploadFromURL downloads an image from a remote URL and re-hosts it on S3.
+// Used to persist third-party media (e.g. Instagram CDN images, whose URLs
+// expire) under our own bucket. Only image content types are accepted.
+func (s *UploadService) UploadFromURL(ctx context.Context, folder, srcURL, baseName string) (*UploadResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srcURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build download request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", srcURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download %s: status %d", srcURL, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxFileSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read download: %w", err)
+	}
+	if int64(len(body)) > MaxFileSize {
+		return nil, fmt.Errorf("remote file exceeds maximum size of 10 MB")
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if i := strings.Index(contentType, ";"); i >= 0 {
+		contentType = strings.TrimSpace(contentType[:i])
+	}
+	if contentType == "" {
+		contentType = http.DetectContentType(body)
+	}
+	ext, ok := map[string]string{
+		"image/jpeg": ".jpg",
+		"image/png":  ".png",
+		"image/webp": ".webp",
+	}[contentType]
+	if !ok {
+		return nil, fmt.Errorf("remote content type %q is not an accepted image type", contentType)
+	}
+
+	fileName := sanitizeFilename(baseName) + ext
+	objectKey := fmt.Sprintf("%s/%s_%s", folder, uuid.New().String(), fileName)
+
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:       aws.String(s.bucket),
+		Key:          aws.String(objectKey),
+		Body:         bytes.NewReader(body),
+		ContentType:  aws.String(contentType),
+		CacheControl: aws.String("public, max-age=86400"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("upload to S3: %w", err)
+	}
+
+	return &UploadResult{
+		FileName: fileName,
+		URL:      fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", s.bucket, s.region, objectKey),
+		Size:     int64(len(body)),
 	}, nil
 }
 

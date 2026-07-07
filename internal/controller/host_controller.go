@@ -21,22 +21,24 @@ func NewHostController(s service.HostService) *HostController {
 
 // PublicHostProfile is the public-facing view of a host, omitting sensitive fields.
 type PublicHostProfile struct {
-	ID                 uuid.UUID `json:"id"`
-	FirstName          string    `json:"first_name"`
-	LastName           string    `json:"last_name"`
-	City               string    `json:"city"`
-	AvatarURL          *string   `json:"avatar_url,omitempty"`
-	Tagline            *string   `json:"tagline,omitempty"`
-	Bio                *string   `json:"bio,omitempty"`
-	IsIdentityVerified bool      `json:"is_identity_verified"`
-	IsSuperHost        bool      `json:"is_super_host"`
-	IsCommunityChamp   bool      `json:"is_community_champ"`
-	ExpertiseTags      []string  `json:"expertise_tags"`
-	SocialInstagram    *string   `json:"social_instagram,omitempty"`
-	SocialLinkedin     *string   `json:"social_linkedin,omitempty"`
-	SocialWebsite      *string   `json:"social_website,omitempty"`
-	AvgRating          *float64  `json:"avg_rating,omitempty"`
-	TotalReviews       int       `json:"total_reviews"`
+	ID                  uuid.UUID `json:"id"`
+	FirstName           string    `json:"first_name"`
+	LastName            string    `json:"last_name"`
+	City                string    `json:"city"`
+	AvatarURL           *string   `json:"avatar_url,omitempty"`
+	AvatarFromInstagram bool      `json:"avatar_from_instagram"`
+	Tagline             *string   `json:"tagline,omitempty"`
+	Bio                 *string   `json:"bio,omitempty"`
+	IsIdentityVerified  bool      `json:"is_identity_verified"`
+	IsSuperHost         bool      `json:"is_super_host"`
+	IsCommunityChamp    bool      `json:"is_community_champ"`
+	ExpertiseTags       []string  `json:"expertise_tags"`
+	SocialInstagram     *string   `json:"social_instagram,omitempty"`
+	SocialLinkedin      *string   `json:"social_linkedin,omitempty"`
+	SocialWebsite       *string   `json:"social_website,omitempty"`
+	GalleryURLs         []string  `json:"gallery_urls"`
+	AvgRating           *float64  `json:"avg_rating,omitempty"`
+	TotalReviews        int       `json:"total_reviews"`
 }
 
 func (c *HostController) RegisterRoutes(r chi.Router) {
@@ -144,22 +146,24 @@ func (c *HostController) ListHosts(w http.ResponseWriter, r *http.Request) {
 	profiles := make([]PublicHostProfile, 0, len(hosts))
 	for _, h := range hosts {
 		profiles = append(profiles, PublicHostProfile{
-			ID:                 h.ID,
-			FirstName:          h.FirstName,
-			LastName:           h.LastName,
-			City:               h.City,
-			AvatarURL:          h.AvatarURL,
-			Tagline:            h.Tagline,
-			Bio:                h.Bio,
-			IsIdentityVerified: h.IsIdentityVerified,
-			IsSuperHost:        h.IsSuperHost,
-			IsCommunityChamp:   h.IsCommunityChamp,
-			ExpertiseTags:      h.ExpertiseTags,
-			SocialInstagram:    h.SocialInstagram,
-			SocialLinkedin:     h.SocialLinkedin,
-			SocialWebsite:      h.SocialWebsite,
-			AvgRating:          h.AvgRating,
-			TotalReviews:       h.TotalReviews,
+			ID:                  h.ID,
+			FirstName:           h.FirstName,
+			LastName:            h.LastName,
+			City:                h.City,
+			AvatarURL:           h.AvatarURL,
+			AvatarFromInstagram: h.AvatarFromInstagram,
+			Tagline:             h.Tagline,
+			Bio:                 h.Bio,
+			IsIdentityVerified:  h.IsIdentityVerified,
+			IsSuperHost:         h.IsSuperHost,
+			IsCommunityChamp:    h.IsCommunityChamp,
+			ExpertiseTags:       h.ExpertiseTags,
+			SocialInstagram:     h.SocialInstagram,
+			SocialLinkedin:      h.SocialLinkedin,
+			SocialWebsite:       h.SocialWebsite,
+			GalleryURLs:         h.GalleryURLs,
+			AvgRating:           h.AvgRating,
+			TotalReviews:        h.TotalReviews,
 		})
 	}
 
@@ -184,22 +188,24 @@ func (c *HostController) GetPublicHostProfile(w http.ResponseWriter, r *http.Req
 	}
 
 	profile := PublicHostProfile{
-		ID:                 host.ID,
-		FirstName:          host.FirstName,
-		LastName:           host.LastName,
-		City:               host.City,
-		AvatarURL:          host.AvatarURL,
-		Tagline:            host.Tagline,
-		Bio:                host.Bio,
-		IsIdentityVerified: host.IsIdentityVerified,
-		IsSuperHost:        host.IsSuperHost,
-		IsCommunityChamp:   host.IsCommunityChamp,
-		ExpertiseTags:      host.ExpertiseTags,
-		SocialInstagram:    host.SocialInstagram,
-		SocialLinkedin:     host.SocialLinkedin,
-		SocialWebsite:      host.SocialWebsite,
-		AvgRating:          host.AvgRating,
-		TotalReviews:       host.TotalReviews,
+		ID:                  host.ID,
+		FirstName:           host.FirstName,
+		LastName:            host.LastName,
+		City:                host.City,
+		AvatarURL:           host.AvatarURL,
+		AvatarFromInstagram: host.AvatarFromInstagram,
+		Tagline:             host.Tagline,
+		Bio:                 host.Bio,
+		IsIdentityVerified:  host.IsIdentityVerified,
+		IsSuperHost:         host.IsSuperHost,
+		IsCommunityChamp:    host.IsCommunityChamp,
+		ExpertiseTags:       host.ExpertiseTags,
+		SocialInstagram:     host.SocialInstagram,
+		SocialLinkedin:      host.SocialLinkedin,
+		SocialWebsite:       host.SocialWebsite,
+		GalleryURLs:         host.GalleryURLs,
+		AvgRating:           host.AvgRating,
+		TotalReviews:        host.TotalReviews,
 	}
 
 	RespondSuccess(w, http.StatusOK, profile)

@@ -269,7 +269,7 @@ func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, 
 	}
 	defer rows.Close()
 
-	var events []*models.Event
+	events := []*models.Event{}
 	for rows.Next() {
 		e := &models.Event{}
 		if err := rows.Scan(

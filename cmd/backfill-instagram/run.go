@@ -1,7 +1,7 @@
 // backfill-instagram runs the one-time Instagram media scrape for EXISTING
 // hosts who applied before the feature existed: those with no profile photo,
 // an Instagram link, and no prior scrape. It re-hosts their Instagram profile
-// photo (as the avatar) and up to 3 recent post photos (gallery) on S3.
+// photo (as the avatar) and up to 4 recent post photos (gallery) on S3.
 //
 // Run from the backend root (needs DATABASE_URL + AWS_S3_* in .env):
 //
@@ -27,12 +27,14 @@ import (
 	"myslotmate-backend/internal/config"
 	"myslotmate-backend/internal/db"
 	"myslotmate-backend/internal/lib/storage"
+	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 	"myslotmate-backend/internal/service"
 )
 
 func main() {
 	dryRun := flag.Bool("dry-run", false, "list eligible hosts without scraping")
+	refresh := flag.Bool("refresh", false, "re-pull media for hosts already scraped (e.g. after the post count changed) instead of only new ones")
 	delay := flag.Duration("delay", 5*time.Second, "pause between hosts to avoid rate limits")
 	flag.Parse()
 
@@ -57,11 +59,20 @@ func main() {
 
 	hostRepo := repository.NewHostRepository(sqlDB)
 
-	hosts, err := hostRepo.ListNeedingInstagramScrape(ctx)
+	var hosts []*models.Host
+	if *refresh {
+		hosts, err = hostRepo.ListScrapedWithInstagram(ctx)
+	} else {
+		hosts, err = hostRepo.ListNeedingInstagramScrape(ctx)
+	}
 	if err != nil {
 		log.Fatalf("failed to list hosts: %v", err)
 	}
-	log.Printf("found %d host(s) eligible for Instagram backfill", len(hosts))
+	mode := "backfill"
+	if *refresh {
+		mode = "refresh"
+	}
+	log.Printf("found %d host(s) for Instagram %s", len(hosts), mode)
 	if len(hosts) == 0 {
 		return
 	}

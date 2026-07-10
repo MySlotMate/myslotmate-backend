@@ -28,6 +28,10 @@ type HostRepository interface {
 	// ListNeedingInstagramScrape returns hosts with no avatar, an Instagram
 	// link, and no prior scrape — the candidates for the backfill job.
 	ListNeedingInstagramScrape(ctx context.Context) ([]*models.Host, error)
+	// ListScrapedWithInstagram returns hosts that were already scraped and
+	// still have an Instagram link — used to re-pull media (e.g. after the
+	// post count changed).
+	ListScrapedWithInstagram(ctx context.Context) ([]*models.Host, error)
 }
 
 type postgresHostRepository struct {
@@ -114,6 +118,28 @@ func (r *postgresHostRepository) GetByUserID(ctx context.Context, userID uuid.UU
 	return scanHost(r.db.QueryRowContext(ctx, query, userID))
 }
 
+func (r *postgresHostRepository) ListScrapedWithInstagram(ctx context.Context) ([]*models.Host, error) {
+	query := `SELECT ` + hostColumns + ` FROM hosts
+		WHERE social_instagram IS NOT NULL AND social_instagram <> ''
+		  AND instagram_scraped_at IS NOT NULL
+		ORDER BY instagram_scraped_at ASC`
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []*models.Host
+	for rows.Next() {
+		h, err := scanHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, h)
+	}
+	return hosts, rows.Err()
+}
+
 func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) error {
 	query := `
 		UPDATE hosts SET
@@ -123,8 +149,8 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 			is_identity_verified = $18, is_super_host = $19, is_community_champ = $20,
 			expertise_tags = $21, social_instagram = $22, social_linkedin = $23, social_website = $24,
 			avg_rating = $25, total_reviews = $26, platform_fee_percentage = $27,
-			avatar_from_instagram = $28
-		WHERE id = $29
+			avatar_from_instagram = $28, gallery_urls = $29
+		WHERE id = $30
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		host.FirstName, host.LastName, host.PhnNumber, host.City, host.AvatarURL, host.Tagline, host.Bio,
@@ -133,7 +159,7 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 		host.IsIdentityVerified, host.IsSuperHost, host.IsCommunityChamp,
 		pq.Array(host.ExpertiseTags), host.SocialInstagram, host.SocialLinkedin, host.SocialWebsite,
 		host.AvgRating, host.TotalReviews, host.PlatformFeePercentage,
-		host.AvatarFromInstagram,
+		host.AvatarFromInstagram, pq.Array(host.GalleryURLs),
 		host.ID,
 	)
 	return err
@@ -171,12 +197,21 @@ func (r *postgresHostRepository) UpdateAverageRating(ctx context.Context, hostID
 }
 
 func (r *postgresHostRepository) SaveInstagramMedia(ctx context.Context, hostID uuid.UUID, avatarURL *string, galleryURLs []string) error {
-	// Both CASE expressions read the pre-update avatar_url, so the flag is set
-	// only when this call actually fills an empty avatar from Instagram.
+	// avatar_url is (re)placed from Instagram only when the host has no avatar
+	// yet OR their current avatar itself came from Instagram — a host-uploaded
+	// photo (avatar_from_instagram = false) is never overwritten. gallery_urls is
+	// replaced only when this call actually fetched posts, so a fetch that returns
+	// none (common from datacenter IPs) keeps the existing gallery rather than
+	// wiping it. Every CASE arm reads pre-update column values.
 	query := `UPDATE hosts SET
-		avatar_from_instagram = CASE WHEN (avatar_url IS NULL OR avatar_url = '') AND $1::text IS NOT NULL THEN true ELSE avatar_from_instagram END,
-		avatar_url = CASE WHEN avatar_url IS NULL OR avatar_url = '' THEN $1::text ELSE avatar_url END,
-		gallery_urls = $2,
+		avatar_from_instagram = CASE
+			WHEN $1::text IS NOT NULL AND (avatar_url IS NULL OR avatar_url = '' OR avatar_from_instagram)
+			THEN true ELSE avatar_from_instagram END,
+		avatar_url = CASE
+			WHEN $1::text IS NOT NULL AND (avatar_url IS NULL OR avatar_url = '' OR avatar_from_instagram)
+			THEN $1::text ELSE avatar_url END,
+		gallery_urls = CASE
+			WHEN array_length($2::text[], 1) IS NOT NULL THEN $2::text[] ELSE gallery_urls END,
 		instagram_scraped_at = now(),
 		updated_at = now()
 	WHERE id = $3`

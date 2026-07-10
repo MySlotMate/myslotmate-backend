@@ -46,7 +46,7 @@ type Host struct {
 	SocialWebsite   *string        `db:"social_website" json:"social_website,omitempty"`
 
 	// ── Instagram media (one-time scrape on application submit) ────────────
-	GalleryURLs         pq.StringArray `db:"gallery_urls" json:"gallery_urls"` // up to 3 recent IG post photos, re-hosted on S3
+	GalleryURLs         pq.StringArray `db:"gallery_urls" json:"gallery_urls"` // up to 4 recent IG post photos, re-hosted on S3
 	InstagramScrapedAt  *time.Time     `db:"instagram_scraped_at" json:"instagram_scraped_at,omitempty"`
 	AvatarFromInstagram bool           `db:"avatar_from_instagram" json:"avatar_from_instagram"` // avatar_url came from the IG scrape
 

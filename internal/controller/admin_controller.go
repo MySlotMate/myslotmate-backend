@@ -49,6 +49,7 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Post("/{hostID}/reject", c.RejectApplication)
 		r.Put("/{hostID}/application-status", c.UpdateApplicationStatus)
 		r.Put("/{hostID}/platform-fee", c.SetHostPlatformFee)
+		r.Put("/{hostID}/profile", c.UpdateHostProfile)
 	})
 
 	r.Route("/admin/platform", func(r chi.Router) {
@@ -213,6 +214,33 @@ func (c *AdminController) SetHostPlatformFee(w http.ResponseWriter, r *http.Requ
 	}
 
 	host, err := c.hostService.SetPlatformFeePercentage(r.Context(), hostID, req.PlatformPercentage)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, host)
+}
+
+// UpdateHostProfile lets an admin edit a host's profile data (image, bio,
+// description, contact, tags, badges, government ID, etc.) from the dashboard.
+// It reuses the service's partial-update semantics: only fields present in the
+// body are changed. Unlike the host self-edit path it does not re-scrape
+// Instagram. Application status and commission split have their own endpoints.
+func (c *AdminController) UpdateHostProfile(w http.ResponseWriter, r *http.Request) {
+	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		return
+	}
+
+	var req service.HostProfileUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	host, err := c.hostService.AdminUpdateProfile(r.Context(), hostID, req)
 	if err != nil {
 		RespondError(w, http.StatusBadRequest, err.Error())
 		return

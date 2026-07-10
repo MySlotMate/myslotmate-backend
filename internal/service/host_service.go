@@ -40,6 +40,10 @@ type HostService interface {
 	// Profile management
 	GetHostByUserID(ctx context.Context, userID uuid.UUID) (*models.Host, error)
 	UpdateProfile(ctx context.Context, hostID uuid.UUID, req HostProfileUpdateRequest) (*models.Host, error)
+	// AdminUpdateProfile is the admin-dashboard edit path: same fields plus
+	// admin-only ones (city, phone, description, badges, government ID), and it
+	// skips the Instagram rescrape side effect of UpdateProfile.
+	AdminUpdateProfile(ctx context.Context, hostID uuid.UUID, req HostProfileUpdateRequest) (*models.Host, error)
 
 	// Social media connect/disconnect
 	ConnectSocial(ctx context.Context, hostID uuid.UUID, req SocialConnectRequest) (*models.Host, error)
@@ -79,7 +83,11 @@ type HostApplicationRequest struct {
 	SocialWebsite   *string  `json:"social_website,omitempty"`
 }
 
-// HostProfileUpdateRequest maps to the Host Profile edit screen.
+// HostProfileUpdateRequest maps to the Host Profile edit screen. Every field is
+// optional-by-pointer/slice: a nil pointer (or nil slice) means "leave
+// unchanged", so partial updates only touch the fields the caller sends. The
+// extended fields below the socials block are admin-only (see AdminUpdateProfile)
+// — the host self-edit endpoint never populates them.
 type HostProfileUpdateRequest struct {
 	FirstName       *string  `json:"first_name,omitempty"`
 	LastName        *string  `json:"last_name,omitempty"`
@@ -90,6 +98,20 @@ type HostProfileUpdateRequest struct {
 	SocialInstagram *string  `json:"social_instagram,omitempty"`
 	SocialLinkedin  *string  `json:"social_linkedin,omitempty"`
 	SocialWebsite   *string  `json:"social_website,omitempty"`
+
+	// ── Admin-only extended fields ──────────────────────────────────────────
+	City               *string  `json:"city,omitempty"`
+	PhnNumber          *string  `json:"phn_number,omitempty"`
+	Description        *string  `json:"description,omitempty"`
+	ExperienceDesc     *string  `json:"experience_desc,omitempty"`
+	GroupSize          *int     `json:"group_size,omitempty"`
+	GovernmentIDURL    *string  `json:"government_id_url,omitempty"`
+	GalleryURLs        []string `json:"gallery_urls,omitempty"`
+	Moods              []string `json:"moods,omitempty"`
+	PreferredDays      []string `json:"preferred_days,omitempty"`
+	IsIdentityVerified *bool    `json:"is_identity_verified,omitempty"`
+	IsSuperHost        *bool    `json:"is_super_host,omitempty"`
+	IsCommunityChamp   *bool    `json:"is_community_champ,omitempty"`
 }
 
 // HostDashboardOverview powers the Host Dashboard overview screen.
@@ -299,8 +321,46 @@ func (s *hostService) maybeScrapeInstagramMedia(host *models.Host) {
 	}()
 }
 
+// instagramHandleChanged reports whether two Instagram links point at a
+// different profile (by username). Trivial URL variations (trailing slash,
+// tracking query params) are treated as unchanged; adding a link where there
+// was none counts as a change.
+func instagramHandleChanged(oldLink, newLink *string) bool {
+	old := ""
+	if oldLink != nil {
+		old = instagram.UsernameFromURL(*oldLink)
+	}
+	nw := ""
+	if newLink != nil {
+		nw = instagram.UsernameFromURL(*newLink)
+	}
+	return nw != "" && nw != old
+}
+
+// rescrapeInstagram re-pulls a host's Instagram media in the background after
+// their Instagram link changed: it refreshes the gallery, and — only if the
+// current avatar itself came from Instagram — the avatar too. A host-uploaded
+// avatar is left untouched. Best-effort; failures are logged and the existing
+// media is kept.
+func (s *hostService) rescrapeInstagram(host *models.Host) {
+	if s.uploads == nil || host.SocialInstagram == nil {
+		return
+	}
+	if instagram.UsernameFromURL(*host.SocialInstagram) == "" {
+		return
+	}
+	snapshot := *host
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if _, _, err := ScrapeInstagramMedia(ctx, s.uploads, s.hostRepo, &snapshot); err != nil {
+			log.Printf("[instagram-rescrape] host=%s: %v", snapshot.ID, err)
+		}
+	}()
+}
+
 // ScrapeInstagramMedia fetches a host's public Instagram profile photo and up
-// to 3 recent post photos, re-hosts them on S3, and persists them via
+// to 4 recent post photos, re-hosts them on S3, and persists them via
 // SaveInstagramMedia (which stamps instagram_scraped_at so it never repeats).
 // Synchronous and self-contained so both the create-time goroutine and the
 // backfill job can call it. Best-effort: a fetch/upload failure returns an
@@ -317,14 +377,17 @@ func ScrapeInstagramMedia(ctx context.Context, uploads *storage.UploadService, h
 		return false, 0, fmt.Errorf("could not extract username from %q", *host.SocialInstagram)
 	}
 
-	profile, err := instagram.FetchProfile(ctx, username, 3)
+	profile, err := instagram.FetchProfile(ctx, username, 4)
 	if err != nil {
 		return false, 0, fmt.Errorf("user=%s: fetch failed: %w", username, err)
 	}
 
+	// Pull the avatar when the host has none yet, or when their current avatar
+	// itself came from Instagram (so a handle change can refresh it). A photo
+	// the host uploaded themselves is never touched.
 	hasAvatar := host.AvatarURL != nil && *host.AvatarURL != ""
 	var avatarURL *string
-	if !hasAvatar {
+	if !hasAvatar || host.AvatarFromInstagram {
 		if res, upErr := uploads.UploadFromURL(ctx, "hosts/avatars", profile.ProfilePicURL, username+"_profile"); upErr != nil {
 			log.Printf("[instagram-scrape] host=%s user=%s: avatar upload failed: %v", host.ID, username, upErr)
 		} else {
@@ -389,6 +452,53 @@ func (s *hostService) UpdateProfile(ctx context.Context, hostID uuid.UUID, req H
 		return nil, errors.New("host not found")
 	}
 
+	oldInstagram := host.SocialInstagram
+
+	if err := applyProfileUpdate(host, req); err != nil {
+		return nil, err
+	}
+
+	if err := s.hostRepo.Update(ctx, host); err != nil {
+		return nil, err
+	}
+
+	// If the host pointed us at a different Instagram profile, refresh their
+	// scraped media to match the new handle.
+	if instagramHandleChanged(oldInstagram, host.SocialInstagram) {
+		s.rescrapeInstagram(host)
+	}
+
+	return host, nil
+}
+
+// AdminUpdateProfile applies a profile edit made from the admin dashboard. It
+// shares field-application logic with UpdateProfile but deliberately skips the
+// Instagram rescrape side effect: an admin correcting a host's fields should
+// never silently clobber the host's scraped gallery/avatar. Admin-only fields
+// (city, phone, description, badges, government ID, etc.) are applied here too.
+func (s *hostService) AdminUpdateProfile(ctx context.Context, hostID uuid.UUID, req HostProfileUpdateRequest) (*models.Host, error) {
+	host, err := s.hostRepo.GetByID(ctx, hostID)
+	if err != nil {
+		return nil, err
+	}
+	if host == nil {
+		return nil, errors.New("host not found")
+	}
+
+	if err := applyProfileUpdate(host, req); err != nil {
+		return nil, err
+	}
+
+	if err := s.hostRepo.Update(ctx, host); err != nil {
+		return nil, err
+	}
+	return host, nil
+}
+
+// applyProfileUpdate mutates host in place from the non-nil fields of req. A nil
+// pointer / nil slice leaves the corresponding field untouched; an empty slice
+// clears it. Shared by UpdateProfile (host self-edit) and AdminUpdateProfile.
+func applyProfileUpdate(host *models.Host, req HostProfileUpdateRequest) error {
 	if req.FirstName != nil {
 		host.FirstName = *req.FirstName
 	}
@@ -398,10 +508,10 @@ func (s *hostService) UpdateProfile(ctx context.Context, hostID uuid.UUID, req H
 	if req.AvatarURL != nil {
 		// Validate avatar URL: reject blob URLs and localhost URLs
 		if err := validation.ValidateImageURL(*req.AvatarURL); err != nil {
-			return nil, err
+			return err
 		}
 		host.AvatarURL = req.AvatarURL
-		// Host is now supplying their own photo, so it's no longer from Instagram.
+		// A supplied photo is no longer sourced from Instagram.
 		host.AvatarFromInstagram = false
 	}
 	if req.Tagline != nil {
@@ -423,11 +533,51 @@ func (s *hostService) UpdateProfile(ctx context.Context, hostID uuid.UUID, req H
 		host.SocialWebsite = req.SocialWebsite
 	}
 
-	if err := s.hostRepo.Update(ctx, host); err != nil {
-		return nil, err
+	// ── Admin-only extended fields ──────────────────────────────────────────
+	if req.City != nil {
+		host.City = *req.City
 	}
-
-	return host, nil
+	if req.PhnNumber != nil {
+		host.PhnNumber = *req.PhnNumber
+	}
+	if req.Description != nil {
+		host.Description = req.Description
+	}
+	if req.ExperienceDesc != nil {
+		host.ExperienceDesc = req.ExperienceDesc
+	}
+	if req.GroupSize != nil {
+		host.GroupSize = req.GroupSize
+	}
+	if req.GovernmentIDURL != nil {
+		host.GovernmentIDURL = req.GovernmentIDURL
+	}
+	if req.GalleryURLs != nil {
+		// Validate each gallery URL the same way avatars are checked (reject
+		// blob:/localhost). An empty slice is allowed — it clears the gallery.
+		for _, u := range req.GalleryURLs {
+			if err := validation.ValidateImageURL(u); err != nil {
+				return err
+			}
+		}
+		host.GalleryURLs = pq.StringArray(req.GalleryURLs)
+	}
+	if req.Moods != nil {
+		host.Moods = pq.StringArray(req.Moods)
+	}
+	if req.PreferredDays != nil {
+		host.PreferredDays = pq.StringArray(req.PreferredDays)
+	}
+	if req.IsIdentityVerified != nil {
+		host.IsIdentityVerified = *req.IsIdentityVerified
+	}
+	if req.IsSuperHost != nil {
+		host.IsSuperHost = *req.IsSuperHost
+	}
+	if req.IsCommunityChamp != nil {
+		host.IsCommunityChamp = *req.IsCommunityChamp
+	}
+	return nil
 }
 
 func (s *hostService) GetDashboardOverview(ctx context.Context, hostID uuid.UUID) (*HostDashboardOverview, error) {
@@ -625,6 +775,8 @@ func (s *hostService) ConnectSocial(ctx context.Context, hostID uuid.UUID, req S
 		return nil, errors.New("host not found")
 	}
 
+	oldInstagram := host.SocialInstagram
+
 	switch req.Platform {
 	case "instagram":
 		host.SocialInstagram = &req.URL
@@ -649,6 +801,12 @@ func (s *hostService) ConnectSocial(ctx context.Context, hostID uuid.UUID, req S
 	if err := s.hostRepo.Update(ctx, host); err != nil {
 		return nil, err
 	}
+
+	// Connecting/changing the Instagram account refreshes the scraped media.
+	if req.Platform == "instagram" && instagramHandleChanged(oldInstagram, host.SocialInstagram) {
+		s.rescrapeInstagram(host)
+	}
+
 	return host, nil
 }
 

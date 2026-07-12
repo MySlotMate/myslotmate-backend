@@ -32,6 +32,7 @@ type PublicHostProfile struct {
 	IsIdentityVerified  bool      `json:"is_identity_verified"`
 	IsSuperHost         bool      `json:"is_super_host"`
 	IsCommunityChamp    bool      `json:"is_community_champ"`
+	IsProfessional      bool      `json:"is_professional"`
 	ExpertiseTags       []string  `json:"expertise_tags"`
 	SocialInstagram     *string   `json:"social_instagram,omitempty"`
 	SocialLinkedin      *string   `json:"social_linkedin,omitempty"`
@@ -78,6 +79,7 @@ type HostApplicationRequestBody struct {
 	SocialInstagram *string   `json:"social_instagram,omitempty"`
 	SocialLinkedin  *string   `json:"social_linkedin,omitempty"`
 	SocialWebsite   *string   `json:"social_website,omitempty"`
+	IsProfessional  *bool     `json:"is_professional,omitempty"`
 }
 
 type HostProfileUpdateRequestBody struct {
@@ -157,6 +159,7 @@ func (c *HostController) ListHosts(w http.ResponseWriter, r *http.Request) {
 			IsIdentityVerified:  h.IsIdentityVerified,
 			IsSuperHost:         h.IsSuperHost,
 			IsCommunityChamp:    h.IsCommunityChamp,
+			IsProfessional:      h.IsProfessional,
 			ExpertiseTags:       h.ExpertiseTags,
 			SocialInstagram:     h.SocialInstagram,
 			SocialLinkedin:      h.SocialLinkedin,
@@ -199,6 +202,7 @@ func (c *HostController) GetPublicHostProfile(w http.ResponseWriter, r *http.Req
 		IsIdentityVerified:  host.IsIdentityVerified,
 		IsSuperHost:         host.IsSuperHost,
 		IsCommunityChamp:    host.IsCommunityChamp,
+		IsProfessional:      host.IsProfessional,
 		ExpertiseTags:       host.ExpertiseTags,
 		SocialInstagram:     host.SocialInstagram,
 		SocialLinkedin:      host.SocialLinkedin,
@@ -234,6 +238,7 @@ func (c *HostController) SubmitApplication(w http.ResponseWriter, r *http.Reques
 		SocialInstagram: req.SocialInstagram,
 		SocialLinkedin:  req.SocialLinkedin,
 		SocialWebsite:   req.SocialWebsite,
+		IsProfessional:  req.IsProfessional,
 	}
 
 	host, err := c.hostService.SubmitApplication(r.Context(), req.UserID, svcReq)
@@ -268,6 +273,7 @@ func (c *HostController) SaveDraft(w http.ResponseWriter, r *http.Request) {
 		SocialInstagram: req.SocialInstagram,
 		SocialLinkedin:  req.SocialLinkedin,
 		SocialWebsite:   req.SocialWebsite,
+		IsProfessional:  req.IsProfessional,
 	}
 
 	host, err := c.hostService.SaveDraft(r.Context(), req.UserID, svcReq)

@@ -38,6 +38,7 @@ type Host struct {
 	IsIdentityVerified bool `db:"is_identity_verified" json:"is_identity_verified"`
 	IsSuperHost        bool `db:"is_super_host" json:"is_super_host"`
 	IsCommunityChamp   bool `db:"is_community_champ" json:"is_community_champ"`
+	IsProfessional     bool `db:"is_professional" json:"is_professional"`
 
 	// ── Expertise & Social ──────────────────────────────────────────────────
 	ExpertiseTags   pq.StringArray `db:"expertise_tags" json:"expertise_tags"` // ["#Minimalism","#Wellness"]

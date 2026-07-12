@@ -81,6 +81,7 @@ type HostApplicationRequest struct {
 	SocialInstagram *string  `json:"social_instagram,omitempty"`
 	SocialLinkedin  *string  `json:"social_linkedin,omitempty"`
 	SocialWebsite   *string  `json:"social_website,omitempty"`
+	IsProfessional  *bool    `json:"is_professional,omitempty"`
 }
 
 // HostProfileUpdateRequest maps to the Host Profile edit screen. Every field is
@@ -112,6 +113,7 @@ type HostProfileUpdateRequest struct {
 	IsIdentityVerified *bool    `json:"is_identity_verified,omitempty"`
 	IsSuperHost        *bool    `json:"is_super_host,omitempty"`
 	IsCommunityChamp   *bool    `json:"is_community_champ,omitempty"`
+	IsProfessional     *bool    `json:"is_professional,omitempty"`
 }
 
 // HostDashboardOverview powers the Host Dashboard overview screen.
@@ -245,6 +247,9 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		existing.SocialInstagram = req.SocialInstagram
 		existing.SocialLinkedin = req.SocialLinkedin
 		existing.SocialWebsite = req.SocialWebsite
+		if req.IsProfessional != nil {
+			existing.IsProfessional = *req.IsProfessional
+		}
 		existing.ApplicationStatus = status
 		if status == models.HostApplicationPending {
 			existing.SubmittedAt = &now
@@ -279,6 +284,7 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		SocialInstagram:   req.SocialInstagram,
 		SocialLinkedin:    req.SocialLinkedin,
 		SocialWebsite:     req.SocialWebsite,
+		IsProfessional:    req.IsProfessional != nil && *req.IsProfessional,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
@@ -576,6 +582,9 @@ func applyProfileUpdate(host *models.Host, req HostProfileUpdateRequest) error {
 	}
 	if req.IsCommunityChamp != nil {
 		host.IsCommunityChamp = *req.IsCommunityChamp
+	}
+	if req.IsProfessional != nil {
+		host.IsProfessional = *req.IsProfessional
 	}
 	return nil
 }

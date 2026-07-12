@@ -46,7 +46,7 @@ var hostColumns = `id, user_id, account_id,
 	first_name, last_name, phn_number, city, avatar_url, tagline, bio,
 	application_status, experience_desc, moods, description, preferred_days, group_size,
 	government_id_url, submitted_at, approved_at, rejected_at,
-	is_identity_verified, is_super_host, is_community_champ,
+	is_identity_verified, is_super_host, is_community_champ, is_professional,
 	expertise_tags, social_instagram, social_linkedin, social_website,
 	gallery_urls, instagram_scraped_at, avatar_from_instagram,
 	avg_rating, total_reviews, platform_fee_percentage,
@@ -61,7 +61,7 @@ func scanHost(row interface {
 		&h.FirstName, &h.LastName, &h.PhnNumber, &h.City, &h.AvatarURL, &h.Tagline, &h.Bio,
 		&h.ApplicationStatus, &h.ExperienceDesc, &h.Moods, &h.Description, &h.PreferredDays, &h.GroupSize,
 		&h.GovernmentIDURL, &h.SubmittedAt, &h.ApprovedAt, &h.RejectedAt,
-		&h.IsIdentityVerified, &h.IsSuperHost, &h.IsCommunityChamp,
+		&h.IsIdentityVerified, &h.IsSuperHost, &h.IsCommunityChamp, &h.IsProfessional,
 		&h.ExpertiseTags, &h.SocialInstagram, &h.SocialLinkedin, &h.SocialWebsite,
 		&h.GalleryURLs, &h.InstagramScrapedAt, &h.AvatarFromInstagram,
 		&h.AvgRating, &h.TotalReviews, &h.PlatformFeePercentage,
@@ -84,14 +84,14 @@ func (r *postgresHostRepository) Create(ctx context.Context, host *models.Host) 
 			application_status, experience_desc, moods, description, preferred_days, group_size,
 			government_id_url, submitted_at,
 			expertise_tags, social_instagram, social_linkedin, social_website,
-			created_at, updated_at
+			is_professional, created_at, updated_at
 		) VALUES (
 			$1, $2,
 			$3, $4, $5, $6, $7, $8, $9,
 			$10, $11, $12, $13, $14, $15,
 			$16, $17,
 			$18, $19, $20, $21,
-			$22, $23
+			$22, $23, $24
 		)
 	`
 	if host.ID == uuid.Nil {
@@ -103,7 +103,7 @@ func (r *postgresHostRepository) Create(ctx context.Context, host *models.Host) 
 		host.ApplicationStatus, host.ExperienceDesc, pq.Array(host.Moods), host.Description, pq.Array(host.PreferredDays), host.GroupSize,
 		host.GovernmentIDURL, host.SubmittedAt,
 		pq.Array(host.ExpertiseTags), host.SocialInstagram, host.SocialLinkedin, host.SocialWebsite,
-		host.CreatedAt, host.UpdatedAt,
+		host.IsProfessional, host.CreatedAt, host.UpdatedAt,
 	)
 	return err
 }
@@ -149,8 +149,8 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 			is_identity_verified = $18, is_super_host = $19, is_community_champ = $20,
 			expertise_tags = $21, social_instagram = $22, social_linkedin = $23, social_website = $24,
 			avg_rating = $25, total_reviews = $26, platform_fee_percentage = $27,
-			avatar_from_instagram = $28, gallery_urls = $29
-		WHERE id = $30
+			avatar_from_instagram = $28, gallery_urls = $29, is_professional = $30
+		WHERE id = $31
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		host.FirstName, host.LastName, host.PhnNumber, host.City, host.AvatarURL, host.Tagline, host.Bio,
@@ -159,7 +159,7 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 		host.IsIdentityVerified, host.IsSuperHost, host.IsCommunityChamp,
 		pq.Array(host.ExpertiseTags), host.SocialInstagram, host.SocialLinkedin, host.SocialWebsite,
 		host.AvgRating, host.TotalReviews, host.PlatformFeePercentage,
-		host.AvatarFromInstagram, pq.Array(host.GalleryURLs),
+		host.AvatarFromInstagram, pq.Array(host.GalleryURLs), host.IsProfessional,
 		host.ID,
 	)
 	return err

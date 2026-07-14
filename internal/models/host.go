@@ -39,6 +39,8 @@ type Host struct {
 	IsSuperHost        bool `db:"is_super_host" json:"is_super_host"`
 	IsCommunityChamp   bool `db:"is_community_champ" json:"is_community_champ"`
 	IsProfessional     bool `db:"is_professional" json:"is_professional"`
+	// IsActive false = deactivated by admin: hidden from public listings, data kept.
+	IsActive bool `db:"is_active" json:"is_active"`
 
 	// ── Expertise & Social ──────────────────────────────────────────────────
 	ExpertiseTags   pq.StringArray `db:"expertise_tags" json:"expertise_tags"` // ["#Minimalism","#Wellness"]

@@ -15,6 +15,7 @@ type HostRepository interface {
 	GetByUserID(ctx context.Context, userID uuid.UUID) (*models.Host, error)
 	Update(ctx context.Context, host *models.Host) error
 	UpdateApplicationStatus(ctx context.Context, id uuid.UUID, status models.HostApplicationStatus) error
+	SetActive(ctx context.Context, id uuid.UUID, active bool) error
 	ListByStatus(ctx context.Context, status models.HostApplicationStatus) ([]*models.Host, error)
 	UpdateAverageRating(ctx context.Context, hostID uuid.UUID, avgRating float64, totalReviews int) error
 	// SetPlatformFeePercentage sets this host's commission override (the
@@ -50,7 +51,8 @@ var hostColumns = `id, user_id, account_id,
 	expertise_tags, social_instagram, social_linkedin, social_website,
 	gallery_urls, instagram_scraped_at, avatar_from_instagram,
 	avg_rating, total_reviews, platform_fee_percentage,
-	created_at, updated_at`
+	created_at, updated_at,
+	is_active`
 
 func scanHost(row interface {
 	Scan(dest ...interface{}) error
@@ -66,6 +68,7 @@ func scanHost(row interface {
 		&h.GalleryURLs, &h.InstagramScrapedAt, &h.AvatarFromInstagram,
 		&h.AvgRating, &h.TotalReviews, &h.PlatformFeePercentage,
 		&h.CreatedAt, &h.UpdatedAt,
+		&h.IsActive,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -168,6 +171,14 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 func (r *postgresHostRepository) UpdateApplicationStatus(ctx context.Context, id uuid.UUID, status models.HostApplicationStatus) error {
 	query := `UPDATE hosts SET application_status = $1 WHERE id = $2`
 	_, err := r.db.ExecContext(ctx, query, status, id)
+	return err
+}
+
+// SetActive toggles a host's active state (admin deactivate/reactivate). A
+// deactivated host is hidden from public listings; all data is preserved.
+func (r *postgresHostRepository) SetActive(ctx context.Context, id uuid.UUID, active bool) error {
+	query := `UPDATE hosts SET is_active = $1, updated_at = now() WHERE id = $2`
+	_, err := r.db.ExecContext(ctx, query, active, id)
 	return err
 }
 

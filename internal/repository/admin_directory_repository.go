@@ -138,6 +138,7 @@ func (r *AdminDirectoryRepository) ListUsers(ctx context.Context, p ListUsersPar
 // owning host for display.
 type AdminEventRow struct {
 	ID            uuid.UUID
+	HostID        sql.NullString
 	Title         string
 	Mood          sql.NullString
 	PriceCents    sql.NullInt64
@@ -194,6 +195,7 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 	pageSQL := fmt.Sprintf(`
 		SELECT
 			e.id,
+			e.host_id,
 			e.title,
 			e.mood,
 			e.price_cents,
@@ -220,7 +222,7 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 	for rows.Next() {
 		var e AdminEventRow
 		if err := rows.Scan(
-			&e.ID, &e.Title, &e.Mood, &e.PriceCents, &e.IsFree,
+			&e.ID, &e.HostID, &e.Title, &e.Mood, &e.PriceCents, &e.IsFree,
 			&e.TotalBookings, &e.AvgRating, &e.Status,
 			&e.HostFirstName, &e.HostLastName, &e.HostCity,
 		); err != nil {

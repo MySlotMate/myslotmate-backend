@@ -197,7 +197,7 @@ func main() {
 	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, ledgerRepo, attendeeProfileRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService, otpClient, cfg.AdminAuth.JWTSecret, fbApp.Auth)
 	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, uploadService, dispatcher)
 	bookingService := service.NewBookingService(dbConn, bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, userService, dispatcher, notifService)
-	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, eventPriceTierRepo, dispatcher, bookingService)
+	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, dispatcher, bookingService)
 	reviewService := service.NewReviewService(reviewRepo, eventRepo, hostRepo, dispatcher)
 	inboxService := service.NewInboxService(inboxRepo, eventRepo, socketService)
 	supportService := service.NewSupportService(supportRepo)

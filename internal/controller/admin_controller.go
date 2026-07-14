@@ -50,6 +50,7 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Put("/{hostID}/application-status", c.UpdateApplicationStatus)
 		r.Put("/{hostID}/platform-fee", c.SetHostPlatformFee)
 		r.Put("/{hostID}/profile", c.UpdateHostProfile)
+		r.Put("/{hostID}/active", c.SetHostActive)
 	})
 
 	r.Route("/admin/platform", func(r chi.Router) {
@@ -247,6 +248,31 @@ func (c *AdminController) UpdateHostProfile(w http.ResponseWriter, r *http.Reque
 	}
 
 	RespondSuccess(w, http.StatusOK, host)
+}
+
+// SetHostActive deactivates (active=false) or reactivates (active=true) a host.
+// Deactivation hides the host + their events from the public site; data is kept.
+func (c *AdminController) SetHostActive(w http.ResponseWriter, r *http.Request) {
+	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		return
+	}
+
+	var body struct {
+		Active bool `json:"active"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	if err := c.hostService.SetHostActive(r.Context(), hostID, body.Active); err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, map[string]bool{"is_active": body.Active})
 }
 
 // ── Admin Platform Payout Handlers ──────────────────────────────────────────

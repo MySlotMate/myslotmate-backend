@@ -118,6 +118,7 @@ type eventService struct {
 	accountRepo    repository.AccountRepository
 	ledgerRepo     repository.TransactionLedgerRepository
 	tierRepo       repository.EventPriceTierRepository
+	attendeeRepo   repository.AttendeeProfileRepository
 	dispatcher     *event.Dispatcher
 	bookingService BookingService
 }
@@ -130,6 +131,7 @@ func NewEventService(
 	ar repository.AccountRepository,
 	lr repository.TransactionLedgerRepository,
 	tr repository.EventPriceTierRepository,
+	apr repository.AttendeeProfileRepository,
 	d *event.Dispatcher,
 	bs BookingService,
 ) EventService {
@@ -139,6 +141,7 @@ func NewEventService(
 		accountRepo:    ar,
 		ledgerRepo:     lr,
 		tierRepo:       tr,
+		attendeeRepo:   apr,
 		dispatcher:     d,
 		bookingService: bs,
 	}
@@ -724,10 +727,36 @@ func (s *eventService) ResumeEvent(ctx context.Context, eventID uuid.UUID, hostI
 }
 
 func (s *eventService) GetEventAttendees(ctx context.Context, eventID uuid.UUID, occurrenceDate *time.Time) ([]*models.Attendee, error) {
+	var attendees []*models.Attendee
+	var err error
 	if occurrenceDate != nil {
-		return s.bookingRepo.ListAttendeesByEventOccurrence(ctx, eventID, *occurrenceDate)
+		attendees, err = s.bookingRepo.ListAttendeesByEventOccurrence(ctx, eventID, *occurrenceDate)
+	} else {
+		attendees, err = s.bookingRepo.ListAttendeesByEventID(ctx, eventID)
 	}
-	return s.bookingRepo.ListAttendeesByEventID(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Attach each attendee's submitted details (name, age, Govt-ID, …) for the
+	// host roster. Batch-loaded to avoid N+1.
+	if len(attendees) > 0 {
+		userIDs := make([]uuid.UUID, 0, len(attendees))
+		for _, a := range attendees {
+			userIDs = append(userIDs, a.UserID)
+		}
+		profiles, perr := s.attendeeRepo.ListByUserIDs(ctx, userIDs)
+		if perr != nil {
+			return nil, perr
+		}
+		for _, a := range attendees {
+			if p, ok := profiles[a.UserID]; ok {
+				a.AttendeeProfile = p
+			}
+		}
+	}
+
+	return attendees, nil
 }
 
 func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset int) ([]*models.Event, error) {

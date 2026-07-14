@@ -14,6 +14,9 @@ type Attendee struct {
 	UserName      string  `db:"user_name" json:"user_name"`
 	UserEmail     string  `db:"user_email" json:"user_email"`
 	UserAvatarURL *string `db:"user_avatar_url" json:"user_avatar_url,omitempty"`
+	// AttendeeProfile is the guest's submitted attendee details (name, age,
+	// Govt-ID URL, etc.), attached for the host roster. Nil when none saved.
+	AttendeeProfile *AttendeeProfile `json:"attendee_profile,omitempty"`
 }
 
 // Booking links a user to an event with quantity and status.

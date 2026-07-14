@@ -152,6 +152,7 @@ type adminBookingDTO struct {
 
 type adminEventDTO struct {
 	ID       string  `json:"id"`
+	HostID   string  `json:"host_id"`
 	Title    string  `json:"title"`
 	HostName string  `json:"hostName"`
 	City     string  `json:"city"`
@@ -364,6 +365,7 @@ func (c *AdminDirectoryController) ListEvents(w http.ResponseWriter, r *http.Req
 
 		events = append(events, adminEventDTO{
 			ID:       e.ID.String(),
+			HostID:   e.HostID.String,
 			Title:    e.Title,
 			HostName: hostName,
 			City:     city,

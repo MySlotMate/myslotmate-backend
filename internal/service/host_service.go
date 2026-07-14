@@ -36,6 +36,7 @@ type HostService interface {
 	// Public
 	GetHostByID(ctx context.Context, hostID uuid.UUID) (*models.Host, error)
 	ListApprovedHosts(ctx context.Context) ([]*models.Host, error)
+	SetHostActive(ctx context.Context, hostID uuid.UUID, active bool) error
 
 	// Profile management
 	GetHostByUserID(ctx context.Context, userID uuid.UUID) (*models.Host, error)
@@ -428,7 +429,25 @@ func (s *hostService) GetApplicationStatus(ctx context.Context, userID uuid.UUID
 }
 
 func (s *hostService) ListApprovedHosts(ctx context.Context) ([]*models.Host, error) {
-	return s.hostRepo.ListByStatus(ctx, models.HostApplicationApproved)
+	hosts, err := s.hostRepo.ListByStatus(ctx, models.HostApplicationApproved)
+	if err != nil {
+		return nil, err
+	}
+	// Hide deactivated hosts from the public directory (data is preserved).
+	active := make([]*models.Host, 0, len(hosts))
+	for _, h := range hosts {
+		if h.IsActive {
+			active = append(active, h)
+		}
+	}
+	return active, nil
+}
+
+// SetHostActive deactivates (active=false) or reactivates (active=true) a host.
+// Deactivation hides the host and their events from the public site; it never
+// deletes data.
+func (s *hostService) SetHostActive(ctx context.Context, hostID uuid.UUID, active bool) error {
+	return s.hostRepo.SetActive(ctx, hostID, active)
 }
 
 func (s *hostService) GetHostByID(ctx context.Context, hostID uuid.UUID) (*models.Host, error) {

@@ -7,10 +7,12 @@ import (
 	"myslotmate-backend/internal/models"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 type AttendeeProfileRepository interface {
 	GetByUserID(ctx context.Context, userID uuid.UUID) (*models.AttendeeProfile, error)
+	ListByUserIDs(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID]*models.AttendeeProfile, error)
 	Upsert(ctx context.Context, p *models.AttendeeProfile) error
 }
 
@@ -47,6 +49,30 @@ func scanAttendeeProfile(row interface {
 func (r *postgresAttendeeProfileRepository) GetByUserID(ctx context.Context, userID uuid.UUID) (*models.AttendeeProfile, error) {
 	query := `SELECT ` + attendeeProfileColumns + ` FROM attendee_profiles WHERE user_id = $1`
 	return scanAttendeeProfile(r.db.QueryRowContext(ctx, query, userID))
+}
+
+func (r *postgresAttendeeProfileRepository) ListByUserIDs(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID]*models.AttendeeProfile, error) {
+	out := make(map[uuid.UUID]*models.AttendeeProfile)
+	if len(userIDs) == 0 {
+		return out, nil
+	}
+	query := `SELECT ` + attendeeProfileColumns + ` FROM attendee_profiles WHERE user_id = ANY($1)`
+	rows, err := r.db.QueryContext(ctx, query, pq.Array(userIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		p, err := scanAttendeeProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			out[p.UserID] = p
+		}
+	}
+	return out, rows.Err()
 }
 
 // Upsert writes the profile, overwriting existing values for that user. Only the

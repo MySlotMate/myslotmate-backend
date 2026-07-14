@@ -32,11 +32,12 @@ func (c *BookingController) RegisterRoutes(r chi.Router) {
 }
 
 type CreateBookingRequest struct {
-	UserID         uuid.UUID `json:"user_id"`
-	EventID        uuid.UUID `json:"event_id"`
-	Quantity       int       `json:"quantity"`
-	OccurrenceDate string    `json:"occurrence_date,omitempty"`
-	IdempotencyKey string    `json:"idempotency_key,omitempty"`
+	UserID         uuid.UUID  `json:"user_id"`
+	EventID        uuid.UUID  `json:"event_id"`
+	Quantity       int        `json:"quantity"`
+	OccurrenceDate string     `json:"occurrence_date,omitempty"`
+	IdempotencyKey string     `json:"idempotency_key,omitempty"`
+	PriceTierID    *uuid.UUID `json:"price_tier_id,omitempty"`
 }
 
 func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +51,7 @@ func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request
 		EventID:        req.EventID,
 		Quantity:       req.Quantity,
 		IdempotencyKey: req.IdempotencyKey,
+		PriceTierID:    req.PriceTierID,
 		// Confirm in the same transaction so a paid booking can't get stuck at
 		// `pending` if the separate confirm call fails. Notify the guest as before.
 		AutoConfirm: true,

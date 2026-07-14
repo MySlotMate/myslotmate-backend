@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/service"
 
 	"github.com/go-chi/chi/v5"
@@ -36,6 +37,8 @@ func (c *UserController) RegisterRoutes(r chi.Router) {
 		r.Get("/me", c.GetProfile)
 		r.Get("/by-firebase/{firebaseID}", c.GetUserByFirebaseID)
 		r.Put("/me", c.UpdateProfile)
+		r.Get("/attendee-profile", c.GetAttendeeProfile)
+		r.Put("/attendee-profile", c.UpsertAttendeeProfile)
 		r.Get("/{userID}", c.GetUserByID)
 		r.Get("/wallet/balance", c.GetWalletBalance)
 		r.Get("/wallet/transactions", c.GetWalletTransactions)
@@ -217,6 +220,74 @@ func (c *UserController) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	RespondSuccess(w, http.StatusOK, user)
+}
+
+// AttendeeProfileRequestBody is the upsert payload for a user's attendee details.
+type AttendeeProfileRequestBody struct {
+	UserID           uuid.UUID `json:"user_id"`
+	Name             *string   `json:"name,omitempty"`
+	Age              *int      `json:"age,omitempty"`
+	Gender           *string   `json:"gender,omitempty"`
+	Qualification    *string   `json:"qualification,omitempty"`
+	Occupation       *string   `json:"occupation,omitempty"`
+	MaritalStatus    *string   `json:"marital_status,omitempty"`
+	ContactNumber    *string   `json:"contact_number,omitempty"`
+	WhatsappNumber   *string   `json:"whatsapp_number,omitempty"`
+	RegistrationType *string   `json:"registration_type,omitempty"`
+	GovtIDURL        *string   `json:"govt_id_url,omitempty"`
+	Travel           *bool     `json:"travel,omitempty"`
+}
+
+func (c *UserController) GetAttendeeProfile(w http.ResponseWriter, r *http.Request) {
+	userIDStr := r.URL.Query().Get("user_id")
+	if userIDStr == "" {
+		RespondError(w, http.StatusBadRequest, "Missing user_id")
+		return
+	}
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid user_id")
+		return
+	}
+	profile, err := c.userService.GetAttendeeProfile(r.Context(), userID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// nil (none saved yet) is a valid empty state, not an error.
+	RespondSuccess(w, http.StatusOK, profile)
+}
+
+func (c *UserController) UpsertAttendeeProfile(w http.ResponseWriter, r *http.Request) {
+	var req AttendeeProfileRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if req.UserID == uuid.Nil {
+		RespondError(w, http.StatusBadRequest, "Missing user_id")
+		return
+	}
+	profile := &models.AttendeeProfile{
+		UserID:           req.UserID,
+		Name:             req.Name,
+		Age:              req.Age,
+		Gender:           req.Gender,
+		Qualification:    req.Qualification,
+		Occupation:       req.Occupation,
+		MaritalStatus:    req.MaritalStatus,
+		ContactNumber:    req.ContactNumber,
+		WhatsappNumber:   req.WhatsappNumber,
+		RegistrationType: req.RegistrationType,
+		GovtIDURL:        req.GovtIDURL,
+		Travel:           req.Travel,
+	}
+	saved, err := c.userService.UpsertAttendeeProfile(r.Context(), profile)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, saved)
 }
 
 func (c *UserController) SaveExperience(w http.ResponseWriter, r *http.Request) {

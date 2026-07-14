@@ -34,6 +34,7 @@ type BookingCreateRequest struct {
 	Quantity       int
 	IdempotencyKey string
 	OccurrenceDate *time.Time // which specific date the user is booking for
+	PriceTierID    *uuid.UUID // chosen ticket tier; required when the event has tiers
 
 	// AutoConfirm makes the booking commit as `confirmed` in the same transaction
 	// instead of `pending`, removing the fragile separate confirm call that could
@@ -65,6 +66,8 @@ type bookingService struct {
 	hostRepo            repository.HostRepository
 	userRepo            repository.UserRepository
 	ledgerRepo          repository.TransactionLedgerRepository
+	tierRepo            repository.EventPriceTierRepository
+	attendeeRepo        repository.AttendeeProfileRepository
 	userService         UserService // for chaining source-refund on cancel
 	dispatcher          *event.Dispatcher
 	notificationService notification.NotificationService
@@ -80,6 +83,8 @@ func NewBookingService(
 	hr repository.HostRepository,
 	ur repository.UserRepository,
 	lr repository.TransactionLedgerRepository,
+	tr repository.EventPriceTierRepository,
+	apr repository.AttendeeProfileRepository,
 	us UserService,
 	d *event.Dispatcher,
 	ns notification.NotificationService,
@@ -94,6 +99,8 @@ func NewBookingService(
 		hostRepo:            hr,
 		userRepo:            ur,
 		ledgerRepo:          lr,
+		tierRepo:            tr,
+		attendeeRepo:        apr,
 		userService:         us,
 		dispatcher:          d,
 		notificationService: ns,
@@ -136,6 +143,22 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		return nil, errors.New("event not found")
 	}
 
+	// 3b. Attendee-details gate — if this event requires extra attendee details,
+	// the guest's saved attendee profile must have every required field. This is
+	// the server-side guard behind the booking-form; the client collects + upserts
+	// the profile before calling this.
+	if evt.RequiresAttendeeDetails && len(evt.AttendeeFields) > 0 {
+		profile, err := s.attendeeRepo.GetByUserID(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		for _, field := range evt.AttendeeFields {
+			if !profile.HasField(field) {
+				return nil, errors.New("please complete attendee details before booking")
+			}
+		}
+	}
+
 	// 4. Resolve occurrence date
 	// For recurring events the frontend sends the specific date the user picked.
 	// For non-recurring events (or if omitted) we fall back to the event's own time.
@@ -156,12 +179,37 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		return nil, errors.New("event capacity exceeded")
 	}
 
-	// 6. Price calculation
+	// 6. Price calculation. The unit price is always server-derived — the client
+	//    only chooses WHICH tier, never the amount. Resolution order:
+	//    - a tier was chosen → validate it belongs to this event & is active, use it;
+	//    - the event has tiers but none chosen → reject (must pick a ticket type);
+	//    - no tiers → legacy single event price.
 	var pricePerTicketCents int64 = 0
-	if evt.PriceCents != nil && *evt.PriceCents > 0 {
-		pricePerTicketCents = *evt.PriceCents
+	var priceTierID *uuid.UUID
+	if req.PriceTierID != nil {
+		tier, err := s.tierRepo.GetByID(ctx, *req.PriceTierID)
+		if err != nil {
+			return nil, err
+		}
+		if tier == nil || tier.EventID != evt.ID || !tier.IsActive {
+			return nil, errors.New("invalid ticket tier for this event")
+		}
+		pricePerTicketCents = tier.PriceCents
+		priceTierID = &tier.ID
+	} else {
+		tiers, err := s.tierRepo.ListByEventID(ctx, evt.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(tiers) > 0 {
+			return nil, errors.New("please select a ticket type")
+		}
+		if evt.PriceCents != nil && *evt.PriceCents > 0 {
+			pricePerTicketCents = *evt.PriceCents
+		}
 	}
 	totalAmount := pricePerTicketCents * int64(req.Quantity)
+	unitPriceCents := pricePerTicketCents
 
 	// 7. Get user account (must exist)
 	userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, userID)
@@ -328,6 +376,8 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		AmountCents:     &totalAmount,
 		ServiceFeeCents: &platformFee,
 		NetEarningCents: &hostEarning,
+		PriceTierID:     priceTierID,
+		UnitPriceCents:  &unitPriceCents,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
 	}

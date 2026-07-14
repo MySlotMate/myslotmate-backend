@@ -29,6 +29,8 @@ type Booking struct {
 	AmountCents                      *int64        `db:"amount_cents" json:"amount_cents,omitempty"`           // total booking value
 	ServiceFeeCents                  *int64        `db:"service_fee_cents" json:"service_fee_cents,omitempty"` // platform fee (15%)
 	NetEarningCents                  *int64        `db:"net_earning_cents" json:"net_earning_cents,omitempty"` // host net (85%)
+	PriceTierID                      *uuid.UUID    `db:"price_tier_id" json:"price_tier_id,omitempty"`         // chosen ticket tier (nil = single-price/free)
+	UnitPriceCents                   *int64        `db:"unit_price_cents" json:"unit_price_cents,omitempty"`   // per-ticket price snapshot at booking time
 	CreatedAt                        time.Time     `db:"created_at" json:"created_at"`
 	UpdatedAt                        time.Time     `db:"updated_at" json:"updated_at"`
 	CancelledAt                      *time.Time    `db:"cancelled_at" json:"cancelled_at,omitempty"`

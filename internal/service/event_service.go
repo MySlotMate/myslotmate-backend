@@ -38,6 +38,14 @@ type EventService interface {
 	GetEventOccurrencesForHost(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) ([]models.OccurrenceAvailability, error)
 }
 
+// PriceTierInput is a single ticket tier supplied on event create/update.
+type PriceTierInput struct {
+	Name       string `json:"name"`
+	PriceCents int64  `json:"price_cents"`
+	Capacity   *int   `json:"capacity,omitempty"`
+	SortOrder  int    `json:"sort_order,omitempty"`
+}
+
 type EventCreateRequest struct {
 	Title              string                     `json:"title"`
 	HookLine           *string                    `json:"hook_line,omitempty"`
@@ -66,6 +74,10 @@ type EventCreateRequest struct {
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
 	Status             models.EventStatus         `json:"status"` // draft or live
 	AISuggestion       *string                    `json:"ai_suggestion,omitempty"`
+	PriceTiers         []PriceTierInput           `json:"price_tiers,omitempty"` // named ticket tiers; empty = single-price via PriceCents
+
+	RequiresAttendeeDetails bool     `json:"requires_attendee_details"`
+	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 }
 
 type EventUpdateRequest struct {
@@ -94,6 +106,10 @@ type EventUpdateRequest struct {
 	IsRecurring        *bool                      `json:"is_recurring,omitempty"`
 	RecurrenceRule     *string                    `json:"recurrence_rule,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
+	PriceTiers         []PriceTierInput           `json:"price_tiers,omitempty"` // when non-nil, replaces the event's tier set
+
+	RequiresAttendeeDetails *bool    `json:"requires_attendee_details,omitempty"`
+	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 }
 
 type eventService struct {
@@ -101,6 +117,7 @@ type eventService struct {
 	bookingRepo    repository.BookingRepository
 	accountRepo    repository.AccountRepository
 	ledgerRepo     repository.TransactionLedgerRepository
+	tierRepo       repository.EventPriceTierRepository
 	dispatcher     *event.Dispatcher
 	bookingService BookingService
 }
@@ -112,6 +129,7 @@ func NewEventService(
 	br repository.BookingRepository,
 	ar repository.AccountRepository,
 	lr repository.TransactionLedgerRepository,
+	tr repository.EventPriceTierRepository,
 	d *event.Dispatcher,
 	bs BookingService,
 ) EventService {
@@ -120,6 +138,7 @@ func NewEventService(
 		bookingRepo:    br,
 		accountRepo:    ar,
 		ledgerRepo:     lr,
+		tierRepo:       tr,
 		dispatcher:     d,
 		bookingService: bs,
 	}
@@ -177,6 +196,9 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		AISuggestion:       req.AISuggestion,
 		CreatedAt:          now,
 		UpdatedAt:          now,
+
+		RequiresAttendeeDetails: req.RequiresAttendeeDetails,
+		AttendeeFields:          pq.StringArray(req.AttendeeFields),
 	}
 
 	if status == models.EventStatusLive {
@@ -187,9 +209,36 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		return nil, err
 	}
 
+	if len(req.PriceTiers) > 0 {
+		if err := s.tierRepo.ReplaceForEvent(ctx, newEvent.ID, tierInputsToModels(req.PriceTiers)); err != nil {
+			return nil, err
+		}
+		tiers, err := s.tierRepo.ListByEventID(ctx, newEvent.ID)
+		if err != nil {
+			return nil, err
+		}
+		newEvent.PriceTiers = tiers
+	} else {
+		newEvent.PriceTiers = []models.EventPriceTier{}
+	}
+
 	s.dispatcher.Publish(event.EventCreated, newEvent)
 
 	return newEvent, nil
+}
+
+// tierInputsToModels converts API tier inputs into tier models for persistence.
+func tierInputsToModels(inputs []PriceTierInput) []models.EventPriceTier {
+	tiers := make([]models.EventPriceTier, 0, len(inputs))
+	for i, in := range inputs {
+		tiers = append(tiers, models.EventPriceTier{
+			Name:       in.Name,
+			PriceCents: in.PriceCents,
+			Capacity:   in.Capacity,
+			SortOrder:  i,
+		})
+	}
+	return tiers
 }
 
 func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID, req EventUpdateRequest) (*models.Event, error) {
@@ -283,10 +332,30 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 	if req.CancellationPolicy != nil {
 		evt.CancellationPolicy = req.CancellationPolicy
 	}
+	if req.RequiresAttendeeDetails != nil {
+		evt.RequiresAttendeeDetails = *req.RequiresAttendeeDetails
+	}
+	if req.AttendeeFields != nil {
+		evt.AttendeeFields = pq.StringArray(req.AttendeeFields)
+	}
 
 	if err := s.eventRepo.Update(ctx, evt); err != nil {
 		return nil, err
 	}
+
+	// When PriceTiers is supplied, replace the event's tier set. A non-nil empty
+	// slice clears tiers (revert to single-price); nil leaves tiers untouched.
+	if req.PriceTiers != nil {
+		if err := s.tierRepo.ReplaceForEvent(ctx, evt.ID, tierInputsToModels(req.PriceTiers)); err != nil {
+			return nil, err
+		}
+	}
+	tiers, err := s.tierRepo.ListByEventID(ctx, evt.ID)
+	if err != nil {
+		return nil, err
+	}
+	evt.PriceTiers = tiers
+
 	return evt, nil
 }
 
@@ -389,6 +458,42 @@ func (s *eventService) CancelEvent(ctx context.Context, eventID uuid.UUID, hostI
 	return evt, nil
 }
 
+// attachTiers loads and attaches the active ticket tiers for a single event.
+func (s *eventService) attachTiers(ctx context.Context, evt *models.Event) error {
+	if evt == nil {
+		return nil
+	}
+	tiers, err := s.tierRepo.ListByEventID(ctx, evt.ID)
+	if err != nil {
+		return err
+	}
+	evt.PriceTiers = tiers
+	return nil
+}
+
+// attachTiersBatch loads tiers for many events in one query (avoids N+1).
+func (s *eventService) attachTiersBatch(ctx context.Context, events []*models.Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(events))
+	for _, e := range events {
+		ids = append(ids, e.ID)
+	}
+	byEvent, err := s.tierRepo.ListByEventIDs(ctx, ids)
+	if err != nil {
+		return err
+	}
+	for _, e := range events {
+		if tiers, ok := byEvent[e.ID]; ok {
+			e.PriceTiers = tiers
+		} else {
+			e.PriceTiers = []models.EventPriceTier{}
+		}
+	}
+	return nil
+}
+
 func (s *eventService) GetEvent(ctx context.Context, eventID uuid.UUID) (*models.Event, error) {
 	evt, err := s.eventRepo.GetByID(ctx, eventID)
 	if err != nil || evt == nil {
@@ -402,15 +507,33 @@ func (s *eventService) GetEvent(ctx context.Context, eventID uuid.UUID) (*models
 		fmt.Printf("[EVENT_SERVICE] Error fetching weekly bookings for %s: %v\n", eventID, err)
 	}
 
+	if err := s.attachTiers(ctx, evt); err != nil {
+		return nil, err
+	}
+
 	return evt, nil
 }
 
 func (s *eventService) GetHostEvents(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error) {
-	return s.eventRepo.ListByHostID(ctx, hostID)
+	events, err := s.eventRepo.ListByHostID(ctx, hostID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachTiersBatch(ctx, events); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 func (s *eventService) GetHostEventsFiltered(ctx context.Context, hostID uuid.UUID, status *models.EventStatus, search string, sortBy string, limit, offset int) ([]*models.Event, error) {
-	return s.eventRepo.ListByHostIDFiltered(ctx, hostID, status, search, sortBy, limit, offset)
+	events, err := s.eventRepo.ListByHostIDFiltered(ctx, hostID, status, search, sortBy, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachTiersBatch(ctx, events); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 func normalizeRRule(rule string) string {
@@ -659,6 +782,10 @@ func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset in
 		if e.NextAvailableDate != nil || e.Status == models.EventStatusLive {
 			finalEvents = append(finalEvents, e)
 		}
+	}
+
+	if err := s.attachTiersBatch(ctx, finalEvents); err != nil {
+		fmt.Printf("[EVENT_SERVICE] Error attaching tiers to published events: %v\n", err)
 	}
 
 	return finalEvents, nil

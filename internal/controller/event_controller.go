@@ -118,6 +118,10 @@ type EventCreateRequestBody struct {
 	RecurrenceRule     *string                    `json:"recurrence_rule,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
 	AISuggestion       *string                    `json:"ai_suggestion,omitempty"`
+	PriceTiers         []service.PriceTierInput   `json:"price_tiers,omitempty"`
+
+	RequiresAttendeeDetails bool     `json:"requires_attendee_details"`
+	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 }
 
 type EventUpdateRequestBody struct {
@@ -146,6 +150,10 @@ type EventUpdateRequestBody struct {
 	IsRecurring        *bool                      `json:"is_recurring,omitempty"`
 	RecurrenceRule     *string                    `json:"recurrence_rule,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
+	PriceTiers         []service.PriceTierInput   `json:"price_tiers,omitempty"`
+
+	RequiresAttendeeDetails *bool    `json:"requires_attendee_details,omitempty"`
+	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -207,6 +215,10 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		RecurrenceRule:     req.RecurrenceRule,
 		CancellationPolicy: req.CancellationPolicy,
 		AISuggestion:       req.AISuggestion,
+		PriceTiers:         req.PriceTiers,
+
+		RequiresAttendeeDetails: req.RequiresAttendeeDetails,
+		AttendeeFields:          req.AttendeeFields,
 	}
 
 	evt, err := c.eventService.CreateEvent(r.Context(), req.HostID, svcReq)
@@ -264,6 +276,10 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		IsRecurring:        body.IsRecurring,
 		RecurrenceRule:     body.RecurrenceRule,
 		CancellationPolicy: body.CancellationPolicy,
+		PriceTiers:         body.PriceTiers,
+
+		RequiresAttendeeDetails: body.RequiresAttendeeDetails,
+		AttendeeFields:          body.AttendeeFields,
 	}
 
 	evt, err := c.eventService.UpdateEvent(r.Context(), eventID, body.HostID, svcReq)

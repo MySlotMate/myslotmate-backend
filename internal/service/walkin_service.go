@@ -89,6 +89,7 @@ type walkInService struct {
 	userRepo       repository.UserRepository
 	bookingRepo    repository.BookingRepository
 	eventRepo      repository.EventRepository
+	tierRepo       repository.EventPriceTierRepository
 	userService    UserService
 	bookingService BookingService
 }
@@ -97,6 +98,7 @@ func NewWalkInService(
 	ur repository.UserRepository,
 	br repository.BookingRepository,
 	er repository.EventRepository,
+	tr repository.EventPriceTierRepository,
 	us UserService,
 	bs BookingService,
 ) WalkInService {
@@ -104,9 +106,27 @@ func NewWalkInService(
 		userRepo:       ur,
 		bookingRepo:    br,
 		eventRepo:      er,
+		tierRepo:       tr,
 		userService:    us,
 		bookingService: bs,
 	}
+}
+
+// ErrWalkInTiered is returned when an admin tries to walk-in book an event that
+// uses ticket tiers. Tier selection isn't supported in the walk-in flow yet.
+var ErrWalkInTiered = errors.New("walk-in booking is not yet supported for events with ticket tiers")
+
+// rejectIfTiered guards the walk-in flow against events that have active tiers,
+// which the walk-in path can't price (it has no tier selection).
+func (s *walkInService) rejectIfTiered(ctx context.Context, eventID uuid.UUID) error {
+	tiers, err := s.tierRepo.ListByEventID(ctx, eventID)
+	if err != nil {
+		return err
+	}
+	if len(tiers) > 0 {
+		return ErrWalkInTiered
+	}
+	return nil
 }
 
 // ErrWalkInDuplicate is returned when the guest already holds an active booking
@@ -132,6 +152,9 @@ func (s *walkInService) InitiateWalkIn(ctx context.Context, req WalkInInitiateRe
 	}
 	if evt == nil {
 		return nil, errors.New("event not found")
+	}
+	if err := s.rejectIfTiered(ctx, req.EventID); err != nil {
+		return nil, err
 	}
 
 	occurrenceDate, err := resolveWalkInOccurrence(evt, req.OccurrenceDate)
@@ -228,6 +251,9 @@ func (s *walkInService) CompleteWalkIn(ctx context.Context, req WalkInCompleteRe
 	}
 	if evt == nil {
 		return nil, errors.New("event not found")
+	}
+	if err := s.rejectIfTiered(ctx, req.EventID); err != nil {
+		return nil, err
 	}
 	occurrenceDate, err := resolveWalkInOccurrence(evt, req.OccurrenceDate)
 	if err != nil {

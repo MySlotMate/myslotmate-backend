@@ -44,6 +44,8 @@ type UserService interface {
 	VerifyPhoneOTP(ctx context.Context, userID uuid.UUID, otp string) error
 	SendLoginOTP(ctx context.Context, phone string) (string, error)
 	VerifyLoginOTP(ctx context.Context, phone, sessionID, otp string) (*models.User, string, string, error)
+	GetAttendeeProfile(ctx context.Context, userID uuid.UUID) (*models.AttendeeProfile, error)
+	UpsertAttendeeProfile(ctx context.Context, p *models.AttendeeProfile) (*models.AttendeeProfile, error)
 }
 
 type SignUpRequest struct {
@@ -108,6 +110,7 @@ type userService struct {
 	accountRepo     repository.AccountRepository
 	paymentRepo     repository.PaymentRepository
 	ledgerRepo      repository.TransactionLedgerRepository
+	attendeeRepo    repository.AttendeeProfileRepository
 	workerPool      *worker.WorkerPool
 	dispatcher      *event.Dispatcher
 	aadharProvider  identity.AadharProvider
@@ -126,6 +129,7 @@ func NewUserService(
 	ar repository.AccountRepository,
 	pmr repository.PaymentRepository,
 	lr repository.TransactionLedgerRepository,
+	apr repository.AttendeeProfileRepository,
 	wp *worker.WorkerPool,
 	dispatcher *event.Dispatcher,
 	ap identity.AadharProvider,
@@ -142,6 +146,7 @@ func NewUserService(
 		accountRepo:     ar,
 		paymentRepo:     pmr,
 		ledgerRepo:      lr,
+		attendeeRepo:    apr,
 		workerPool:      wp,
 		dispatcher:      dispatcher,
 		aadharProvider:  ap,
@@ -151,6 +156,20 @@ func NewUserService(
 		jwtSecret:       jwtSecret,
 		firebaseAuth:    firebaseAuth,
 	}
+}
+
+// GetAttendeeProfile returns the user's saved attendee-details answers (for
+// auto-filling the booking form). Returns nil when none saved yet.
+func (s *userService) GetAttendeeProfile(ctx context.Context, userID uuid.UUID) (*models.AttendeeProfile, error) {
+	return s.attendeeRepo.GetByUserID(ctx, userID)
+}
+
+// UpsertAttendeeProfile stores/updates the user's attendee-details answers.
+func (s *userService) UpsertAttendeeProfile(ctx context.Context, p *models.AttendeeProfile) (*models.AttendeeProfile, error) {
+	if err := s.attendeeRepo.Upsert(ctx, p); err != nil {
+		return nil, err
+	}
+	return s.attendeeRepo.GetByUserID(ctx, p.UserID)
 }
 
 // InitiateAadharVerification starts the verification flow

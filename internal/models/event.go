@@ -46,6 +46,12 @@ type Event struct {
 	IsRecurring    bool       `db:"is_recurring" json:"is_recurring"`
 	RecurrenceRule *string    `db:"recurrence_rule" json:"recurrence_rule,omitempty"` // e.g. "FREQ=WEEKLY;BYDAY=MO"
 
+	// ── Attendee details ────────────────────────────────────────────────────
+	// When RequiresAttendeeDetails is true, guests must supply the fields listed
+	// in AttendeeFields (keys from the fixed attendee-field catalog) at booking.
+	RequiresAttendeeDetails bool           `db:"requires_attendee_details" json:"requires_attendee_details"`
+	AttendeeFields          pq.StringArray `db:"attendee_fields" json:"attendee_fields"`
+
 	// ── Policies ────────────────────────────────────────────────────────────
 	CancellationPolicy *CancellationPolicy `db:"cancellation_policy" json:"cancellation_policy,omitempty"`
 
@@ -67,6 +73,10 @@ type Event struct {
 	// Calculated fields (not in DB)
 	NextAvailableDate *time.Time `json:"next_available_date,omitempty"`
 	BookingsLastWeek  int        `json:"bookings_last_week,omitempty"`
+
+	// Named ticket tiers loaded from event_price_tiers (not a column). Empty
+	// slice = single-price event driven by PriceCents.
+	PriceTiers []EventPriceTier `json:"price_tiers"`
 
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`

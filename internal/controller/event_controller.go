@@ -122,6 +122,7 @@ type EventCreateRequestBody struct {
 
 	RequiresAttendeeDetails bool     `json:"requires_attendee_details"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
+	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
 }
 
 type EventUpdateRequestBody struct {
@@ -154,6 +155,7 @@ type EventUpdateRequestBody struct {
 
 	RequiresAttendeeDetails *bool    `json:"requires_attendee_details,omitempty"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
+	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -219,6 +221,7 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 
 		RequiresAttendeeDetails: req.RequiresAttendeeDetails,
 		AttendeeFields:          req.AttendeeFields,
+		TermsAndConditions:      req.TermsAndConditions,
 	}
 
 	evt, err := c.eventService.CreateEvent(r.Context(), req.HostID, svcReq)
@@ -280,6 +283,7 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 
 		RequiresAttendeeDetails: body.RequiresAttendeeDetails,
 		AttendeeFields:          body.AttendeeFields,
+		TermsAndConditions:      body.TermsAndConditions,
 	}
 
 	evt, err := c.eventService.UpdateEvent(r.Context(), eventID, body.HostID, svcReq)

@@ -78,6 +78,7 @@ type EventCreateRequest struct {
 
 	RequiresAttendeeDetails bool     `json:"requires_attendee_details"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
+	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
 }
 
 type EventUpdateRequest struct {
@@ -110,6 +111,7 @@ type EventUpdateRequest struct {
 
 	RequiresAttendeeDetails *bool    `json:"requires_attendee_details,omitempty"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
+	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
 }
 
 type eventService struct {
@@ -202,6 +204,7 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 
 		RequiresAttendeeDetails: req.RequiresAttendeeDetails,
 		AttendeeFields:          pq.StringArray(req.AttendeeFields),
+		TermsAndConditions:      req.TermsAndConditions,
 	}
 
 	if status == models.EventStatusLive {
@@ -340,6 +343,9 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 	}
 	if req.AttendeeFields != nil {
 		evt.AttendeeFields = pq.StringArray(req.AttendeeFields)
+	}
+	if req.TermsAndConditions != nil {
+		evt.TermsAndConditions = req.TermsAndConditions
 	}
 
 	if err := s.eventRepo.Update(ctx, evt); err != nil {

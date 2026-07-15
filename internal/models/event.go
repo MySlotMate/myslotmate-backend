@@ -54,6 +54,8 @@ type Event struct {
 
 	// ── Policies ────────────────────────────────────────────────────────────
 	CancellationPolicy *CancellationPolicy `db:"cancellation_policy" json:"cancellation_policy,omitempty"`
+	// TermsAndConditions is free text set per experience and printed on the ticket PDF.
+	TermsAndConditions *string `db:"terms_and_conditions" json:"terms_and_conditions,omitempty"`
 
 	// ── Status ──────────────────────────────────────────────────────────────
 	Status      EventStatus `db:"status" json:"status"`

@@ -71,7 +71,8 @@ var eventColumns = `id, host_id,
 	cancellation_policy, status, published_at, paused_at, paused_from, paused_dates,
 	ai_suggestion, avg_rating, total_bookings, total_reviews,
 	created_at, updated_at,
-	requires_attendee_details, attendee_fields`
+	requires_attendee_details, attendee_fields,
+	terms_and_conditions`
 
 func scanEvent(row interface {
 	Scan(dest ...interface{}) error
@@ -88,6 +89,7 @@ func scanEvent(row interface {
 		&e.AISuggestion, &e.AvgRating, &e.TotalBookings, &e.TotalReviews,
 		&e.CreatedAt, &e.UpdatedAt,
 		&e.RequiresAttendeeDetails, &e.AttendeeFields,
+		&e.TermsAndConditions,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -116,7 +118,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			cancellation_policy, status, published_at, paused_from, paused_dates,
 			ai_suggestion,
 			created_at, updated_at,
-			requires_attendee_details, attendee_fields
+			requires_attendee_details, attendee_fields,
+			terms_and_conditions
 		) VALUES (
 			$1, $2,
 			$3, $4, $5, $6,
@@ -127,7 +130,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			$27, $28, $29, $30, $31,
 			$32,
 			$33, $34,
-			$35, $36
+			$35, $36,
+			$37
 		)
 	`
 	if event.ID == uuid.Nil {
@@ -144,6 +148,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 		event.AISuggestion,
 		event.CreatedAt, event.UpdatedAt,
 		event.RequiresAttendeeDetails, pq.Array(event.AttendeeFields),
+		event.TermsAndConditions,
 	)
 	return err
 }
@@ -158,8 +163,9 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 			price_cents = $19, is_free = $20, time = $21, end_time = $22, is_recurring = $23, recurrence_rule = $24,
 			cancellation_policy = $25, status = $26, published_at = $27, paused_at = $28, paused_from = $29, paused_dates = $30,
 			ai_suggestion = $31, avg_rating = $32, total_bookings = $33,
-			requires_attendee_details = $34, attendee_fields = $35
-		WHERE id = $36
+			requires_attendee_details = $34, attendee_fields = $35,
+			terms_and_conditions = $36
+		WHERE id = $37
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		event.Title, event.HookLine, event.Mood, event.Description,
@@ -170,6 +176,7 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 		event.CancellationPolicy, event.Status, event.PublishedAt, event.PausedAt, event.PausedFrom, pq.Array(event.PausedDates),
 		event.AISuggestion, event.AvgRating, event.TotalBookings,
 		event.RequiresAttendeeDetails, pq.Array(event.AttendeeFields),
+		event.TermsAndConditions,
 		event.ID,
 	)
 	return err
@@ -293,6 +300,7 @@ func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, 
 			&e.AISuggestion, &e.AvgRating, &e.TotalBookings, &e.TotalReviews,
 			&e.CreatedAt, &e.UpdatedAt,
 			&e.RequiresAttendeeDetails, &e.AttendeeFields,
+			&e.TermsAndConditions,
 		); err != nil {
 			fmt.Printf("[EVENT_REPO] scanEvents Scan ERROR: %v\n", err)
 			return nil, err

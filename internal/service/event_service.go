@@ -795,6 +795,8 @@ func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset in
 		eventOccupancy := occupancyMap[e.ID]
 		
 		if e.IsRecurring && e.RecurrenceRule != nil {
+			// calculateAvailabilityInternal(includePaused=false) already drops
+			// paused occurrences, so anything left here is bookable.
 			avail := s.calculateAvailabilityInternal(e, eventOccupancy, false)
 			for _, a := range avail {
 				if !a.IsFullyBooked {
@@ -803,9 +805,11 @@ func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset in
 				}
 			}
 		} else {
-			// For non-recurring, check occupancy from map
+			// Non-recurring: the single occurrence must be neither paused nor
+			// full. Without the pause check a paused one-off event kept a
+			// next_available_date and stayed visible in the public feed.
 			booked := eventOccupancy[e.Time.Format(time.RFC3339)]
-			if booked < e.Capacity {
+			if booked < e.Capacity && !isOccurrencePaused(e, e.Time) {
 				e.NextAvailableDate = &e.Time
 			}
 		}
@@ -824,6 +828,28 @@ func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset in
 	}
 
 	return finalEvents, nil
+}
+
+// isOccurrencePaused reports whether one specific occurrence of an event is
+// paused. Mirrors the rule used by calculateAvailabilityInternal so the public
+// feed and the availability calendar agree:
+//   - the date is listed in paused_dates (single-session pause), or
+//   - it falls at/after paused_from (pause-from-session-onwards), or
+//   - the event is fully paused (status=paused with neither granular field set).
+func isOccurrencePaused(evt *models.Event, t time.Time) bool {
+	for _, pdStr := range evt.PausedDates {
+		if pd, err := time.Parse(time.RFC3339, pdStr); err == nil && pd.Equal(t) {
+			return true
+		}
+		if strings.HasPrefix(pdStr, t.Format("2006-01-02")) {
+			return true
+		}
+	}
+	if evt.PausedFrom != nil && !t.Before(*evt.PausedFrom) {
+		return true
+	}
+	return evt.Status == models.EventStatusPaused &&
+		evt.PausedFrom == nil && len(evt.PausedDates) == 0
 }
 
 func (s *eventService) GetEventAvailability(ctx context.Context, eventID uuid.UUID) ([]models.OccurrenceAvailability, error) {
@@ -903,7 +929,11 @@ func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupanc
 		}
 
 		if err != nil {
-			occurrences = append(occurrences, occurrence{t: evt.Time})
+			// Unparseable rule → fall back to the single base occurrence, but
+			// still honour the pause rule so a paused event can't leak through.
+			if p := isOccurrencePaused(evt, evt.Time); !p || includePaused {
+				occurrences = append(occurrences, occurrence{t: evt.Time, isPaused: p})
+			}
 		} else {
 			now := time.Now()
 			curr := now.Add(-1 * time.Hour)

@@ -215,14 +215,11 @@ func (c *HostController) GetPublicHostProfile(w http.ResponseWriter, r *http.Req
 	RespondSuccess(w, http.StatusOK, profile)
 }
 
-func (c *HostController) SubmitApplication(w http.ResponseWriter, r *http.Request) {
-	var req HostApplicationRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		RespondError(w, http.StatusBadRequest, "Invalid request payload")
-		return
-	}
-
-	svcReq := service.HostApplicationRequest{
+// toHostApplicationRequest maps the wire body onto the service request. UserID
+// is not part of it — the service takes it separately. PhnNumber is read from
+// the user record by the service, so it is ignored here.
+func toHostApplicationRequest(req HostApplicationRequestBody) service.HostApplicationRequest {
+	return service.HostApplicationRequest{
 		FirstName:       req.FirstName,
 		LastName:        req.LastName,
 		City:            req.City,
@@ -240,8 +237,16 @@ func (c *HostController) SubmitApplication(w http.ResponseWriter, r *http.Reques
 		SocialWebsite:   req.SocialWebsite,
 		IsProfessional:  req.IsProfessional,
 	}
+}
 
-	host, err := c.hostService.SubmitApplication(r.Context(), req.UserID, svcReq)
+func (c *HostController) SubmitApplication(w http.ResponseWriter, r *http.Request) {
+	var req HostApplicationRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	host, err := c.hostService.SubmitApplication(r.Context(), req.UserID, toHostApplicationRequest(req))
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -257,26 +262,7 @@ func (c *HostController) SaveDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	svcReq := service.HostApplicationRequest{
-		FirstName:       req.FirstName,
-		LastName:        req.LastName,
-		City:            req.City,
-		ExperienceDesc:  req.ExperienceDesc,
-		Moods:           req.Moods,
-		Description:     req.Description,
-		PreferredDays:   req.PreferredDays,
-		GroupSize:       req.GroupSize,
-		GovernmentIDURL: req.GovernmentIDURL,
-		AvatarURL:       req.AvatarURL,
-		Tagline:         req.Tagline,
-		Bio:             req.Bio,
-		SocialInstagram: req.SocialInstagram,
-		SocialLinkedin:  req.SocialLinkedin,
-		SocialWebsite:   req.SocialWebsite,
-		IsProfessional:  req.IsProfessional,
-	}
-
-	host, err := c.hostService.SaveDraft(r.Context(), req.UserID, svcReq)
+	host, err := c.hostService.SaveDraft(r.Context(), req.UserID, toHostApplicationRequest(req))
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return

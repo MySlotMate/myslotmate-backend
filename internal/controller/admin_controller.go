@@ -45,6 +45,7 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 
 		r.Get("/applications", c.ListPendingApplications)
+		r.Post("/", c.CreateHost)
 		r.Post("/{hostID}/approve", c.ApproveApplication)
 		r.Post("/{hostID}/reject", c.RejectApplication)
 		r.Put("/{hostID}/application-status", c.UpdateApplicationStatus)
@@ -104,6 +105,40 @@ func (c *AdminController) ListPendingApplications(w http.ResponseWriter, r *http
 		return
 	}
 	RespondSuccess(w, http.StatusOK, hosts)
+}
+
+// CreateHost onboards an existing user as a host in one step: it records the
+// same application the user would have submitted themselves, then approves it,
+// so the host is live immediately without a trip through the review queue.
+// The user must already exist — hosts.user_id is a NOT NULL UNIQUE FK — and
+// their phone number is taken from their user record, as on self-signup.
+func (c *AdminController) CreateHost(w http.ResponseWriter, r *http.Request) {
+	var req HostApplicationRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if req.UserID == uuid.Nil {
+		RespondError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+
+	// Submit first, then approve: approval is what verifies the user, stamps
+	// approved_at and fires the host-approved event, so it can't be skipped by
+	// writing the approved status directly.
+	host, err := c.hostService.SubmitApplication(r.Context(), req.UserID, toHostApplicationRequest(req))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	approved, err := c.hostService.ApproveApplication(r.Context(), host.ID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusCreated, approved)
 }
 
 func (c *AdminController) ApproveApplication(w http.ResponseWriter, r *http.Request) {

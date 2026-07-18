@@ -27,6 +27,58 @@ type BookingService interface {
 	GetUserBookings(ctx context.Context, userID uuid.UUID) ([]*models.Booking, error)
 	GetBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error)
 	SendTicketNotification(ctx context.Context, bookingID uuid.UUID, fileName string, pdfBytes []byte) error
+	// VerifyScannedTicket judges a scanned ticket against the event and
+	// occurrence the host is currently manning, without changing anything.
+	VerifyScannedTicket(ctx context.Context, req ScanVerifyRequest) (*ScanResult, error)
+	// CheckInScannedTicket admits guests against a scanned ticket, re-running
+	// every check first so it is safe to call directly.
+	CheckInScannedTicket(ctx context.Context, req ScanCheckInRequest) (*ScanResult, error)
+}
+
+// ScanVerdict is why a scanned ticket was accepted or turned away. The door UI
+// switches on this, so the reason shown is always the specific one.
+type ScanVerdict string
+
+const (
+	ScanValid          ScanVerdict = "valid"            // admit — guests still to come in
+	ScanNotFound       ScanVerdict = "not_found"        // no booking with that ID
+	ScanWrongEvent     ScanVerdict = "wrong_event"      // a real ticket, but for another event
+	ScanWrongOccurence ScanVerdict = "wrong_occurrence" // right event, different date
+	ScanNotConfirmed   ScanVerdict = "not_confirmed"    // cancelled, or never paid for
+	ScanAlreadyIn      ScanVerdict = "already_checked_in"
+	ScanTooMany        ScanVerdict = "too_many"       // asked to admit more than remain
+	ScanForeignHost    ScanVerdict = "not_your_event" // someone else's event entirely
+)
+
+type ScanVerifyRequest struct {
+	HostID         uuid.UUID
+	BookingID      uuid.UUID
+	EventID        uuid.UUID
+	OccurrenceDate time.Time
+}
+
+type ScanCheckInRequest struct {
+	ScanVerifyRequest
+	Count int
+}
+
+// ScanResult is what the door screen renders. Booking details are filled in
+// whenever the booking was found, even for a rejection, so the host can see
+// what they scanned and explain it to the guest.
+type ScanResult struct {
+	Verdict        ScanVerdict `json:"verdict"`
+	Message        string      `json:"message"`
+	BookingID      *uuid.UUID  `json:"booking_id,omitempty"`
+	GuestName      string      `json:"guest_name,omitempty"`
+	GuestEmail     string      `json:"guest_email,omitempty"`
+	EventTitle     string      `json:"event_title,omitempty"`
+	OccurrenceDate *time.Time  `json:"occurrence_date,omitempty"`
+	Quantity       int         `json:"quantity,omitempty"`
+	CheckedInCount int         `json:"checked_in_count"`
+	Remaining      int         `json:"remaining"`
+	// JustCheckedIn is how many guests this particular scan admitted. Zero for
+	// a plain verify.
+	JustCheckedIn int `json:"just_checked_in"`
 }
 
 type BookingCreateRequest struct {
@@ -853,6 +905,114 @@ func (s *bookingService) GetUserBookings(ctx context.Context, userID uuid.UUID) 
 
 func (s *bookingService) GetBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error) {
 	return s.bookingRepo.GetByID(ctx, bookingID)
+}
+
+// evaluateScan resolves a scanned ticket into a verdict. Shared by verify and
+// check-in so both judge a ticket by exactly the same rules.
+func (s *bookingService) evaluateScan(ctx context.Context, req ScanVerifyRequest) (*ScanResult, *repository.BookingScanTarget, error) {
+	target, err := s.bookingRepo.GetScanTarget(ctx, req.BookingID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if target == nil {
+		return &ScanResult{
+			Verdict: ScanNotFound,
+			Message: "No booking matches this ticket.",
+		}, nil, nil
+	}
+
+	res := &ScanResult{
+		BookingID:      &target.ID,
+		GuestName:      target.GuestName,
+		GuestEmail:     target.GuestEmail,
+		EventTitle:     target.EventTitle,
+		OccurrenceDate: &target.OccurrenceDate,
+		Quantity:       target.Quantity,
+		CheckedInCount: target.CheckedInCount,
+		Remaining:      target.Quantity - target.CheckedInCount,
+	}
+
+	switch {
+	case target.HostID != req.HostID:
+		res.Verdict = ScanForeignHost
+		res.Message = "This ticket is for another host's experience."
+	case target.EventID != req.EventID:
+		res.Verdict = ScanWrongEvent
+		res.Message = fmt.Sprintf("This ticket is for a different experience (%s).", target.EventTitle)
+	case !target.OccurrenceDate.Equal(req.OccurrenceDate):
+		res.Verdict = ScanWrongOccurence
+		res.Message = "This ticket is for a different date of this experience."
+	case target.Status != models.BookingStatusConfirmed:
+		res.Verdict = ScanNotConfirmed
+		res.Message = fmt.Sprintf("This booking is %s, not confirmed.", target.Status)
+	case target.CheckedInCount >= target.Quantity:
+		res.Verdict = ScanAlreadyIn
+		res.Message = fmt.Sprintf("All %d guests on this booking are already checked in.", target.Quantity)
+	default:
+		res.Verdict = ScanValid
+		res.Message = fmt.Sprintf("%d of %d guests still to check in.", res.Remaining, target.Quantity)
+	}
+	return res, target, nil
+}
+
+func (s *bookingService) VerifyScannedTicket(ctx context.Context, req ScanVerifyRequest) (*ScanResult, error) {
+	res, _, err := s.evaluateScan(ctx, req)
+	return res, err
+}
+
+func (s *bookingService) CheckInScannedTicket(ctx context.Context, req ScanCheckInRequest) (*ScanResult, error) {
+	if req.Count < 1 {
+		return nil, errors.New("check-in count must be at least 1")
+	}
+
+	res, target, err := s.evaluateScan(ctx, req.ScanVerifyRequest)
+	if err != nil {
+		return nil, err
+	}
+	// Anything the verify step rejects is refused here too, unchanged.
+	if res.Verdict != ScanValid {
+		return res, nil
+	}
+	if req.Count > res.Remaining {
+		res.Verdict = ScanTooMany
+		res.Message = fmt.Sprintf("Only %d of %d guests are left to check in.", res.Remaining, target.Quantity)
+		return res, nil
+	}
+
+	affected, err := s.bookingRepo.CheckInGuests(ctx, repository.CheckInParams{
+		BookingID:      req.BookingID,
+		HostID:         req.HostID,
+		EventID:        req.EventID,
+		OccurrenceDate: req.OccurrenceDate,
+		Count:          req.Count,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		// Another door admitted guests between the read and the write. Re-read so
+		// the host is told the real remaining count rather than a stale one.
+		fresh, _, ferr := s.evaluateScan(ctx, req.ScanVerifyRequest)
+		if ferr != nil {
+			return nil, ferr
+		}
+		if fresh.Verdict == ScanValid {
+			fresh.Verdict = ScanTooMany
+			fresh.Message = fmt.Sprintf("Only %d guests are left to check in — try again.", fresh.Remaining)
+		}
+		return fresh, nil
+	}
+
+	res.CheckedInCount += req.Count
+	res.Remaining = target.Quantity - res.CheckedInCount
+	res.JustCheckedIn = req.Count
+	res.Verdict = ScanValid
+	if res.Remaining == 0 {
+		res.Message = fmt.Sprintf("Checked in %d — all %d guests are now in.", req.Count, target.Quantity)
+	} else {
+		res.Message = fmt.Sprintf("Checked in %d — %d still to come.", req.Count, res.Remaining)
+	}
+	return res, nil
 }
 
 func (s *bookingService) SendTicketNotification(ctx context.Context, bookingID uuid.UUID, fileName string, pdfBytes []byte) error {

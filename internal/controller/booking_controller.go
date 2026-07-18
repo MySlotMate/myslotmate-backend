@@ -29,6 +29,98 @@ func (c *BookingController) RegisterRoutes(r chi.Router) {
 		r.Get("/user/{userID}", c.GetUserBookings)
 		r.Post("/{bookingID}/ticket-notification", c.SendTicketNotification)
 	})
+
+	// Door check-in. Scoped under /hosts because every call is judged against
+	// the event+occurrence the calling host is manning, not just the ticket.
+	r.Route("/hosts/scan", func(r chi.Router) {
+		r.Post("/verify", c.VerifyScannedTicket)
+		r.Post("/check-in", c.CheckInScannedTicket)
+	})
+}
+
+// ScanRequestBody is the door session (which host, which event, which date)
+// plus the booking the camera just read. Count is only used on check-in.
+type ScanRequestBody struct {
+	HostID         uuid.UUID `json:"host_id"`
+	BookingID      uuid.UUID `json:"booking_id"`
+	EventID        uuid.UUID `json:"event_id"`
+	OccurrenceDate time.Time `json:"occurrence_date"`
+	Count          int       `json:"count,omitempty"`
+}
+
+func (b ScanRequestBody) toVerifyRequest() service.ScanVerifyRequest {
+	return service.ScanVerifyRequest{
+		HostID:         b.HostID,
+		BookingID:      b.BookingID,
+		EventID:        b.EventID,
+		OccurrenceDate: b.OccurrenceDate,
+	}
+}
+
+// decodeScanRequest reads and validates the session fields common to both scan
+// endpoints. It reports whether the request was usable, responding itself when
+// not.
+func decodeScanRequest(w http.ResponseWriter, r *http.Request) (ScanRequestBody, bool) {
+	var req ScanRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return req, false
+	}
+	switch {
+	case req.HostID == uuid.Nil:
+		RespondError(w, http.StatusBadRequest, "host_id is required")
+		return req, false
+	case req.EventID == uuid.Nil:
+		RespondError(w, http.StatusBadRequest, "event_id is required")
+		return req, false
+	case req.BookingID == uuid.Nil:
+		RespondError(w, http.StatusBadRequest, "booking_id is required")
+		return req, false
+	case req.OccurrenceDate.IsZero():
+		RespondError(w, http.StatusBadRequest, "occurrence_date is required")
+		return req, false
+	}
+	return req, true
+}
+
+// VerifyScannedTicket judges a ticket without admitting anyone. A rejected
+// ticket is still a successful request — the verdict is in the body, so the
+// door screen can show why rather than a generic error.
+func (c *BookingController) VerifyScannedTicket(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeScanRequest(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := c.bookingService.VerifyScannedTicket(r.Context(), req.toVerifyRequest())
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, result)
+}
+
+// CheckInScannedTicket admits `count` guests against a scanned ticket. Callable
+// repeatedly for one booking as a group arrives in waves, up to its quantity.
+func (c *BookingController) CheckInScannedTicket(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeScanRequest(w, r)
+	if !ok {
+		return
+	}
+	if req.Count < 1 {
+		RespondError(w, http.StatusBadRequest, "count must be at least 1")
+		return
+	}
+
+	result, err := c.bookingService.CheckInScannedTicket(r.Context(), service.ScanCheckInRequest{
+		ScanVerifyRequest: req.toVerifyRequest(),
+		Count:             req.Count,
+	})
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, result)
 }
 
 type CreateBookingRequest struct {

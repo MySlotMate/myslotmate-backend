@@ -48,8 +48,41 @@ type BookingRepository interface {
 	// so the host can see the full picture. When fromDate is non-nil, only
 	// bookings created at or after that timestamp are returned.
 	ListHostSales(ctx context.Context, hostID uuid.UUID, limit, offset int, fromDate *time.Time) ([]*HostSale, error)
+	// GetScanTarget loads the one booking a scanned ticket refers to, joined with
+	// the fields the door needs to judge it: the owning host, the event title and
+	// the guest's name. Returns nil when no such booking exists.
+	GetScanTarget(ctx context.Context, bookingID uuid.UUID) (*BookingScanTarget, error)
+	// CheckInGuests admits `count` more guests against a booking. The whole
+	// decision is expressed as one guarded UPDATE — host ownership, event and
+	// occurrence match, confirmed status and remaining capacity are all re-checked
+	// in the WHERE clause, so two doors scanning the same ticket at once can never
+	// admit more guests than were paid for. Reports how many rows matched (0 or 1);
+	// 0 means some condition failed and the caller should re-read to explain why.
+	CheckInGuests(ctx context.Context, p CheckInParams) (int, error)
 	// WithTx returns a copy of the repository bound to the given transaction.
 	WithTx(tx *sql.Tx) BookingRepository
+}
+
+// BookingScanTarget is a booking plus the context needed to validate a ticket
+// at the door — who owns the event, what it is, and who the booking is for.
+type BookingScanTarget struct {
+	models.Booking
+	HostID     uuid.UUID
+	EventTitle string
+	GuestName  string
+	GuestEmail string
+}
+
+// CheckInParams are the conditions a check-in must satisfy. EventID and
+// OccurrenceDate come from the session the host opened (the event they are
+// manning), not from the scanned ticket — that is what stops a ticket for one
+// event being admitted at another.
+type CheckInParams struct {
+	BookingID      uuid.UUID
+	HostID         uuid.UUID
+	EventID        uuid.UUID
+	OccurrenceDate time.Time
+	Count          int
 }
 
 // HostEarningsBreakdown is the live, booking-derived view of a host's earnings,
@@ -163,14 +196,66 @@ func (r *postgresBookingRepository) GetHostEarningsBreakdown(ctx context.Context
 	return &b, nil
 }
 
+func (r *postgresBookingRepository) GetScanTarget(ctx context.Context, bookingID uuid.UUID) (*BookingScanTarget, error) {
+	const query = `
+		SELECT
+			b.id, b.event_id, b.user_id, b.occurrence_date, b.quantity, b.status,
+			b.checked_in_count, b.last_checked_in_at,
+			e.host_id, e.title, u.name, u.email
+		FROM bookings b
+		JOIN events e ON e.id = b.event_id
+		JOIN users  u ON u.id = b.user_id
+		WHERE b.id = $1`
+	t := &BookingScanTarget{}
+	err := r.db.QueryRowContext(ctx, query, bookingID).Scan(
+		&t.ID, &t.EventID, &t.UserID, &t.OccurrenceDate, &t.Quantity, &t.Status,
+		&t.CheckedInCount, &t.LastCheckedInAt,
+		&t.HostID, &t.EventTitle, &t.GuestName, &t.GuestEmail,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return t, nil
+}
+
+func (r *postgresBookingRepository) CheckInGuests(ctx context.Context, p CheckInParams) (int, error) {
+	// Every condition the verify step checks is repeated here so the write is
+	// safe on its own, independent of what verify saw a moment earlier.
+	const query = `
+		UPDATE bookings b
+		SET checked_in_count   = b.checked_in_count + $5,
+		    last_checked_in_at = now(),
+		    updated_at         = now()
+		FROM events e
+		WHERE b.id              = $1
+		  AND e.id              = b.event_id
+		  AND e.host_id         = $2
+		  AND b.event_id        = $3
+		  AND b.occurrence_date = $4
+		  AND b.status          = 'confirmed'
+		  AND b.checked_in_count + $5 <= b.quantity`
+	res, err := r.db.ExecContext(ctx, query, p.BookingID, p.HostID, p.EventID, p.OccurrenceDate, p.Count)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
 // bookingColumns is the canonical column list for SELECT queries.
-const bookingColumns = `id, event_id, user_id, occurrence_date, quantity, status, payment_id, idempotency_key, amount_cents, service_fee_cents, net_earning_cents, created_at, updated_at, cancelled_at, notification_sent_whatsapp, notification_sent_email, reminder_notification_sent_email, reminder_notification_sent_at, reminder_notification_sent_whatsapp, reminder_whatsapp_sent_at, price_tier_id, unit_price_cents`
+const bookingColumns = `id, event_id, user_id, occurrence_date, quantity, status, payment_id, idempotency_key, amount_cents, service_fee_cents, net_earning_cents, created_at, updated_at, cancelled_at, notification_sent_whatsapp, notification_sent_email, reminder_notification_sent_email, reminder_notification_sent_at, reminder_notification_sent_whatsapp, reminder_whatsapp_sent_at, price_tier_id, unit_price_cents, checked_in_count, last_checked_in_at`
 
 // scanBooking scans a single row into a Booking struct.
 func scanBooking(scanner interface{ Scan(dest ...interface{}) error }) (*models.Booking, error) {
 	b := &models.Booking{}
 	err := scanner.Scan(
-		&b.ID, &b.EventID, &b.UserID, &b.OccurrenceDate, &b.Quantity, &b.Status, &b.PaymentID, &b.IdempotencyKey, &b.AmountCents, &b.ServiceFeeCents, &b.NetEarningCents, &b.CreatedAt, &b.UpdatedAt, &b.CancelledAt, &b.NotificationSentWhatsapp, &b.NotificationSentEmail, &b.ReminderNotificationSentEmail, &b.ReminderNotificationSentAt, &b.ReminderNotificationSentWhatsapp, &b.ReminderWhatsappSentAt, &b.PriceTierID, &b.UnitPriceCents,
+		&b.ID, &b.EventID, &b.UserID, &b.OccurrenceDate, &b.Quantity, &b.Status, &b.PaymentID, &b.IdempotencyKey, &b.AmountCents, &b.ServiceFeeCents, &b.NetEarningCents, &b.CreatedAt, &b.UpdatedAt, &b.CancelledAt, &b.NotificationSentWhatsapp, &b.NotificationSentEmail, &b.ReminderNotificationSentEmail, &b.ReminderNotificationSentAt, &b.ReminderNotificationSentWhatsapp, &b.ReminderWhatsappSentAt, &b.PriceTierID, &b.UnitPriceCents, &b.CheckedInCount, &b.LastCheckedInAt,
 	)
 	if err != nil {
 		return nil, err

@@ -57,6 +57,16 @@ type Host struct {
 	AvgRating    *float64 `db:"avg_rating" json:"avg_rating,omitempty"`
 	TotalReviews int      `db:"total_reviews" json:"total_reviews"`
 
+	// ── Admin stat overrides ────────────────────────────────────────────────
+	// The three headline numbers on the public profile are normally derived
+	// (events hosted / people met from the host's events; AvgRating from
+	// reviews). A non-nil override here pins the displayed value instead; nil
+	// means "show the derived number". AvgRatingOverride is separate from
+	// AvgRating because review_service overwrites AvgRating on every review.
+	EventsHostedOverride *int     `db:"events_hosted_override" json:"events_hosted_override,omitempty"`
+	PeopleMetOverride    *int     `db:"people_met_override" json:"people_met_override,omitempty"`
+	AvgRatingOverride    *float64 `db:"avg_rating_override" json:"avg_rating_override,omitempty"`
+
 	// PlatformFeePercentage is this host's commission override — the
 	// platform's cut of each booking (host keeps the remainder). nil means
 	// "use the global platform_settings default" (see GetPlatformFeeConfig).

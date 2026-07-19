@@ -115,6 +115,14 @@ type HostProfileUpdateRequest struct {
 	IsSuperHost        *bool    `json:"is_super_host,omitempty"`
 	IsCommunityChamp   *bool    `json:"is_community_champ,omitempty"`
 	IsProfessional     *bool    `json:"is_professional,omitempty"`
+
+	// Stat overrides pin the three headline numbers on the public profile.
+	// Following this struct's convention nil still means "leave unchanged", so
+	// a negative value is the sentinel for "clear the override and go back to
+	// the derived number" — nil alone cannot express that.
+	EventsHostedOverride *int     `json:"events_hosted_override,omitempty"`
+	PeopleMetOverride    *int     `json:"people_met_override,omitempty"`
+	AvgRatingOverride    *float64 `json:"avg_rating_override,omitempty"`
 }
 
 // HostDashboardOverview powers the Host Dashboard overview screen.
@@ -604,6 +612,32 @@ func applyProfileUpdate(host *models.Host, req HostProfileUpdateRequest) error {
 	}
 	if req.IsProfessional != nil {
 		host.IsProfessional = *req.IsProfessional
+	}
+
+	// Stat overrides — a negative value clears the override (see the field docs
+	// on HostProfileUpdateRequest).
+	if req.EventsHostedOverride != nil {
+		if *req.EventsHostedOverride < 0 {
+			host.EventsHostedOverride = nil
+		} else {
+			host.EventsHostedOverride = req.EventsHostedOverride
+		}
+	}
+	if req.PeopleMetOverride != nil {
+		if *req.PeopleMetOverride < 0 {
+			host.PeopleMetOverride = nil
+		} else {
+			host.PeopleMetOverride = req.PeopleMetOverride
+		}
+	}
+	if req.AvgRatingOverride != nil {
+		if *req.AvgRatingOverride < 0 {
+			host.AvgRatingOverride = nil
+		} else if *req.AvgRatingOverride > 5 {
+			return errors.New("avg rating override must be between 0 and 5")
+		} else {
+			host.AvgRatingOverride = req.AvgRatingOverride
+		}
 	}
 	return nil
 }

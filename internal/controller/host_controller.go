@@ -40,6 +40,12 @@ type PublicHostProfile struct {
 	GalleryURLs         []string  `json:"gallery_urls"`
 	AvgRating           *float64  `json:"avg_rating,omitempty"`
 	TotalReviews        int       `json:"total_reviews"`
+
+	// Admin-set overrides for the three headline profile stats. Non-nil means
+	// the client should display these instead of the derived values.
+	EventsHostedOverride *int     `json:"events_hosted_override,omitempty"`
+	PeopleMetOverride    *int     `json:"people_met_override,omitempty"`
+	AvgRatingOverride    *float64 `json:"avg_rating_override,omitempty"`
 }
 
 func (c *HostController) RegisterRoutes(r chi.Router) {
@@ -167,6 +173,10 @@ func (c *HostController) ListHosts(w http.ResponseWriter, r *http.Request) {
 			GalleryURLs:         h.GalleryURLs,
 			AvgRating:           h.AvgRating,
 			TotalReviews:        h.TotalReviews,
+
+			EventsHostedOverride: h.EventsHostedOverride,
+			PeopleMetOverride:    h.PeopleMetOverride,
+			AvgRatingOverride:    h.AvgRatingOverride,
 		})
 	}
 
@@ -210,6 +220,10 @@ func (c *HostController) GetPublicHostProfile(w http.ResponseWriter, r *http.Req
 		GalleryURLs:         host.GalleryURLs,
 		AvgRating:           host.AvgRating,
 		TotalReviews:        host.TotalReviews,
+
+		EventsHostedOverride: host.EventsHostedOverride,
+		PeopleMetOverride:    host.PeopleMetOverride,
+		AvgRatingOverride:    host.AvgRatingOverride,
 	}
 
 	RespondSuccess(w, http.StatusOK, profile)

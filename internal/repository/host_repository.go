@@ -52,7 +52,8 @@ var hostColumns = `id, user_id, account_id,
 	gallery_urls, instagram_scraped_at, avatar_from_instagram,
 	avg_rating, total_reviews, platform_fee_percentage,
 	created_at, updated_at,
-	is_active`
+	is_active,
+	events_hosted_override, people_met_override, avg_rating_override`
 
 func scanHost(row interface {
 	Scan(dest ...interface{}) error
@@ -69,6 +70,7 @@ func scanHost(row interface {
 		&h.AvgRating, &h.TotalReviews, &h.PlatformFeePercentage,
 		&h.CreatedAt, &h.UpdatedAt,
 		&h.IsActive,
+		&h.EventsHostedOverride, &h.PeopleMetOverride, &h.AvgRatingOverride,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -152,8 +154,9 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 			is_identity_verified = $18, is_super_host = $19, is_community_champ = $20,
 			expertise_tags = $21, social_instagram = $22, social_linkedin = $23, social_website = $24,
 			avg_rating = $25, total_reviews = $26, platform_fee_percentage = $27,
-			avatar_from_instagram = $28, gallery_urls = $29, is_professional = $30
-		WHERE id = $31
+			avatar_from_instagram = $28, gallery_urls = $29, is_professional = $30,
+			events_hosted_override = $31, people_met_override = $32, avg_rating_override = $33
+		WHERE id = $34
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		host.FirstName, host.LastName, host.PhnNumber, host.City, host.AvatarURL, host.Tagline, host.Bio,
@@ -163,6 +166,7 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 		pq.Array(host.ExpertiseTags), host.SocialInstagram, host.SocialLinkedin, host.SocialWebsite,
 		host.AvgRating, host.TotalReviews, host.PlatformFeePercentage,
 		host.AvatarFromInstagram, pq.Array(host.GalleryURLs), host.IsProfessional,
+		host.EventsHostedOverride, host.PeopleMetOverride, host.AvgRatingOverride,
 		host.ID,
 	)
 	return err

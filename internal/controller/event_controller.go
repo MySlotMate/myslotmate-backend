@@ -120,6 +120,11 @@ type EventCreateRequestBody struct {
 	AISuggestion       *string                    `json:"ai_suggestion,omitempty"`
 	PriceTiers         []service.PriceTierInput   `json:"price_tiers,omitempty"`
 
+	// Status lets the caller create an event live in a single request instead of
+	// creating a draft and publishing separately. Empty defaults to draft (see
+	// eventService.CreateEvent).
+	Status models.EventStatus `json:"status,omitempty"`
+
 	RequiresAttendeeDetails bool     `json:"requires_attendee_details"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
@@ -218,6 +223,7 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		CancellationPolicy: req.CancellationPolicy,
 		AISuggestion:       req.AISuggestion,
 		PriceTiers:         req.PriceTiers,
+		Status:             req.Status,
 
 		RequiresAttendeeDetails: req.RequiresAttendeeDetails,
 		AttendeeFields:          req.AttendeeFields,

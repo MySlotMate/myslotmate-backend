@@ -164,9 +164,16 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 	}
 
 	now := time.Now()
+	// A new event may only be created as a draft or live. Paused/cancelled are
+	// lifecycle states reached through their own endpoints, never at creation.
 	status := req.Status
-	if status == "" {
+	switch status {
+	case "":
 		status = models.EventStatusDraft
+	case models.EventStatusDraft, models.EventStatusLive:
+		// ok
+	default:
+		return nil, fmt.Errorf("invalid status %q: a new event must be draft or live", status)
 	}
 
 	newEvent := &models.Event{
@@ -626,6 +633,14 @@ func (s *eventService) PublishEvent(ctx context.Context, eventID uuid.UUID, host
 	}
 	if evt.HostID != hostID {
 		return nil, errors.New("unauthorized")
+	}
+	// Only a draft is promoted to live. Publishing an already-live, paused, or
+	// cancelled event is a no-op: this lets an edit-time "save" call publish
+	// unconditionally without silently un-pausing, resurrecting a cancelled
+	// event, or resetting published_at on every edit. (Un-pausing has its own
+	// path, ResumeEvent.)
+	if evt.Status != models.EventStatusDraft {
+		return evt, nil
 	}
 	if err := s.eventRepo.UpdateStatus(ctx, eventID, models.EventStatusLive); err != nil {
 		return nil, err

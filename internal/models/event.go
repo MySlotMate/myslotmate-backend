@@ -12,6 +12,10 @@ type Event struct {
 	ID     uuid.UUID `db:"id" json:"id"`
 	HostID uuid.UUID `db:"host_id" json:"host_id"`
 
+	// Slug is the clean, URL-safe identifier used in public links
+	// (/experience/{slug}). Generated once at create time; immutable.
+	Slug string `db:"slug" json:"slug"`
+
 	// ── The Basics ──────────────────────────────────────────────────────────
 	Title       string     `db:"title" json:"title"`
 	HookLine    *string    `db:"hook_line" json:"hook_line,omitempty"`

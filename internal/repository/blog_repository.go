@@ -13,6 +13,11 @@ import (
 type BlogRepository interface {
 	Create(ctx context.Context, blog *models.Blog) error
 	GetByID(ctx context.Context, id uuid.UUID) (*models.Blog, error)
+	GetBySlug(ctx context.Context, slug string) (*models.Blog, error)
+	SlugExists(ctx context.Context, slug string) (bool, error)
+	// SlugExistsExcluding reports whether a slug is taken by a blog other than
+	// excludeID — used when updating a blog's own slug.
+	SlugExistsExcluding(ctx context.Context, slug string, excludeID uuid.UUID) (bool, error)
 	ListPublished(ctx context.Context, limit, offset int) ([]*models.Blog, error)
 	ListPublishedByCategory(ctx context.Context, category string, limit, offset int) ([]*models.Blog, error)
 	ListByAuthorID(ctx context.Context, authorID uuid.UUID, limit, offset int) ([]*models.Blog, error)
@@ -32,7 +37,7 @@ func NewBlogRepository(db *sql.DB) BlogRepository {
 	return &postgresBlogRepository{db: db}
 }
 
-var blogColumns = `id, title, description, category, content, cover_image_url, 
+var blogColumns = `id, slug, title, description, category, content, cover_image_url,
 	author_id, author_name, read_time_minutes, published_at, created_at, updated_at`
 
 func scanBlog(row interface {
@@ -40,7 +45,7 @@ func scanBlog(row interface {
 }) (*models.Blog, error) {
 	blog := &models.Blog{}
 	err := row.Scan(
-		&blog.ID, &blog.Title, &blog.Description, &blog.Category, &blog.Content, &blog.CoverImageURL,
+		&blog.ID, &blog.Slug, &blog.Title, &blog.Description, &blog.Category, &blog.Content, &blog.CoverImageURL,
 		&blog.AuthorID, &blog.AuthorName, &blog.ReadTimeMinutes, &blog.PublishedAt, &blog.CreatedAt, &blog.UpdatedAt,
 	)
 	if err != nil {
@@ -56,13 +61,13 @@ func (r *postgresBlogRepository) Create(ctx context.Context, blog *models.Blog) 
 
 	err := r.db.QueryRowContext(
 		ctx,
-		`INSERT INTO blogs (id, title, description, category, content, cover_image_url, author_id, author_name, read_time_minutes, published_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		`INSERT INTO blogs (id, slug, title, description, category, content, cover_image_url, author_id, author_name, read_time_minutes, published_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		 RETURNING `+blogColumns,
-		blog.ID, blog.Title, blog.Description, blog.Category, blog.Content, blog.CoverImageURL,
+		blog.ID, blog.Slug, blog.Title, blog.Description, blog.Category, blog.Content, blog.CoverImageURL,
 		blog.AuthorID, blog.AuthorName, blog.ReadTimeMinutes, blog.PublishedAt, blog.CreatedAt, blog.UpdatedAt,
 	).Scan(
-		&blog.ID, &blog.Title, &blog.Description, &blog.Category, &blog.Content, &blog.CoverImageURL,
+		&blog.ID, &blog.Slug, &blog.Title, &blog.Description, &blog.Category, &blog.Content, &blog.CoverImageURL,
 		&blog.AuthorID, &blog.AuthorName, &blog.ReadTimeMinutes, &blog.PublishedAt, &blog.CreatedAt, &blog.UpdatedAt,
 	)
 
@@ -76,6 +81,30 @@ func (r *postgresBlogRepository) GetByID(ctx context.Context, id uuid.UUID) (*mo
 		id,
 	)
 	return scanBlog(row)
+}
+
+func (r *postgresBlogRepository) GetBySlug(ctx context.Context, slug string) (*models.Blog, error) {
+	row := r.db.QueryRowContext(
+		ctx,
+		fmt.Sprintf(`SELECT %s FROM blogs WHERE slug = $1`, blogColumns),
+		slug,
+	)
+	return scanBlog(row)
+}
+
+func (r *postgresBlogRepository) SlugExists(ctx context.Context, slug string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM blogs WHERE slug = $1)`, slug).Scan(&exists)
+	return exists, err
+}
+
+func (r *postgresBlogRepository) SlugExistsExcluding(ctx context.Context, slug string, excludeID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM blogs WHERE slug = $1 AND id <> $2)`,
+		slug, excludeID,
+	).Scan(&exists)
+	return exists, err
 }
 
 func (r *postgresBlogRepository) ListPublished(ctx context.Context, limit, offset int) ([]*models.Blog, error) {
@@ -204,12 +233,12 @@ func (r *postgresBlogRepository) Update(ctx context.Context, blog *models.Blog) 
 
 	err := r.db.QueryRowContext(
 		ctx,
-		`UPDATE blogs SET title = $1, description = $2, category = $3, content = $4, cover_image_url = $5, read_time_minutes = $6, updated_at = $7
-		 WHERE id = $8
+		`UPDATE blogs SET title = $1, description = $2, category = $3, content = $4, cover_image_url = $5, read_time_minutes = $6, updated_at = $7, slug = $8
+		 WHERE id = $9
 		 RETURNING `+blogColumns,
-		blog.Title, blog.Description, blog.Category, blog.Content, blog.CoverImageURL, blog.ReadTimeMinutes, blog.UpdatedAt, blog.ID,
+		blog.Title, blog.Description, blog.Category, blog.Content, blog.CoverImageURL, blog.ReadTimeMinutes, blog.UpdatedAt, blog.Slug, blog.ID,
 	).Scan(
-		&blog.ID, &blog.Title, &blog.Description, &blog.Category, &blog.Content, &blog.CoverImageURL,
+		&blog.ID, &blog.Slug, &blog.Title, &blog.Description, &blog.Category, &blog.Content, &blog.CoverImageURL,
 		&blog.AuthorID, &blog.AuthorName, &blog.ReadTimeMinutes, &blog.PublishedAt, &blog.CreatedAt, &blog.UpdatedAt,
 	)
 

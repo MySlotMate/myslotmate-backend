@@ -42,6 +42,11 @@ type EventRepository interface {
 	Update(ctx context.Context, event *models.Event) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	GetByID(ctx context.Context, id uuid.UUID) (*models.Event, error)
+	GetBySlug(ctx context.Context, slug string) (*models.Event, error)
+	SlugExists(ctx context.Context, slug string) (bool, error)
+	// SlugExistsExcluding reports whether a slug is taken by an event other
+	// than excludeID — used when updating an event's own slug.
+	SlugExistsExcluding(ctx context.Context, slug string, excludeID uuid.UUID) (bool, error)
 	ListByHostID(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error)
 	ListByHostIDFiltered(ctx context.Context, hostID uuid.UUID, status *models.EventStatus, search string, sortBy string, limit, offset int) ([]*models.Event, error)
 	ListByDateRange(ctx context.Context, hostID uuid.UUID, start, end time.Time) ([]*models.Event, error)
@@ -72,7 +77,7 @@ var eventColumns = `id, host_id,
 	ai_suggestion, avg_rating, total_bookings, total_reviews,
 	created_at, updated_at,
 	requires_attendee_details, attendee_fields,
-	terms_and_conditions`
+	terms_and_conditions, slug`
 
 func scanEvent(row interface {
 	Scan(dest ...interface{}) error
@@ -89,7 +94,7 @@ func scanEvent(row interface {
 		&e.AISuggestion, &e.AvgRating, &e.TotalBookings, &e.TotalReviews,
 		&e.CreatedAt, &e.UpdatedAt,
 		&e.RequiresAttendeeDetails, &e.AttendeeFields,
-		&e.TermsAndConditions,
+		&e.TermsAndConditions, &e.Slug,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -119,7 +124,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			ai_suggestion,
 			created_at, updated_at,
 			requires_attendee_details, attendee_fields,
-			terms_and_conditions
+			terms_and_conditions, slug
 		) VALUES (
 			$1, $2,
 			$3, $4, $5, $6,
@@ -131,7 +136,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			$32,
 			$33, $34,
 			$35, $36,
-			$37
+			$37, $38
 		)
 	`
 	if event.ID == uuid.Nil {
@@ -148,7 +153,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 		event.AISuggestion,
 		event.CreatedAt, event.UpdatedAt,
 		event.RequiresAttendeeDetails, pq.Array(event.AttendeeFields),
-		event.TermsAndConditions,
+		event.TermsAndConditions, event.Slug,
 	)
 	return err
 }
@@ -164,8 +169,8 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 			cancellation_policy = $25, status = $26, published_at = $27, paused_at = $28, paused_from = $29, paused_dates = $30,
 			ai_suggestion = $31, avg_rating = $32, total_bookings = $33,
 			requires_attendee_details = $34, attendee_fields = $35,
-			terms_and_conditions = $36
-		WHERE id = $37
+			terms_and_conditions = $36, slug = $37
+		WHERE id = $38
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		event.Title, event.HookLine, event.Mood, event.Description,
@@ -176,7 +181,7 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 		event.CancellationPolicy, event.Status, event.PublishedAt, event.PausedAt, event.PausedFrom, pq.Array(event.PausedDates),
 		event.AISuggestion, event.AvgRating, event.TotalBookings,
 		event.RequiresAttendeeDetails, pq.Array(event.AttendeeFields),
-		event.TermsAndConditions,
+		event.TermsAndConditions, event.Slug,
 		event.ID,
 	)
 	return err
@@ -186,6 +191,26 @@ func (r *postgresEventRepository) Delete(ctx context.Context, id uuid.UUID) erro
 	query := `DELETE FROM events WHERE id = $1`
 	_, err := r.db.ExecContext(ctx, query, id)
 	return err
+}
+
+func (r *postgresEventRepository) GetBySlug(ctx context.Context, slug string) (*models.Event, error) {
+	query := `SELECT ` + eventColumns + ` FROM events WHERE slug = $1`
+	return scanEvent(r.db.QueryRowContext(ctx, query, slug))
+}
+
+func (r *postgresEventRepository) SlugExists(ctx context.Context, slug string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM events WHERE slug = $1)`, slug).Scan(&exists)
+	return exists, err
+}
+
+func (r *postgresEventRepository) SlugExistsExcluding(ctx context.Context, slug string, excludeID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM events WHERE slug = $1 AND id <> $2)`,
+		slug, excludeID,
+	).Scan(&exists)
+	return exists, err
 }
 
 func (r *postgresEventRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Event, error) {
@@ -300,7 +325,7 @@ func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, 
 			&e.AISuggestion, &e.AvgRating, &e.TotalBookings, &e.TotalReviews,
 			&e.CreatedAt, &e.UpdatedAt,
 			&e.RequiresAttendeeDetails, &e.AttendeeFields,
-			&e.TermsAndConditions,
+			&e.TermsAndConditions, &e.Slug,
 		); err != nil {
 			fmt.Printf("[EVENT_REPO] scanEvents Scan ERROR: %v\n", err)
 			return nil, err

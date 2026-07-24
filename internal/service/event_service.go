@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"myslotmate-backend/internal/lib/event"
+	"myslotmate-backend/internal/lib/slug"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 
@@ -25,6 +26,13 @@ type EventService interface {
 	// event row in place for history. Returns the updated event.
 	CancelEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error)
 	GetEvent(ctx context.Context, eventID uuid.UUID) (*models.Event, error)
+	// GetEventBySlugOrID resolves a public route param that may be either a
+	// clean slug or a raw UUID (so old /experience/{uuid} links keep working).
+	GetEventBySlugOrID(ctx context.Context, param string) (*models.Event, error)
+	// IsSlugAvailable reports whether a slug is free to use, ignoring the event
+	// identified by excludeID (nil to check globally). The input is slugified
+	// first so the caller checks the same value that would be stored.
+	IsSlugAvailable(ctx context.Context, rawSlug string, excludeID *uuid.UUID) (available bool, normalized string, err error)
 	GetHostEvents(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error)
 	GetHostEventsFiltered(ctx context.Context, hostID uuid.UUID, status *models.EventStatus, search string, sortBy string, limit, offset int) ([]*models.Event, error)
 	GetCalendarEvents(ctx context.Context, hostID uuid.UUID, start, end time.Time) ([]*models.Event, error)
@@ -83,6 +91,7 @@ type EventCreateRequest struct {
 
 type EventUpdateRequest struct {
 	Title              *string                    `json:"title,omitempty"`
+	Slug               *string                    `json:"slug,omitempty"` // optional; when set and changed, updates the event's URL slug
 	HookLine           *string                    `json:"hook_line,omitempty"`
 	Mood               *models.EventMood          `json:"mood,omitempty"`
 	Description        *string                    `json:"description,omitempty"`
@@ -126,6 +135,10 @@ type eventService struct {
 }
 
 var ErrInvalidEventMood = errors.New("invalid event mood")
+
+// ErrSlugTaken is returned when an admin-supplied slug is already used by
+// another event.
+var ErrSlugTaken = errors.New("slug already in use")
 
 func NewEventService(
 	er repository.EventRepository,
@@ -218,6 +231,15 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		newEvent.PublishedAt = &now
 	}
 
+	// Generate a clean, unique slug once at create time. It is never
+	// regenerated on update, so shared /experience/{slug} links stay valid.
+	newEvent.Slug, err = slug.Disambiguate(slug.Make(req.Title, "event"), func(candidate string) (bool, error) {
+		return s.eventRepo.SlugExists(ctx, candidate)
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	if err := s.eventRepo.Create(ctx, newEvent); err != nil {
 		return nil, err
 	}
@@ -268,6 +290,22 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 
 	if req.Title != nil {
 		evt.Title = *req.Title
+	}
+	// Admins may override the URL slug. A blank value keeps the current slug.
+	// A changed value is slugified and rejected if it collides with another
+	// event (the event's own current slug never counts as a conflict).
+	if req.Slug != nil {
+		desired := slug.Make(*req.Slug, evt.Slug)
+		if desired != evt.Slug {
+			taken, err := s.eventRepo.SlugExistsExcluding(ctx, desired, evt.ID)
+			if err != nil {
+				return nil, err
+			}
+			if taken {
+				return nil, ErrSlugTaken
+			}
+			evt.Slug = desired
+		}
 	}
 	if req.HookLine != nil {
 		evt.HookLine = req.HookLine
@@ -515,12 +553,46 @@ func (s *eventService) GetEvent(ctx context.Context, eventID uuid.UUID) (*models
 	if err != nil || evt == nil {
 		return evt, err
 	}
+	return s.enrichEvent(ctx, evt)
+}
 
+func (s *eventService) IsSlugAvailable(ctx context.Context, rawSlug string, excludeID *uuid.UUID) (bool, string, error) {
+	normalized := slug.Make(rawSlug, "")
+	if normalized == "" {
+		return false, "", nil
+	}
+	var taken bool
+	var err error
+	if excludeID != nil {
+		taken, err = s.eventRepo.SlugExistsExcluding(ctx, normalized, *excludeID)
+	} else {
+		taken, err = s.eventRepo.SlugExists(ctx, normalized)
+	}
+	if err != nil {
+		return false, normalized, err
+	}
+	return !taken, normalized, nil
+}
+
+func (s *eventService) GetEventBySlugOrID(ctx context.Context, param string) (*models.Event, error) {
+	if id, err := uuid.Parse(param); err == nil {
+		return s.GetEvent(ctx, id)
+	}
+	evt, err := s.eventRepo.GetBySlug(ctx, param)
+	if err != nil || evt == nil {
+		return evt, err
+	}
+	return s.enrichEvent(ctx, evt)
+}
+
+// enrichEvent attaches derived fields (weekly booking count, price tiers) to a
+// freshly loaded event. Shared by the id and slug lookup paths.
+func (s *eventService) enrichEvent(ctx context.Context, evt *models.Event) (*models.Event, error) {
 	weekAgo := time.Now().AddDate(0, 0, -7)
-	if count, err := s.bookingRepo.GetBookedQuantitySince(ctx, eventID, weekAgo); err == nil {
+	if count, err := s.bookingRepo.GetBookedQuantitySince(ctx, evt.ID, weekAgo); err == nil {
 		evt.BookingsLastWeek = count
 	} else {
-		fmt.Printf("[EVENT_SERVICE] Error fetching weekly bookings for %s: %v\n", eventID, err)
+		fmt.Printf("[EVENT_SERVICE] Error fetching weekly bookings for %s: %v\n", evt.ID, err)
 	}
 
 	if err := s.attachTiers(ctx, evt); err != nil {

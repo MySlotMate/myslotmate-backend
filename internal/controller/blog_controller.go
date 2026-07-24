@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"myslotmate-backend/internal/auth"
+	"myslotmate-backend/internal/lib/slug"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 
@@ -58,6 +59,7 @@ func (c *BlogController) RegisterRoutes(r chi.Router) {
 
 type CreateBlogRequest struct {
 	Title           string  `json:"title" validate:"required"`
+	Slug            *string `json:"slug,omitempty"` // optional custom slug; defaults to a slugified title
 	Description     *string `json:"description,omitempty"`
 	Category        string  `json:"category" validate:"required"`
 	Content         string  `json:"content" validate:"required"`
@@ -67,6 +69,7 @@ type CreateBlogRequest struct {
 
 type UpdateBlogRequest struct {
 	Title           string  `json:"title"`
+	Slug            *string `json:"slug,omitempty"` // optional; when set and changed, updates the blog's URL slug
 	Description     *string `json:"description,omitempty"`
 	Category        string  `json:"category"`
 	Content         string  `json:"content"`
@@ -125,7 +128,22 @@ func (c *BlogController) CreateBlog(w http.ResponseWriter, r *http.Request) {
 		req.ReadTimeMinutes = 5
 	}
 
+	// Generate a clean, unique slug. Admins may supply a custom one; otherwise
+	// it is derived from the title. Either way it is slugified and made unique.
+	desiredSlug := req.Title
+	if req.Slug != nil && strings.TrimSpace(*req.Slug) != "" {
+		desiredSlug = *req.Slug
+	}
+	blogSlug, err := slug.Disambiguate(slug.Make(desiredSlug, "blog"), func(candidate string) (bool, error) {
+		return c.blogRepo.SlugExists(r.Context(), candidate)
+	})
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	blog := &models.Blog{
+		Slug:            blogSlug,
 		Title:           req.Title,
 		Description:     req.Description,
 		Category:        req.Category,
@@ -176,15 +194,17 @@ func (c *BlogController) isAdminRequest(r *http.Request) bool {
 // GetBlog retrieves a single blog post by ID. Draft (unpublished) blogs are
 // only returned to admins; everyone else gets a 404 so drafts stay hidden.
 func (c *BlogController) GetBlog(w http.ResponseWriter, r *http.Request) {
-	blogIDStr := chi.URLParam(r, "blogID")
-	blogID, err := uuid.Parse(blogIDStr)
-	if err != nil {
-		RespondError(w, http.StatusBadRequest, "Invalid blog ID")
-		return
-	}
+	// The route param may be a clean slug or a raw UUID (old links).
+	param := chi.URLParam(r, "blogID")
 
-	blog, err := c.blogRepo.GetByID(r.Context(), blogID)
-	if err != nil {
+	var blog *models.Blog
+	var err error
+	if blogID, parseErr := uuid.Parse(param); parseErr == nil {
+		blog, err = c.blogRepo.GetByID(r.Context(), blogID)
+	} else {
+		blog, err = c.blogRepo.GetBySlug(r.Context(), param)
+	}
+	if err != nil || blog == nil {
 		RespondError(w, http.StatusNotFound, "Blog not found")
 		return
 	}
@@ -291,6 +311,23 @@ func (c *BlogController) UpdateBlog(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ReadTimeMinutes > 0 {
 		blog.ReadTimeMinutes = req.ReadTimeMinutes
+	}
+
+	// Admins may override the URL slug. A cleared/blank value keeps the current
+	// slug. A changed value is slugified and made unique against other blogs
+	// (the blog's own current slug never counts as a conflict).
+	if req.Slug != nil {
+		desired := slug.Make(*req.Slug, blog.Slug)
+		if desired != blog.Slug {
+			newSlug, slugErr := slug.Disambiguate(desired, func(candidate string) (bool, error) {
+				return c.blogRepo.SlugExistsExcluding(r.Context(), candidate, blog.ID)
+			})
+			if slugErr != nil {
+				RespondError(w, http.StatusInternalServerError, slugErr.Error())
+				return
+			}
+			blog.Slug = newSlug
+		}
 	}
 
 	if err := c.blogRepo.Update(r.Context(), blog); err != nil {

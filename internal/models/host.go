@@ -13,6 +13,10 @@ type Host struct {
 	UserID    uuid.UUID  `db:"user_id" json:"user_id"`
 	AccountID *uuid.UUID `db:"account_id" json:"account_id,omitempty"`
 
+	// Slug is the clean, URL-safe identifier used in public links
+	// (/host/{slug}). Generated once at create time; immutable.
+	Slug string `db:"slug" json:"slug"`
+
 	// ── Personal / Profile ──────────────────────────────────────────────────
 	FirstName string  `db:"first_name" json:"first_name"`
 	LastName  string  `db:"last_name" json:"last_name"`

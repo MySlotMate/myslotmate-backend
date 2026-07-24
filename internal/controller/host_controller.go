@@ -22,6 +22,7 @@ func NewHostController(s service.HostService) *HostController {
 // PublicHostProfile is the public-facing view of a host, omitting sensitive fields.
 type PublicHostProfile struct {
 	ID                  uuid.UUID `json:"id"`
+	Slug                string    `json:"slug"`
 	FirstName           string    `json:"first_name"`
 	LastName            string    `json:"last_name"`
 	City                string    `json:"city"`
@@ -155,6 +156,7 @@ func (c *HostController) ListHosts(w http.ResponseWriter, r *http.Request) {
 	for _, h := range hosts {
 		profiles = append(profiles, PublicHostProfile{
 			ID:                  h.ID,
+			Slug:                h.Slug,
 			FirstName:           h.FirstName,
 			LastName:            h.LastName,
 			City:                h.City,
@@ -184,13 +186,10 @@ func (c *HostController) ListHosts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *HostController) GetPublicHostProfile(w http.ResponseWriter, r *http.Request) {
-	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
-	if err != nil {
-		RespondError(w, http.StatusBadRequest, "Invalid host ID")
-		return
-	}
+	// The route param may be a clean slug or a raw UUID (old links).
+	param := chi.URLParam(r, "hostID")
 
-	host, err := c.hostService.GetHostByID(r.Context(), hostID)
+	host, err := c.hostService.GetHostBySlugOrID(r.Context(), param)
 	if err != nil {
 		if err.Error() == "host not found" {
 			RespondError(w, http.StatusNotFound, "Host not found")
@@ -202,6 +201,7 @@ func (c *HostController) GetPublicHostProfile(w http.ResponseWriter, r *http.Req
 
 	profile := PublicHostProfile{
 		ID:                  host.ID,
+		Slug:                host.Slug,
 		FirstName:           host.FirstName,
 		LastName:            host.LastName,
 		City:                host.City,

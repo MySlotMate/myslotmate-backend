@@ -9,6 +9,7 @@ import (
 
 	"myslotmate-backend/internal/lib/event"
 	"myslotmate-backend/internal/lib/instagram"
+	"myslotmate-backend/internal/lib/slug"
 	"myslotmate-backend/internal/lib/storage"
 	"myslotmate-backend/internal/lib/validation"
 	"myslotmate-backend/internal/models"
@@ -35,6 +36,9 @@ type HostService interface {
 
 	// Public
 	GetHostByID(ctx context.Context, hostID uuid.UUID) (*models.Host, error)
+	// GetHostBySlugOrID resolves a public route param that may be a clean slug
+	// or a raw UUID (so old /host/{uuid} links keep working).
+	GetHostBySlugOrID(ctx context.Context, param string) (*models.Host, error)
 	ListApprovedHosts(ctx context.Context) ([]*models.Host, error)
 	SetHostActive(ctx context.Context, hostID uuid.UUID, active bool) error
 
@@ -301,6 +305,15 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		newHost.SubmittedAt = &now
 	}
 
+	// Generate a clean, unique slug once at create time. Immutable afterwards,
+	// so shared /host/{slug} links stay valid even if the name changes.
+	newHost.Slug, err = slug.Disambiguate(slug.Make(req.FirstName+" "+req.LastName, "host"), func(candidate string) (bool, error) {
+		return s.hostRepo.SlugExists(ctx, candidate)
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	if err := s.hostRepo.Create(ctx, newHost); err != nil {
 		return nil, err
 	}
@@ -467,6 +480,20 @@ func (s *hostService) GetHostByID(ctx context.Context, hostID uuid.UUID) (*model
 		return nil, errors.New("host not found")
 	}
 	if host.ApplicationStatus != models.HostApplicationApproved {
+		return nil, errors.New("host not found")
+	}
+	return host, nil
+}
+
+func (s *hostService) GetHostBySlugOrID(ctx context.Context, param string) (*models.Host, error) {
+	if id, err := uuid.Parse(param); err == nil {
+		return s.GetHostByID(ctx, id)
+	}
+	host, err := s.hostRepo.GetBySlug(ctx, param)
+	if err != nil {
+		return nil, err
+	}
+	if host == nil || host.ApplicationStatus != models.HostApplicationApproved {
 		return nil, errors.New("host not found")
 	}
 	return host, nil

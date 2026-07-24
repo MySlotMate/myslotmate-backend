@@ -70,6 +70,7 @@ func resolveCalendarRange(r *http.Request) (time.Time, time.Time, int, string) {
 func (c *EventController) RegisterRoutes(r chi.Router) {
 	r.Route("/events", func(r chi.Router) {
 		r.Get("/", c.ListPublishedEvents)
+		r.Get("/slug-available", c.CheckSlugAvailability)
 		r.Post("/", c.CreateEvent)
 		r.Put("/{eventID}", c.UpdateEvent)
 		r.Delete("/{eventID}", c.DeleteEvent)
@@ -132,6 +133,7 @@ type EventCreateRequestBody struct {
 
 type EventUpdateRequestBody struct {
 	Title              *string                    `json:"title,omitempty"`
+	Slug               *string                    `json:"slug,omitempty"`
 	HookLine           *string                    `json:"hook_line,omitempty"`
 	Mood               *models.EventMood          `json:"mood,omitempty"`
 	Description        *string                    `json:"description,omitempty"`
@@ -261,6 +263,7 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 
 	svcReq := service.EventUpdateRequest{
 		Title:              body.Title,
+		Slug:               body.Slug,
 		HookLine:           body.HookLine,
 		Mood:               body.Mood,
 		Description:        body.Description,
@@ -296,6 +299,10 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidEventMood) {
 			RespondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if errors.Is(err, service.ErrSlugTaken) {
+			RespondError(w, http.StatusConflict, err.Error())
 			return
 		}
 		if err.Error() == "unauthorized: you do not own this event" {
@@ -340,16 +347,51 @@ func (c *EventController) DeleteEvent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (c *EventController) GetEvent(w http.ResponseWriter, r *http.Request) {
-	eventID, err := uuid.Parse(chi.URLParam(r, "eventID"))
-	if err != nil {
-		RespondError(w, http.StatusBadRequest, "Invalid event ID")
+// CheckSlugAvailability reports whether a slug is free to use, for the admin
+// experience editor's live duplicate check. Query params: slug (required) and
+// exclude (optional event UUID to ignore — the event being edited).
+// Responds { available: bool, slug: "<normalized>" }.
+func (c *EventController) CheckSlugAvailability(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("slug")
+	if raw == "" {
+		RespondError(w, http.StatusBadRequest, "slug is required")
 		return
 	}
 
-	evt, err := c.eventService.GetEvent(r.Context(), eventID)
+	var excludeID *uuid.UUID
+	if ex := r.URL.Query().Get("exclude"); ex != "" {
+		id, err := uuid.Parse(ex)
+		if err != nil {
+			RespondError(w, http.StatusBadRequest, "invalid exclude id")
+			return
+		}
+		excludeID = &id
+	}
+
+	available, normalized, err := c.eventService.IsSlugAvailable(r.Context(), raw, excludeID)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, map[string]any{
+		"available": available,
+		"slug":      normalized,
+	})
+}
+
+func (c *EventController) GetEvent(w http.ResponseWriter, r *http.Request) {
+	// The route param may be a clean slug or a raw UUID (old links). The
+	// service resolves either form.
+	param := chi.URLParam(r, "eventID")
+
+	evt, err := c.eventService.GetEventBySlugOrID(r.Context(), param)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if evt == nil {
+		RespondError(w, http.StatusNotFound, "Event not found")
 		return
 	}
 

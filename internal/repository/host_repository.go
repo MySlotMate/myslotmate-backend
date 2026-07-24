@@ -12,6 +12,8 @@ import (
 type HostRepository interface {
 	Create(ctx context.Context, host *models.Host) error
 	GetByID(ctx context.Context, id uuid.UUID) (*models.Host, error)
+	GetBySlug(ctx context.Context, slug string) (*models.Host, error)
+	SlugExists(ctx context.Context, slug string) (bool, error)
 	GetByUserID(ctx context.Context, userID uuid.UUID) (*models.Host, error)
 	Update(ctx context.Context, host *models.Host) error
 	UpdateApplicationStatus(ctx context.Context, id uuid.UUID, status models.HostApplicationStatus) error
@@ -53,7 +55,8 @@ var hostColumns = `id, user_id, account_id,
 	avg_rating, total_reviews, platform_fee_percentage,
 	created_at, updated_at,
 	is_active,
-	events_hosted_override, people_met_override, avg_rating_override`
+	events_hosted_override, people_met_override, avg_rating_override,
+	slug`
 
 func scanHost(row interface {
 	Scan(dest ...interface{}) error
@@ -71,6 +74,7 @@ func scanHost(row interface {
 		&h.CreatedAt, &h.UpdatedAt,
 		&h.IsActive,
 		&h.EventsHostedOverride, &h.PeopleMetOverride, &h.AvgRatingOverride,
+		&h.Slug,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -89,14 +93,16 @@ func (r *postgresHostRepository) Create(ctx context.Context, host *models.Host) 
 			application_status, experience_desc, moods, description, preferred_days, group_size,
 			government_id_url, submitted_at,
 			expertise_tags, social_instagram, social_linkedin, social_website,
-			is_professional, created_at, updated_at
+			is_professional, created_at, updated_at,
+			slug
 		) VALUES (
 			$1, $2,
 			$3, $4, $5, $6, $7, $8, $9,
 			$10, $11, $12, $13, $14, $15,
 			$16, $17,
 			$18, $19, $20, $21,
-			$22, $23, $24
+			$22, $23, $24,
+			$25
 		)
 	`
 	if host.ID == uuid.Nil {
@@ -109,6 +115,7 @@ func (r *postgresHostRepository) Create(ctx context.Context, host *models.Host) 
 		host.GovernmentIDURL, host.SubmittedAt,
 		pq.Array(host.ExpertiseTags), host.SocialInstagram, host.SocialLinkedin, host.SocialWebsite,
 		host.IsProfessional, host.CreatedAt, host.UpdatedAt,
+		host.Slug,
 	)
 	return err
 }
@@ -116,6 +123,17 @@ func (r *postgresHostRepository) Create(ctx context.Context, host *models.Host) 
 func (r *postgresHostRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Host, error) {
 	query := `SELECT ` + hostColumns + ` FROM hosts WHERE id = $1`
 	return scanHost(r.db.QueryRowContext(ctx, query, id))
+}
+
+func (r *postgresHostRepository) GetBySlug(ctx context.Context, slug string) (*models.Host, error) {
+	query := `SELECT ` + hostColumns + ` FROM hosts WHERE slug = $1`
+	return scanHost(r.db.QueryRowContext(ctx, query, slug))
+}
+
+func (r *postgresHostRepository) SlugExists(ctx context.Context, slug string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM hosts WHERE slug = $1)`, slug).Scan(&exists)
+	return exists, err
 }
 
 func (r *postgresHostRepository) GetByUserID(ctx context.Context, userID uuid.UUID) (*models.Host, error) {

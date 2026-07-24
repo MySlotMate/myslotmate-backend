@@ -9,6 +9,9 @@ import (
 // Blog represents a blog post
 type Blog struct {
 	ID               uuid.UUID  `db:"id" json:"id"`
+	// Slug is the clean, URL-safe identifier used in public links
+	// (/blogs/{slug}). Generated once at create time; immutable.
+	Slug             string     `db:"slug" json:"slug"`
 	Title            string     `db:"title" json:"title"`
 	Description      *string    `db:"description" json:"description,omitempty"`
 	Category         string     `db:"category" json:"category"`

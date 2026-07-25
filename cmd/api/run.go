@@ -214,7 +214,7 @@ func main() {
 	hostController := controller.NewHostController(hostService)
 	eventController := controller.NewEventController(eventService)
 	bookingController := controller.NewBookingController(bookingService)
-	walkInService := service.NewWalkInService(userRepo, bookingRepo, eventRepo, eventPriceTierRepo, userService, bookingService)
+	walkInService := service.NewWalkInService(userRepo, bookingRepo, eventRepo, eventPriceTierRepo, attendeeProfileRepo, userService, bookingService)
 	walkInController := controller.NewWalkInController(walkInService, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	reviewController := controller.NewReviewController(reviewService)
 	inboxController := controller.NewInboxController(inboxService)

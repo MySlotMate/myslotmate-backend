@@ -25,7 +25,7 @@ func NewAttendeeProfileRepository(db *sql.DB) AttendeeProfileRepository {
 }
 
 const attendeeProfileColumns = `user_id, name, age, gender, qualification, occupation,
-	marital_status, contact_number, whatsapp_number, registration_type, govt_id_url, travel,
+	marital_status, contact_number, whatsapp_number, registration_type, govt_id_url, travel, social_link,
 	created_at, updated_at`
 
 func scanAttendeeProfile(row interface {
@@ -34,7 +34,7 @@ func scanAttendeeProfile(row interface {
 	p := &models.AttendeeProfile{}
 	err := row.Scan(
 		&p.UserID, &p.Name, &p.Age, &p.Gender, &p.Qualification, &p.Occupation,
-		&p.MaritalStatus, &p.ContactNumber, &p.WhatsappNumber, &p.RegistrationType, &p.GovtIDURL, &p.Travel,
+		&p.MaritalStatus, &p.ContactNumber, &p.WhatsappNumber, &p.RegistrationType, &p.GovtIDURL, &p.Travel, &p.SocialLink,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if err != nil {
@@ -82,11 +82,11 @@ func (r *postgresAttendeeProfileRepository) Upsert(ctx context.Context, p *model
 	query := `
 		INSERT INTO attendee_profiles (
 			user_id, name, age, gender, qualification, occupation,
-			marital_status, contact_number, whatsapp_number, registration_type, govt_id_url, travel,
+			marital_status, contact_number, whatsapp_number, registration_type, govt_id_url, travel, social_link,
 			created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10, $11, $12,
+			$7, $8, $9, $10, $11, $12, $13,
 			now(), now()
 		)
 		ON CONFLICT (user_id) DO UPDATE SET
@@ -101,11 +101,12 @@ func (r *postgresAttendeeProfileRepository) Upsert(ctx context.Context, p *model
 			registration_type = COALESCE(EXCLUDED.registration_type, attendee_profiles.registration_type),
 			govt_id_url       = COALESCE(EXCLUDED.govt_id_url, attendee_profiles.govt_id_url),
 			travel            = COALESCE(EXCLUDED.travel, attendee_profiles.travel),
+			social_link       = COALESCE(EXCLUDED.social_link, attendee_profiles.social_link),
 			updated_at        = now()
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		p.UserID, p.Name, p.Age, p.Gender, p.Qualification, p.Occupation,
-		p.MaritalStatus, p.ContactNumber, p.WhatsappNumber, p.RegistrationType, p.GovtIDURL, p.Travel,
+		p.MaritalStatus, p.ContactNumber, p.WhatsappNumber, p.RegistrationType, p.GovtIDURL, p.Travel, p.SocialLink,
 	)
 	return err
 }

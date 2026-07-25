@@ -54,6 +54,15 @@ type WalkInInitiateRequest struct {
 	EventID        uuid.UUID
 	Quantity       int
 	OccurrenceDate *time.Time // required for recurring events; ignored otherwise
+	// AttendeeDetails carries the extra attendee-profile answers the admin
+	// collected for events that require them. Nil when the event needs none.
+	// Only its non-nil fields are upserted onto the guest's profile, so the
+	// booking gate (which checks the stored profile) passes.
+	AttendeeDetails *models.AttendeeProfile
+	// HostID scopes the request to a host doing an on-spot booking on their own
+	// event: when set, the event must belong to this host. Nil for the admin
+	// flow, which can book any event.
+	HostID *uuid.UUID
 }
 
 // WalkInInitiateResponse tells the admin UI what to do next.
@@ -83,6 +92,25 @@ type WalkInCompleteRequest struct {
 	RazorpayOrderID   string
 	RazorpayPaymentID string
 	RazorpaySignature string
+	// HostID scopes completion to the owning host (host on-spot flow); nil for
+	// the admin flow. Re-checked here because the paid path books in Complete.
+	HostID *uuid.UUID
+}
+
+// ErrWalkInNotOwner is returned when a host tries to on-spot book an event that
+// isn't theirs.
+var ErrWalkInNotOwner = errors.New("not authorized for this event")
+
+// verifyHostOwnership enforces that a host-scoped request targets the host's own
+// event. A nil hostID (admin flow) always passes.
+func verifyHostOwnership(evt *models.Event, hostID *uuid.UUID) error {
+	if hostID == nil {
+		return nil
+	}
+	if evt.HostID != *hostID {
+		return ErrWalkInNotOwner
+	}
+	return nil
 }
 
 type walkInService struct {
@@ -90,6 +118,7 @@ type walkInService struct {
 	bookingRepo    repository.BookingRepository
 	eventRepo      repository.EventRepository
 	tierRepo       repository.EventPriceTierRepository
+	attendeeRepo   repository.AttendeeProfileRepository
 	userService    UserService
 	bookingService BookingService
 }
@@ -99,6 +128,7 @@ func NewWalkInService(
 	br repository.BookingRepository,
 	er repository.EventRepository,
 	tr repository.EventPriceTierRepository,
+	apr repository.AttendeeProfileRepository,
 	us UserService,
 	bs BookingService,
 ) WalkInService {
@@ -107,6 +137,7 @@ func NewWalkInService(
 		bookingRepo:    br,
 		eventRepo:      er,
 		tierRepo:       tr,
+		attendeeRepo:   apr,
 		userService:    us,
 		bookingService: bs,
 	}
@@ -153,6 +184,9 @@ func (s *walkInService) InitiateWalkIn(ctx context.Context, req WalkInInitiateRe
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
+	if err := verifyHostOwnership(evt, req.HostID); err != nil {
+		return nil, err
+	}
 	if err := s.rejectIfTiered(ctx, req.EventID); err != nil {
 		return nil, err
 	}
@@ -186,6 +220,23 @@ func (s *walkInService) InitiateWalkIn(ctx context.Context, req WalkInInitiateRe
 	}
 	if booked+req.Quantity > evt.Capacity {
 		return nil, errors.New("event capacity exceeded")
+	}
+
+	// Attendee-details gate — if the event requires extra attendee details, upsert
+	// the admin-collected answers onto the guest's profile now, BEFORE the booking
+	// debit. The free path books inside this call and the paid path books in
+	// CompleteWalkIn; upserting here (the guest already exists) satisfies the gate
+	// in bookingService.CreateBooking for both. Missing/blank fields still fail the
+	// gate — the admin UI collects them, matching the customer booking form.
+	if evt.RequiresAttendeeDetails && len(evt.AttendeeFields) > 0 {
+		if req.AttendeeDetails == nil {
+			return nil, errors.New("attendee details are required for this event")
+		}
+		profile := *req.AttendeeDetails
+		profile.UserID = guest.ID
+		if err := s.attendeeRepo.Upsert(ctx, &profile); err != nil {
+			return nil, fmt.Errorf("failed to save attendee details: %w", err)
+		}
 	}
 
 	// Compute amount.
@@ -251,6 +302,9 @@ func (s *walkInService) CompleteWalkIn(ctx context.Context, req WalkInCompleteRe
 	}
 	if evt == nil {
 		return nil, errors.New("event not found")
+	}
+	if err := verifyHostOwnership(evt, req.HostID); err != nil {
+		return nil, err
 	}
 	if err := s.rejectIfTiered(ctx, req.EventID); err != nil {
 		return nil, err

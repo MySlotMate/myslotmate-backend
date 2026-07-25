@@ -23,6 +23,7 @@ type AttendeeProfile struct {
 	RegistrationType *string   `db:"registration_type" json:"registration_type,omitempty"`
 	GovtIDURL        *string   `db:"govt_id_url" json:"govt_id_url,omitempty"`
 	Travel           *bool     `db:"travel" json:"travel,omitempty"`
+	SocialLink       *string   `db:"social_link" json:"social_link,omitempty"`
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
 }
@@ -58,6 +59,8 @@ func (p *AttendeeProfile) HasField(key string) bool {
 		return nonEmptyStr(p.GovtIDURL)
 	case "travel":
 		return p.Travel != nil
+	case "social_link":
+		return nonEmptyStr(p.SocialLink)
 	default:
 		// Unknown keys are treated as satisfied so a stray config value can't
 		// permanently block bookings.

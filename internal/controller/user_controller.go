@@ -236,6 +236,7 @@ type AttendeeProfileRequestBody struct {
 	RegistrationType *string   `json:"registration_type,omitempty"`
 	GovtIDURL        *string   `json:"govt_id_url,omitempty"`
 	Travel           *bool     `json:"travel,omitempty"`
+	SocialLink       *string   `json:"social_link,omitempty"`
 }
 
 func (c *UserController) GetAttendeeProfile(w http.ResponseWriter, r *http.Request) {
@@ -281,6 +282,7 @@ func (c *UserController) UpsertAttendeeProfile(w http.ResponseWriter, r *http.Re
 		RegistrationType: req.RegistrationType,
 		GovtIDURL:        req.GovtIDURL,
 		Travel:           req.Travel,
+		SocialLink:       req.SocialLink,
 	}
 	saved, err := c.userService.UpsertAttendeeProfile(r.Context(), profile)
 	if err != nil {

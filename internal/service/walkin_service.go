@@ -353,6 +353,8 @@ func (s *walkInService) createAndConfirm(ctx context.Context, guestID, eventID u
 		IdempotencyKey: idempotencyKey,
 		AutoConfirm:    true,
 		Notify:         false,
+		// Host-driven on-spot booking for their own event — skip the guest passkey gate.
+		BypassPasskey: true,
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"myslotmate-backend/internal/lib/event"
@@ -33,6 +34,10 @@ type BookingService interface {
 	// CheckInScannedTicket admits guests against a scanned ticket, re-running
 	// every check first so it is safe to call directly.
 	CheckInScannedTicket(ctx context.Context, req ScanCheckInRequest) (*ScanResult, error)
+	// ValidateCoupon is the dry-run behind the checkout "Apply coupon" preview.
+	// It returns the coupon when valid for this event+user, or a user-facing
+	// error; it never redeems (redemption happens atomically in CreateBooking).
+	ValidateCoupon(ctx context.Context, eventID, userID uuid.UUID, code string) (*models.Coupon, error)
 }
 
 // ScanVerdict is why a scanned ticket was accepted or turned away. The door UI
@@ -88,6 +93,18 @@ type BookingCreateRequest struct {
 	OccurrenceDate *time.Time // which specific date the user is booking for
 	PriceTierID    *uuid.UUID // chosen ticket tier; required when the event has tiers
 
+	// Passkey unlocks a private event and, when the event's PasskeyGrantsFree is
+	// set, also comps the booking to free. Required (and re-validated here, not
+	// just client-side) whenever the event is private.
+	Passkey string
+	// CouponCode is an optional host-issued comp code; a valid one waives the
+	// whole booking to free. Server-validated and redeemed inside the booking tx.
+	CouponCode string
+	// BypassPasskey skips the private-event passkey gate for trusted, host-driven
+	// server flows (e.g. on-spot walk-in bookings the host makes for their own
+	// event). Never set from the guest HTTP request.
+	BypassPasskey bool
+
 	// AutoConfirm makes the booking commit as `confirmed` in the same transaction
 	// instead of `pending`, removing the fragile separate confirm call that could
 	// leave a paid booking stuck at pending. Notify controls whether the guest
@@ -120,6 +137,7 @@ type bookingService struct {
 	ledgerRepo          repository.TransactionLedgerRepository
 	tierRepo            repository.EventPriceTierRepository
 	attendeeRepo        repository.AttendeeProfileRepository
+	couponRepo          repository.CouponRepository
 	userService         UserService // for chaining source-refund on cancel
 	dispatcher          *event.Dispatcher
 	notificationService notification.NotificationService
@@ -137,6 +155,7 @@ func NewBookingService(
 	lr repository.TransactionLedgerRepository,
 	tr repository.EventPriceTierRepository,
 	apr repository.AttendeeProfileRepository,
+	cr repository.CouponRepository,
 	us UserService,
 	d *event.Dispatcher,
 	ns notification.NotificationService,
@@ -153,6 +172,7 @@ func NewBookingService(
 		ledgerRepo:          lr,
 		tierRepo:            tr,
 		attendeeRepo:        apr,
+		couponRepo:          cr,
 		userService:         us,
 		dispatcher:          d,
 		notificationService: ns,
@@ -211,6 +231,19 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		}
 	}
 
+	// 3c. Private-event passkey gate — the authoritative check behind the
+	// client's unlock prompt. A private event only books with the correct passkey
+	// (trimmed, case-insensitive). Never trust a client-side "unlocked" flag.
+	if evt.IsPrivate && !req.BypassPasskey {
+		want := ""
+		if evt.AccessPasskey != nil {
+			want = strings.TrimSpace(*evt.AccessPasskey)
+		}
+		if want == "" || !strings.EqualFold(strings.TrimSpace(req.Passkey), want) {
+			return nil, errors.New("invalid passkey")
+		}
+	}
+
 	// 4. Resolve occurrence date
 	// For recurring events the frontend sends the specific date the user picked.
 	// For non-recurring events (or if omitted) we fall back to the event's own time.
@@ -262,6 +295,24 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	}
 	totalAmount := pricePerTicketCents * int64(req.Quantity)
 	unitPriceCents := pricePerTicketCents
+
+	// 6b. Comp waivers — a matched passkey (when the event opts in) or a valid
+	// coupon waives the booking to free. A free booking then rides the existing
+	// `totalAmount == 0` path below: no wallet debit, no ledger, no fee split —
+	// the host comps the guest. The two can't stack (each guarded on totalAmount>0).
+	var couponID *uuid.UUID
+	if totalAmount > 0 && evt.IsPrivate && evt.PasskeyGrantsFree {
+		// Passkey already validated in step 3c; this event comps passkey holders.
+		totalAmount = 0
+	}
+	if totalAmount > 0 && strings.TrimSpace(req.CouponCode) != "" {
+		coupon, err := s.validateCoupon(ctx, evt, userID, req.CouponCode)
+		if err != nil {
+			return nil, err
+		}
+		couponID = &coupon.ID
+		totalAmount = 0
+	}
 
 	// 7. Get user account (must exist)
 	userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, userID)
@@ -430,11 +481,24 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		NetEarningCents: &hostEarning,
 		PriceTierID:     priceTierID,
 		UnitPriceCents:  &unitPriceCents,
+		CouponID:        couponID,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
 	}
 	if err := bookingTx.Create(ctx, newBooking); err != nil {
 		return nil, fmt.Errorf("failed to create booking: %w", err)
+	}
+
+	// Atomically redeem the coupon inside the booking tx — the UPDATE guard
+	// refuses to exceed max_redemptions, so two concurrent bookings can't both
+	// claim the last comp. Rolls back the whole booking if the cap was hit.
+	if couponID != nil {
+		if err := s.couponRepo.WithTx(tx).Redeem(ctx, *couponID); err != nil {
+			if errors.Is(err, repository.ErrCouponExhausted) {
+				return nil, errors.New("this coupon has reached its redemption limit")
+			}
+			return nil, fmt.Errorf("failed to redeem coupon: %w", err)
+		}
 	}
 
 	// Create the payment record and link it to the booking (bookings.payment_id).
@@ -491,6 +555,57 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 // Helper to create string pointers
 func strPtr(s string) *string {
 	return &s
+}
+
+// validateCoupon resolves and validates a comp code for this event+user WITHOUT
+// redeeming it (the atomic increment happens inside the booking tx via
+// couponRepo.Redeem). It returns the coupon when the code is valid, or a
+// user-facing error explaining why it isn't. Also used by the dry-run validate
+// endpoint so the checkout UI can preview before booking.
+func (s *bookingService) validateCoupon(ctx context.Context, evt *models.Event, userID uuid.UUID, code string) (*models.Coupon, error) {
+	coupon, err := s.couponRepo.FindForCode(ctx, evt.HostID, evt.ID, strings.TrimSpace(code))
+	if err != nil {
+		return nil, err
+	}
+	if coupon == nil {
+		return nil, errors.New("invalid coupon code")
+	}
+	if !coupon.IsActive {
+		return nil, errors.New("this coupon is no longer active")
+	}
+	now := time.Now()
+	if coupon.ValidFrom != nil && now.Before(*coupon.ValidFrom) {
+		return nil, errors.New("this coupon is not valid yet")
+	}
+	if coupon.ValidUntil != nil && now.After(*coupon.ValidUntil) {
+		return nil, errors.New("this coupon has expired")
+	}
+	if coupon.MaxRedemptions != nil && coupon.TimesRedeemed >= *coupon.MaxRedemptions {
+		return nil, errors.New("this coupon has reached its redemption limit")
+	}
+	if coupon.PerUserLimit != nil {
+		used, err := s.couponRepo.CountUserRedemptions(ctx, coupon.ID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if used >= *coupon.PerUserLimit {
+			return nil, errors.New("you have already used this coupon")
+		}
+	}
+	return coupon, nil
+}
+
+// ValidateCoupon is the exported dry-run used by the checkout UI to preview a
+// code before booking. The authoritative check re-runs inside CreateBooking.
+func (s *bookingService) ValidateCoupon(ctx context.Context, eventID, userID uuid.UUID, code string) (*models.Coupon, error) {
+	evt, err := s.eventRepo.GetByID(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	if evt == nil {
+		return nil, errors.New("event not found")
+	}
+	return s.validateCoupon(ctx, evt, userID, code)
 }
 
 func (s *bookingService) ConfirmBooking(ctx context.Context, bookingID uuid.UUID) (*models.Booking, error) {

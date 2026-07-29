@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"myslotmate-backend/internal/lib/ratelimit"
 	"myslotmate-backend/internal/service"
 
 	"github.com/go-chi/chi/v5"
@@ -130,6 +131,10 @@ type CreateBookingRequest struct {
 	OccurrenceDate string     `json:"occurrence_date,omitempty"`
 	IdempotencyKey string     `json:"idempotency_key,omitempty"`
 	PriceTierID    *uuid.UUID `json:"price_tier_id,omitempty"`
+	// Passkey unlocks a private event (and comps it when the event opts in);
+	// CouponCode is an optional comp code that waives the booking to free.
+	Passkey    string `json:"passkey,omitempty"`
+	CouponCode string `json:"coupon_code,omitempty"`
 }
 
 func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request) {
@@ -144,6 +149,8 @@ func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request
 		Quantity:       req.Quantity,
 		IdempotencyKey: req.IdempotencyKey,
 		PriceTierID:    req.PriceTierID,
+		Passkey:        req.Passkey,
+		CouponCode:     req.CouponCode,
 		// Confirm in the same transaction so a paid booking can't get stuck at
 		// `pending` if the separate confirm call fails. Notify the guest as before.
 		AutoConfirm: true,
@@ -167,10 +174,25 @@ func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request
 			RespondError(w, http.StatusPaymentRequired, err.Error())
 		case "event not found", "user account not found":
 			RespondError(w, http.StatusNotFound, err.Error())
-		case "event capacity exceeded":
+		case "event capacity exceeded", "this coupon has reached its redemption limit":
 			RespondError(w, http.StatusConflict, err.Error())
 		case "your account is blocked due to suspicious activity":
 			RespondError(w, http.StatusForbidden, err.Error())
+		case "invalid passkey":
+			// Throttle wrong-passkey attempts per IP+event too — otherwise
+			// unlock throttling just pushes a brute-forcer to POST /bookings/,
+			// which also compares the passkey. Each miss burns a token.
+			if !ratelimit.Passkey.Allow(clientIP(r) + ":" + req.EventID.String()) {
+				RespondError(w, http.StatusTooManyRequests, "Too many attempts. Please try again in a minute.")
+				return
+			}
+			RespondError(w, http.StatusBadRequest, err.Error())
+		case "invalid coupon code",
+			"this coupon is no longer active",
+			"this coupon is not valid yet",
+			"this coupon has expired",
+			"you have already used this coupon":
+			RespondError(w, http.StatusBadRequest, err.Error())
 		default:
 			RespondError(w, http.StatusInternalServerError, err.Error())
 		}

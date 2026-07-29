@@ -249,13 +249,13 @@ func (r *postgresBookingRepository) CheckInGuests(ctx context.Context, p CheckIn
 }
 
 // bookingColumns is the canonical column list for SELECT queries.
-const bookingColumns = `id, event_id, user_id, occurrence_date, quantity, status, payment_id, idempotency_key, amount_cents, service_fee_cents, net_earning_cents, created_at, updated_at, cancelled_at, notification_sent_whatsapp, notification_sent_email, reminder_notification_sent_email, reminder_notification_sent_at, reminder_notification_sent_whatsapp, reminder_whatsapp_sent_at, price_tier_id, unit_price_cents, checked_in_count, last_checked_in_at`
+const bookingColumns = `id, event_id, user_id, occurrence_date, quantity, status, payment_id, idempotency_key, amount_cents, service_fee_cents, net_earning_cents, created_at, updated_at, cancelled_at, notification_sent_whatsapp, notification_sent_email, reminder_notification_sent_email, reminder_notification_sent_at, reminder_notification_sent_whatsapp, reminder_whatsapp_sent_at, price_tier_id, unit_price_cents, checked_in_count, last_checked_in_at, coupon_id`
 
 // scanBooking scans a single row into a Booking struct.
 func scanBooking(scanner interface{ Scan(dest ...interface{}) error }) (*models.Booking, error) {
 	b := &models.Booking{}
 	err := scanner.Scan(
-		&b.ID, &b.EventID, &b.UserID, &b.OccurrenceDate, &b.Quantity, &b.Status, &b.PaymentID, &b.IdempotencyKey, &b.AmountCents, &b.ServiceFeeCents, &b.NetEarningCents, &b.CreatedAt, &b.UpdatedAt, &b.CancelledAt, &b.NotificationSentWhatsapp, &b.NotificationSentEmail, &b.ReminderNotificationSentEmail, &b.ReminderNotificationSentAt, &b.ReminderNotificationSentWhatsapp, &b.ReminderWhatsappSentAt, &b.PriceTierID, &b.UnitPriceCents, &b.CheckedInCount, &b.LastCheckedInAt,
+		&b.ID, &b.EventID, &b.UserID, &b.OccurrenceDate, &b.Quantity, &b.Status, &b.PaymentID, &b.IdempotencyKey, &b.AmountCents, &b.ServiceFeeCents, &b.NetEarningCents, &b.CreatedAt, &b.UpdatedAt, &b.CancelledAt, &b.NotificationSentWhatsapp, &b.NotificationSentEmail, &b.ReminderNotificationSentEmail, &b.ReminderNotificationSentAt, &b.ReminderNotificationSentWhatsapp, &b.ReminderWhatsappSentAt, &b.PriceTierID, &b.UnitPriceCents, &b.CheckedInCount, &b.LastCheckedInAt, &b.CouponID,
 	)
 	if err != nil {
 		return nil, err
@@ -278,14 +278,14 @@ func scanBookingRows(rows *sql.Rows) ([]*models.Booking, error) {
 
 func (r *postgresBookingRepository) Create(ctx context.Context, booking *models.Booking) error {
 	query := `
-		INSERT INTO bookings (id, event_id, user_id, occurrence_date, quantity, status, payment_id, idempotency_key, amount_cents, service_fee_cents, net_earning_cents, notification_sent_whatsapp, notification_sent_email, reminder_notification_sent_email, reminder_notification_sent_whatsapp, created_at, updated_at, price_tier_id, unit_price_cents)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		INSERT INTO bookings (id, event_id, user_id, occurrence_date, quantity, status, payment_id, idempotency_key, amount_cents, service_fee_cents, net_earning_cents, notification_sent_whatsapp, notification_sent_email, reminder_notification_sent_email, reminder_notification_sent_whatsapp, created_at, updated_at, price_tier_id, unit_price_cents, coupon_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 	`
 	if booking.ID == uuid.Nil {
 		booking.ID = uuid.New()
 	}
 	_, err := r.db.ExecContext(ctx, query,
-		booking.ID, booking.EventID, booking.UserID, booking.OccurrenceDate, booking.Quantity, booking.Status, booking.PaymentID, booking.IdempotencyKey, booking.AmountCents, booking.ServiceFeeCents, booking.NetEarningCents, booking.NotificationSentWhatsapp, booking.NotificationSentEmail, booking.ReminderNotificationSentEmail, booking.ReminderNotificationSentWhatsapp, booking.CreatedAt, booking.UpdatedAt, booking.PriceTierID, booking.UnitPriceCents,
+		booking.ID, booking.EventID, booking.UserID, booking.OccurrenceDate, booking.Quantity, booking.Status, booking.PaymentID, booking.IdempotencyKey, booking.AmountCents, booking.ServiceFeeCents, booking.NetEarningCents, booking.NotificationSentWhatsapp, booking.NotificationSentEmail, booking.ReminderNotificationSentEmail, booking.ReminderNotificationSentWhatsapp, booking.CreatedAt, booking.UpdatedAt, booking.PriceTierID, booking.UnitPriceCents, booking.CouponID,
 	)
 	return err
 }

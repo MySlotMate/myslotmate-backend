@@ -77,7 +77,8 @@ var eventColumns = `id, host_id,
 	ai_suggestion, avg_rating, total_bookings, total_reviews,
 	created_at, updated_at,
 	requires_attendee_details, attendee_fields,
-	terms_and_conditions, slug`
+	terms_and_conditions, slug,
+	is_private, access_passkey, passkey_grants_free`
 
 func scanEvent(row interface {
 	Scan(dest ...interface{}) error
@@ -95,6 +96,7 @@ func scanEvent(row interface {
 		&e.CreatedAt, &e.UpdatedAt,
 		&e.RequiresAttendeeDetails, &e.AttendeeFields,
 		&e.TermsAndConditions, &e.Slug,
+		&e.IsPrivate, &e.AccessPasskey, &e.PasskeyGrantsFree,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -124,7 +126,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			ai_suggestion,
 			created_at, updated_at,
 			requires_attendee_details, attendee_fields,
-			terms_and_conditions, slug
+			terms_and_conditions, slug,
+			is_private, access_passkey, passkey_grants_free
 		) VALUES (
 			$1, $2,
 			$3, $4, $5, $6,
@@ -136,7 +139,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			$32,
 			$33, $34,
 			$35, $36,
-			$37, $38
+			$37, $38,
+			$39, $40, $41
 		)
 	`
 	if event.ID == uuid.Nil {
@@ -154,6 +158,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 		event.CreatedAt, event.UpdatedAt,
 		event.RequiresAttendeeDetails, pq.Array(event.AttendeeFields),
 		event.TermsAndConditions, event.Slug,
+		event.IsPrivate, event.AccessPasskey, event.PasskeyGrantsFree,
 	)
 	return err
 }
@@ -169,8 +174,9 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 			cancellation_policy = $25, status = $26, published_at = $27, paused_at = $28, paused_from = $29, paused_dates = $30,
 			ai_suggestion = $31, avg_rating = $32, total_bookings = $33,
 			requires_attendee_details = $34, attendee_fields = $35,
-			terms_and_conditions = $36, slug = $37
-		WHERE id = $38
+			terms_and_conditions = $36, slug = $37,
+			is_private = $38, access_passkey = $39, passkey_grants_free = $40
+		WHERE id = $41
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		event.Title, event.HookLine, event.Mood, event.Description,
@@ -182,6 +188,7 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 		event.AISuggestion, event.AvgRating, event.TotalBookings,
 		event.RequiresAttendeeDetails, pq.Array(event.AttendeeFields),
 		event.TermsAndConditions, event.Slug,
+		event.IsPrivate, event.AccessPasskey, event.PasskeyGrantsFree,
 		event.ID,
 	)
 	return err
@@ -326,6 +333,7 @@ func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, 
 			&e.CreatedAt, &e.UpdatedAt,
 			&e.RequiresAttendeeDetails, &e.AttendeeFields,
 			&e.TermsAndConditions, &e.Slug,
+			&e.IsPrivate, &e.AccessPasskey, &e.PasskeyGrantsFree,
 		); err != nil {
 			fmt.Printf("[EVENT_REPO] scanEvents Scan ERROR: %v\n", err)
 			return nil, err

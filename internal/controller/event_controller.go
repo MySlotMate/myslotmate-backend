@@ -3,10 +3,13 @@ package controller
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"myslotmate-backend/internal/lib/ratelimit"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/service"
 
@@ -75,6 +78,7 @@ func (c *EventController) RegisterRoutes(r chi.Router) {
 		r.Put("/{eventID}", c.UpdateEvent)
 		r.Delete("/{eventID}", c.DeleteEvent)
 		r.Get("/{eventID}", c.GetEvent)
+		r.Post("/{eventID}/unlock", c.UnlockEvent)
 		r.Get("/host/{hostID}", c.GetHostEvents)
 		r.Get("/host/{hostID}/filtered", c.GetHostEventsFiltered)
 		r.Get("/calendar/{hostID}", c.GetCalendarEvents)
@@ -129,6 +133,13 @@ type EventCreateRequestBody struct {
 	RequiresAttendeeDetails bool     `json:"requires_attendee_details"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
+
+	// Privacy & access. IsPrivate lists the event with a lock; AccessPasskey is
+	// required at the Book step; PasskeyGrantsFree makes that passkey also comp a
+	// paid booking to free.
+	IsPrivate         bool    `json:"is_private"`
+	AccessPasskey     *string `json:"access_passkey,omitempty"`
+	PasskeyGrantsFree bool    `json:"passkey_grants_free"`
 }
 
 type EventUpdateRequestBody struct {
@@ -163,6 +174,12 @@ type EventUpdateRequestBody struct {
 	RequiresAttendeeDetails *bool    `json:"requires_attendee_details,omitempty"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
+
+	// Privacy & access (all optional — nil = leave unchanged). AccessPasskey left
+	// nil keeps the current passkey; sending a value replaces it.
+	IsPrivate         *bool   `json:"is_private,omitempty"`
+	AccessPasskey     *string `json:"access_passkey,omitempty"`
+	PasskeyGrantsFree *bool   `json:"passkey_grants_free,omitempty"`
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -186,6 +203,9 @@ func (c *EventController) ListPublishedEvents(w http.ResponseWriter, r *http.Req
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// Private-event passkeys never travel in the public discovery feed.
+	stripEventPasskeys(events)
 
 	RespondSuccess(w, http.StatusOK, events)
 }
@@ -230,6 +250,10 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		RequiresAttendeeDetails: req.RequiresAttendeeDetails,
 		AttendeeFields:          req.AttendeeFields,
 		TermsAndConditions:      req.TermsAndConditions,
+
+		IsPrivate:         req.IsPrivate,
+		AccessPasskey:     req.AccessPasskey,
+		PasskeyGrantsFree: req.PasskeyGrantsFree,
 	}
 
 	evt, err := c.eventService.CreateEvent(r.Context(), req.HostID, svcReq)
@@ -293,6 +317,10 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		RequiresAttendeeDetails: body.RequiresAttendeeDetails,
 		AttendeeFields:          body.AttendeeFields,
 		TermsAndConditions:      body.TermsAndConditions,
+
+		IsPrivate:         body.IsPrivate,
+		AccessPasskey:     body.AccessPasskey,
+		PasskeyGrantsFree: body.PasskeyGrantsFree,
 	}
 
 	evt, err := c.eventService.UpdateEvent(r.Context(), eventID, body.HostID, svcReq)
@@ -395,7 +423,66 @@ func (c *EventController) GetEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Never expose a private event's passkey to guests. Only the owning host
+	// (identified by a matching ?host_id=) may read it back — e.g. the admin
+	// edit form prefilling the field so the host can re-share the invite.
+	if evt.AccessPasskey != nil {
+		if reqHost := r.URL.Query().Get("host_id"); reqHost == "" || reqHost != evt.HostID.String() {
+			evt.AccessPasskey = nil
+		}
+	}
+
 	RespondSuccess(w, http.StatusOK, evt)
+}
+
+// UnlockEvent is the dry-run behind the guest's passkey prompt for a private
+// event. It reports whether the supplied passkey is correct (and whether it also
+// comps the booking) WITHOUT ever returning the passkey itself. The
+// authoritative check re-runs inside CreateBooking, so a forged "valid" response
+// can't actually book.
+func (c *EventController) UnlockEvent(w http.ResponseWriter, r *http.Request) {
+	param := chi.URLParam(r, "eventID")
+
+	var body struct {
+		Passkey string `json:"passkey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	evt, err := c.eventService.GetEventBySlugOrID(r.Context(), param)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if evt == nil {
+		RespondError(w, http.StatusNotFound, "Event not found")
+		return
+	}
+
+	// A non-private event is always "unlocked".
+	if !evt.IsPrivate {
+		RespondSuccess(w, http.StatusOK, map[string]bool{"valid": true, "grants_free": false})
+		return
+	}
+
+	// Throttle passkey attempts per IP+event so a paid, passkey-comped event
+	// can't be brute-forced into a free ticket via this endpoint.
+	if !ratelimit.Passkey.Allow(clientIP(r) + ":" + evt.ID.String()) {
+		RespondError(w, http.StatusTooManyRequests, "Too many attempts. Please try again in a minute.")
+		return
+	}
+
+	want := ""
+	if evt.AccessPasskey != nil {
+		want = strings.TrimSpace(*evt.AccessPasskey)
+	}
+	valid := want != "" && strings.EqualFold(strings.TrimSpace(body.Passkey), want)
+	RespondSuccess(w, http.StatusOK, map[string]bool{
+		"valid":       valid,
+		"grants_free": valid && evt.PasskeyGrantsFree,
+	})
 }
 
 func (c *EventController) GetHostEvents(w http.ResponseWriter, r *http.Request) {
@@ -411,7 +498,30 @@ func (c *EventController) GetHostEvents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// List views never carry the passkey (this endpoint is also public on host
+	// profiles). The single GetEvent, gated by host_id, is the only place it leaks.
+	stripEventPasskeys(events)
+
 	RespondSuccess(w, http.StatusOK, events)
+}
+
+// clientIP returns the request's source IP (host without port). The RealIP
+// middleware has already resolved X-Forwarded-For into RemoteAddr upstream.
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// stripEventPasskeys blanks the private-event passkey on a list of events so it
+// never travels in any multi-event response.
+func stripEventPasskeys(events []*models.Event) {
+	for _, e := range events {
+		if e != nil {
+			e.AccessPasskey = nil
+		}
+	}
 }
 
 func (c *EventController) GetHostEventsFiltered(w http.ResponseWriter, r *http.Request) {
@@ -452,6 +562,8 @@ func (c *EventController) GetHostEventsFiltered(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	stripEventPasskeys(events)
+
 	RespondSuccess(w, http.StatusOK, events)
 }
 
@@ -474,6 +586,8 @@ func (c *EventController) GetCalendarEvents(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	stripEventPasskeys(events)
+
 	RespondSuccess(w, http.StatusOK, events)
 }
 
@@ -489,6 +603,8 @@ func (c *EventController) GetTodaySchedule(w http.ResponseWriter, r *http.Reques
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	stripEventPasskeys(events)
 
 	RespondSuccess(w, http.StatusOK, events)
 }

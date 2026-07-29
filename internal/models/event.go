@@ -56,6 +56,15 @@ type Event struct {
 	RequiresAttendeeDetails bool           `db:"requires_attendee_details" json:"requires_attendee_details"`
 	AttendeeFields          pq.StringArray `db:"attendee_fields" json:"attendee_fields"`
 
+	// ── Privacy & Access ────────────────────────────────────────────────────
+	// Private events stay LISTED in discovery (the UI shows a lock badge); the
+	// AccessPasskey is required only at the Book step, not to view. When
+	// PasskeyGrantsFree is true, entering the correct passkey also comps a paid
+	// booking to zero (the host comps the guest — no wallet debit, no fee split).
+	IsPrivate         bool    `db:"is_private" json:"is_private"`
+	AccessPasskey     *string `db:"access_passkey" json:"access_passkey,omitempty"`
+	PasskeyGrantsFree bool    `db:"passkey_grants_free" json:"passkey_grants_free"`
+
 	// ── Policies ────────────────────────────────────────────────────────────
 	CancellationPolicy *CancellationPolicy `db:"cancellation_policy" json:"cancellation_policy,omitempty"`
 	// TermsAndConditions is free text set per experience and printed on the ticket PDF.

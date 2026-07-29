@@ -34,6 +34,7 @@ type Booking struct {
 	NetEarningCents                  *int64        `db:"net_earning_cents" json:"net_earning_cents,omitempty"`   // host net (85%)
 	PriceTierID                      *uuid.UUID    `db:"price_tier_id" json:"price_tier_id,omitempty"`           // chosen ticket tier (nil = single-price/free)
 	UnitPriceCents                   *int64        `db:"unit_price_cents" json:"unit_price_cents,omitempty"`     // per-ticket price snapshot at booking time
+	CouponID                         *uuid.UUID    `db:"coupon_id" json:"coupon_id,omitempty"`                   // comp coupon used to waive this booking (nil = none)
 	CheckedInCount                   int           `db:"checked_in_count" json:"checked_in_count"`               // guests admitted so far; a group may arrive in waves, capped at Quantity
 	LastCheckedInAt                  *time.Time    `db:"last_checked_in_at" json:"last_checked_in_at,omitempty"` // most recent door scan
 	CreatedAt                        time.Time     `db:"created_at" json:"created_at"`

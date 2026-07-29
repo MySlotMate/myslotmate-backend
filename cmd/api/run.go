@@ -128,6 +128,7 @@ func main() {
 	experienceTemplateRepo := repository.NewExperienceTemplateRepository(dbConn)
 	eventPriceTierRepo := repository.NewEventPriceTierRepository(dbConn)
 	attendeeProfileRepo := repository.NewAttendeeProfileRepository(dbConn)
+	couponRepo := repository.NewCouponRepository(dbConn)
 
 	// Ensure platform account exists for fee tracking
 	if err := ensurePlatformAccount(ctx, accountRepo); err != nil {
@@ -196,7 +197,7 @@ func main() {
 
 	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, ledgerRepo, attendeeProfileRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService, otpClient, cfg.AdminAuth.JWTSecret, fbApp.Auth)
 	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, uploadService, dispatcher)
-	bookingService := service.NewBookingService(dbConn, bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, userService, dispatcher, notifService)
+	bookingService := service.NewBookingService(dbConn, bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, couponRepo, userService, dispatcher, notifService)
 	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, dispatcher, bookingService)
 	reviewService := service.NewReviewService(reviewRepo, eventRepo, hostRepo, dispatcher)
 	inboxService := service.NewInboxService(inboxRepo, eventRepo, socketService)
@@ -214,6 +215,7 @@ func main() {
 	hostController := controller.NewHostController(hostService)
 	eventController := controller.NewEventController(eventService)
 	bookingController := controller.NewBookingController(bookingService)
+	couponController := controller.NewCouponController(couponRepo, bookingService)
 	walkInService := service.NewWalkInService(userRepo, bookingRepo, eventRepo, eventPriceTierRepo, attendeeProfileRepo, userService, bookingService)
 	walkInController := controller.NewWalkInController(walkInService, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	reviewController := controller.NewReviewController(reviewService)
@@ -267,6 +269,7 @@ func main() {
 		hostController,
 		eventController,
 		bookingController,
+		couponController,
 		walkInController,
 		reviewController,
 		inboxController,

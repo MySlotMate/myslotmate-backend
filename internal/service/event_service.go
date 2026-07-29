@@ -87,6 +87,10 @@ type EventCreateRequest struct {
 	RequiresAttendeeDetails bool     `json:"requires_attendee_details"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
+
+	IsPrivate         bool    `json:"is_private"`
+	AccessPasskey     *string `json:"access_passkey,omitempty"`
+	PasskeyGrantsFree bool    `json:"passkey_grants_free"`
 }
 
 type EventUpdateRequest struct {
@@ -121,6 +125,10 @@ type EventUpdateRequest struct {
 	RequiresAttendeeDetails *bool    `json:"requires_attendee_details,omitempty"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
+
+	IsPrivate         *bool   `json:"is_private,omitempty"`
+	AccessPasskey     *string `json:"access_passkey,omitempty"`
+	PasskeyGrantsFree *bool   `json:"passkey_grants_free,omitempty"`
 }
 
 type eventService struct {
@@ -225,6 +233,10 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		RequiresAttendeeDetails: req.RequiresAttendeeDetails,
 		AttendeeFields:          pq.StringArray(req.AttendeeFields),
 		TermsAndConditions:      req.TermsAndConditions,
+
+		IsPrivate:         req.IsPrivate,
+		AccessPasskey:     normalizePasskey(req.AccessPasskey),
+		PasskeyGrantsFree: req.PasskeyGrantsFree,
 	}
 
 	if status == models.EventStatusLive {
@@ -263,6 +275,19 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 }
 
 // tierInputsToModels converts API tier inputs into tier models for persistence.
+// normalizePasskey trims a supplied passkey; an empty (or whitespace-only) value
+// becomes nil so a private event never carries a blank, un-typeable passkey.
+func normalizePasskey(p *string) *string {
+	if p == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*p)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
 func tierInputsToModels(inputs []PriceTierInput) []models.EventPriceTier {
 	tiers := make([]models.EventPriceTier, 0, len(inputs))
 	for i, in := range inputs {
@@ -391,6 +416,18 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 	}
 	if req.TermsAndConditions != nil {
 		evt.TermsAndConditions = req.TermsAndConditions
+	}
+	if req.IsPrivate != nil {
+		evt.IsPrivate = *req.IsPrivate
+	}
+	// A nil AccessPasskey keeps the current passkey (so the host can toggle other
+	// fields without re-entering it); a supplied value replaces it. An explicit
+	// empty string clears it.
+	if req.AccessPasskey != nil {
+		evt.AccessPasskey = normalizePasskey(req.AccessPasskey)
+	}
+	if req.PasskeyGrantsFree != nil {
+		evt.PasskeyGrantsFree = *req.PasskeyGrantsFree
 	}
 
 	if err := s.eventRepo.Update(ctx, evt); err != nil {

@@ -45,6 +45,7 @@ func NewRouter(
 	hostCtrl *controller.HostController,
 	eventCtrl *controller.EventController,
 	bookingCtrl *controller.BookingController,
+	couponCtrl *controller.CouponController,
 	walkInCtrl *controller.WalkInController,
 	reviewCtrl *controller.ReviewController,
 	inboxCtrl *controller.InboxController,
@@ -108,6 +109,10 @@ func NewRouter(
 
 	if eventCtrl != nil {
 		eventCtrl.RegisterRoutes(r)
+	}
+
+	if couponCtrl != nil {
+		couponCtrl.RegisterRoutes(r)
 	}
 
 	if bookingCtrl != nil {

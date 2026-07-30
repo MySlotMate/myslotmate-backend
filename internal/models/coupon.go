@@ -16,6 +16,12 @@ type Coupon struct {
 	EventID *uuid.UUID `db:"event_id" json:"event_id,omitempty"`
 	Code    string     `db:"code" json:"code"`
 
+	// GrantsFree distinguishes the two independent code kinds:
+	//   false → ACCESS code (a per-guest passkey): unlocks a private event, but
+	//           the guest pays the normal price.
+	//   true  → FREE-BOOKING code (comp): waives payment to ₹0 (and unlocks).
+	GrantsFree bool `db:"grants_free" json:"grants_free"`
+
 	// Limits. Nil means unlimited on that axis.
 	MaxRedemptions *int `db:"max_redemptions" json:"max_redemptions,omitempty"`
 	TimesRedeemed  int  `db:"times_redeemed" json:"times_redeemed"`

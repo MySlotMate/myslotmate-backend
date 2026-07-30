@@ -51,14 +51,14 @@ func (r *postgresCouponRepository) WithTx(tx *sql.Tx) CouponRepository {
 	return &postgresCouponRepository{db: tx}
 }
 
-const couponColumns = `id, host_id, event_id, code, max_redemptions, times_redeemed, per_user_limit, valid_from, valid_until, is_active, created_at, updated_at`
+const couponColumns = `id, host_id, event_id, code, grants_free, max_redemptions, times_redeemed, per_user_limit, valid_from, valid_until, is_active, created_at, updated_at`
 
 func scanCoupon(row interface {
 	Scan(dest ...interface{}) error
 }) (*models.Coupon, error) {
 	c := &models.Coupon{}
 	err := row.Scan(
-		&c.ID, &c.HostID, &c.EventID, &c.Code, &c.MaxRedemptions, &c.TimesRedeemed,
+		&c.ID, &c.HostID, &c.EventID, &c.Code, &c.GrantsFree, &c.MaxRedemptions, &c.TimesRedeemed,
 		&c.PerUserLimit, &c.ValidFrom, &c.ValidUntil, &c.IsActive, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
@@ -75,11 +75,11 @@ func (r *postgresCouponRepository) Create(ctx context.Context, c *models.Coupon)
 		c.ID = uuid.New()
 	}
 	query := `
-		INSERT INTO coupons (id, host_id, event_id, code, max_redemptions, per_user_limit, valid_from, valid_until, is_active)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO coupons (id, host_id, event_id, code, grants_free, max_redemptions, per_user_limit, valid_from, valid_until, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`
 	_, err := r.db.ExecContext(ctx, query,
-		c.ID, c.HostID, c.EventID, c.Code, c.MaxRedemptions, c.PerUserLimit, c.ValidFrom, c.ValidUntil, c.IsActive,
+		c.ID, c.HostID, c.EventID, c.Code, c.GrantsFree, c.MaxRedemptions, c.PerUserLimit, c.ValidFrom, c.ValidUntil, c.IsActive,
 	)
 	return err
 }

@@ -231,15 +231,28 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		}
 	}
 
-	// 3c. Private-event passkey gate — the authoritative check behind the
-	// client's unlock prompt. A private event only books with the correct passkey
-	// (trimmed, case-insensitive). Never trust a client-side "unlocked" flag.
+	// 3c. Private-event gate — the authoritative check behind the client's unlock
+	// prompt. A private event books only with either (a) the shared access
+	// passkey, or (b) a valid per-guest code (a coupon), whichever the guest
+	// entered. The per-guest code may arrive in coupon_code or the passkey field.
+	// A code that unlocks also comps the booking (see step 6b). Never trust a
+	// client-side "unlocked" flag; trusted host flows (walk-in) bypass this.
+	var gateCoupon *models.Coupon
 	if evt.IsPrivate && !req.BypassPasskey {
-		want := ""
-		if evt.AccessPasskey != nil {
-			want = strings.TrimSpace(*evt.AccessPasskey)
+		unlocked := passkeyMatches(evt, req.Passkey)
+		if !unlocked {
+			candidate := strings.TrimSpace(req.CouponCode)
+			if candidate == "" {
+				candidate = strings.TrimSpace(req.Passkey)
+			}
+			if candidate != "" {
+				if c, verr := s.validateCoupon(ctx, evt, userID, candidate); verr == nil {
+					gateCoupon = c
+					unlocked = true
+				}
+			}
 		}
-		if want == "" || !strings.EqualFold(strings.TrimSpace(req.Passkey), want) {
+		if !unlocked {
 			return nil, errors.New("invalid passkey")
 		}
 	}
@@ -296,22 +309,27 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	totalAmount := pricePerTicketCents * int64(req.Quantity)
 	unitPriceCents := pricePerTicketCents
 
-	// 6b. Comp waivers — a matched passkey (when the event opts in) or a valid
-	// coupon waives the booking to free. A free booking then rides the existing
-	// `totalAmount == 0` path below: no wallet debit, no ledger, no fee split —
-	// the host comps the guest. The two can't stack (each guarded on totalAmount>0).
+	// 6b. Resolve the code used (for redemption) and whether it waives payment.
+	// Access and payment are decoupled: a code that unlocked a private event
+	// (gateCoupon) or an explicit code (req.CouponCode) is recorded and redeemed —
+	// single-use — regardless. It waives the price ONLY when it's a free-booking
+	// code (GrantsFree); an access code (a per-guest passkey) just unlocks and the
+	// guest pays. The shared passkey never comps — "free for everyone" is instead
+	// the event being priced free (which already makes totalAmount 0 above).
 	var couponID *uuid.UUID
-	if totalAmount > 0 && evt.IsPrivate && evt.PasskeyGrantsFree {
-		// Passkey already validated in step 3c; this event comps passkey holders.
-		totalAmount = 0
-	}
-	if totalAmount > 0 && strings.TrimSpace(req.CouponCode) != "" {
-		coupon, err := s.validateCoupon(ctx, evt, userID, req.CouponCode)
+	comp := gateCoupon
+	if comp == nil && strings.TrimSpace(req.CouponCode) != "" {
+		c, err := s.validateCoupon(ctx, evt, userID, req.CouponCode)
 		if err != nil {
 			return nil, err
 		}
-		couponID = &coupon.ID
-		totalAmount = 0
+		comp = c
+	}
+	if comp != nil {
+		couponID = &comp.ID // redeem the single-use code, whether access or free
+		if totalAmount > 0 && comp.GrantsFree {
+			totalAmount = 0
+		}
 	}
 
 	// 7. Get user account (must exist)
@@ -555,6 +573,16 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 // Helper to create string pointers
 func strPtr(s string) *string {
 	return &s
+}
+
+// passkeyMatches reports whether the provided value equals the event's shared
+// access passkey (trimmed, case-insensitive).
+func passkeyMatches(evt *models.Event, provided string) bool {
+	if evt.AccessPasskey == nil {
+		return false
+	}
+	want := strings.TrimSpace(*evt.AccessPasskey)
+	return want != "" && strings.EqualFold(strings.TrimSpace(provided), want)
 }
 
 // validateCoupon resolves and validates a comp code for this event+user WITHOUT

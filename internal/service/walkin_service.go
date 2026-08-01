@@ -54,6 +54,9 @@ type WalkInInitiateRequest struct {
 	EventID        uuid.UUID
 	Quantity       int
 	OccurrenceDate *time.Time // required for recurring events; ignored otherwise
+	// CouponCode, when a valid free-booking code, comps the walk-in to ₹0 and
+	// books immediately (no payment step). CreateBooking validates + redeems it.
+	CouponCode string
 	// AttendeeDetails carries the extra attendee-profile answers the admin
 	// collected for events that require them. Nil when the event needs none.
 	// Only its non-nil fields are upserted onto the guest's profile, so the
@@ -245,13 +248,30 @@ func (s *walkInService) InitiateWalkIn(ctx context.Context, req WalkInInitiateRe
 		pricePerTicketCents = *evt.PriceCents
 	}
 	totalAmount := pricePerTicketCents * int64(req.Quantity)
+	couponCode := strings.TrimSpace(req.CouponCode)
 
-	// FREE event → create + confirm the booking immediately, no gateway.
-	if totalAmount == 0 {
+	// A coupon on a paid event is verified up-front so the admin gets a precise
+	// message: an unknown/expired/exhausted code, or one that only grants access
+	// (not a free booking), is rejected here rather than failing later with a
+	// confusing "insufficient balance". CreateBooking re-checks and atomically
+	// redeems it, so this preview never double-spends the code.
+	if totalAmount > 0 && couponCode != "" {
+		coupon, err := s.bookingService.ValidateCoupon(ctx, req.EventID, guest.ID, couponCode)
+		if err != nil {
+			return nil, err
+		}
+		if !coupon.GrantsFree {
+			return nil, errors.New("that code only grants access, not a free booking")
+		}
+	}
+
+	// FREE event, or a coupon that comps it → create + confirm immediately, no
+	// gateway. CreateBooking validates + redeems the coupon and waives the price.
+	if totalAmount == 0 || couponCode != "" {
 		// Unique per attempt — the duplicate guard above already prevents a guest
 		// double-booking the same slot, so a fresh key here is safe.
 		freeKey := "walkin_free_" + uuid.New().String()
-		booking, err := s.createAndConfirm(ctx, guest.ID, req.EventID, req.Quantity, occurrenceDate, freeKey)
+		booking, err := s.createAndConfirm(ctx, guest.ID, req.EventID, req.Quantity, occurrenceDate, freeKey, couponCode)
 		if err != nil {
 			return nil, err
 		}
@@ -339,18 +359,19 @@ func (s *walkInService) CompleteWalkIn(ctx context.Context, req WalkInCompleteRe
 	// payment books (a deterministic guest+event+date key would collide across
 	// separate attempts and silently skip the booking).
 	paidKey := "walkin_paid_" + req.RazorpayOrderID
-	return s.createAndConfirm(ctx, req.GuestUserID, req.EventID, req.Quantity, occurrenceDate, paidKey)
+	return s.createAndConfirm(ctx, req.GuestUserID, req.EventID, req.Quantity, occurrenceDate, paidKey, "")
 }
 
 // createAndConfirm runs the normal booking debit and confirms it in the same
 // transaction (AutoConfirm), without notifying the guest (synthetic contact).
-func (s *walkInService) createAndConfirm(ctx context.Context, guestID, eventID uuid.UUID, quantity int, occurrenceDate time.Time, idempotencyKey string) (*models.Booking, error) {
+func (s *walkInService) createAndConfirm(ctx context.Context, guestID, eventID uuid.UUID, quantity int, occurrenceDate time.Time, idempotencyKey, couponCode string) (*models.Booking, error) {
 	occ := occurrenceDate
 	return s.bookingService.CreateBooking(ctx, guestID, BookingCreateRequest{
 		EventID:        eventID,
 		Quantity:       quantity,
 		OccurrenceDate: &occ,
 		IdempotencyKey: idempotencyKey,
+		CouponCode:     couponCode,
 		AutoConfirm:    true,
 		Notify:         false,
 		// Host-driven on-spot booking for their own event — skip the guest passkey gate.

@@ -75,6 +75,9 @@ type walkInInitiateBody struct {
 	EventID        string `json:"event_id"`
 	Quantity       int    `json:"quantity"`
 	OccurrenceDate string `json:"occurrence_date,omitempty"` // RFC3339
+	// CouponCode, when a valid free-booking code, comps the walk-in to ₹0 and
+	// skips the payment step entirely.
+	CouponCode string `json:"coupon_code,omitempty"`
 	// HostID scopes the request to a host booking their own event (host flow).
 	// Omitted by the admin flow.
 	HostID string `json:"host_id,omitempty"`
@@ -162,6 +165,7 @@ func (c *WalkInController) initiate(w http.ResponseWriter, r *http.Request, host
 		EventID:         eventID,
 		Quantity:        body.Quantity,
 		OccurrenceDate:  occ,
+		CouponCode:      body.CouponCode,
 		AttendeeDetails: body.AttendeeDetails.toModel(),
 		HostID:          hostID,
 	})
@@ -286,7 +290,12 @@ func respondWalkInError(w http.ResponseWriter, err error) {
 		RespondError(w, http.StatusConflict, err.Error())
 	case "guest name is required", "guest phone number is required",
 		"quantity must be at least 1", "a date is required for recurring events",
-		"attendee details are required for this event":
+		"attendee details are required for this event",
+		"invalid coupon code", "this coupon is no longer active",
+		"this coupon is not valid yet", "this coupon has expired",
+		"this coupon has reached its redemption limit",
+		"you have already used this coupon",
+		"that code only grants access, not a free booking":
 		RespondError(w, http.StatusBadRequest, err.Error())
 	default:
 		RespondError(w, http.StatusInternalServerError, err.Error())

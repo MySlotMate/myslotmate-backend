@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 
 	"myslotmate-backend/internal/lib/payment"
@@ -124,8 +125,22 @@ func (c *WebhookController) HandlePayoutWebhook(w http.ResponseWriter, r *http.R
 		r.Header.Get("X-Webhook-Timestamp"),
 	)
 	if !c.payoutProvider.ValidateWebhookSignature(body, signature, timestamp) {
-		log.Printf("[webhook/payout] signature rejected: sig_present=%t timestamp_present=%t body_len=%d",
-			signature != "", timestamp != "", len(body))
+		// TEMPORARY diagnostic: Cashfree's exact payout webhook signing scheme is
+		// unconfirmed (product/version dependent). Log the raw signature, the
+		// timestamp, every header name, and the raw body so we can reproduce the
+		// signature offline and pin the scheme. The signing SECRET is never
+		// logged. Remove this block once the scheme is confirmed.
+		headerKeys := make([]string, 0, len(r.Header))
+		for k := range r.Header {
+			headerKeys = append(headerKeys, k)
+		}
+		sort.Strings(headerKeys)
+		bodyPreview := string(body)
+		if len(bodyPreview) > 1000 {
+			bodyPreview = bodyPreview[:1000]
+		}
+		log.Printf("[webhook/payout] signature REJECTED — signature=%q timestamp=%q headers=%v body=%s",
+			signature, timestamp, headerKeys, bodyPreview)
 		RespondError(w, http.StatusUnauthorized, "Invalid webhook signature")
 		return
 	}

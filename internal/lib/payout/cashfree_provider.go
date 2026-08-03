@@ -15,7 +15,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -335,22 +334,14 @@ func (p *CashfreeProvider) validatePayoutBodySignature(payload []byte) bool {
 
 	// Client secret is the documented signing key; also try an explicit webhook
 	// secret if one was configured.
-	var lastExpected string
 	for _, key := range p.signingKeys() {
 		mac := hmac.New(sha256.New, key)
 		mac.Write([]byte(sb.String()))
 		expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-		lastExpected = expected
 		if hmac.Equal([]byte(expected), []byte(strings.TrimSpace(sigRaw))) {
 			return true
 		}
 	}
-	// TEMPORARY diagnostic: if the body carried a signature but it didn't match,
-	// log the concatenated string and computed vs received signature (never the
-	// secret) so a field-order/format mismatch can be pinned. Remove once the
-	// Payouts scheme is confirmed working live.
-	log.Printf("[cashfree] payout body-signature MISMATCH: concat=%q computed=%q received=%q",
-		sb.String(), lastExpected, strings.TrimSpace(sigRaw))
 	return false
 }
 

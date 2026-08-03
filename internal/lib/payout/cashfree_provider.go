@@ -15,7 +15,9 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -284,34 +286,88 @@ func (p *CashfreeProvider) CheckStatus(ctx context.Context, providerRefID string
 
 // ValidateWebhookSignature verifies a Cashfree Payouts webhook.
 //
-// Cashfree signs webhooks as base64(HMAC-SHA256(x-webhook-timestamp + rawBody,
-// clientSecret)), delivered in the x-webhook-signature header (see Cashfree
-// "Webhook Signature Verification"). The signing key is the account CLIENT
-// SECRET — Payouts has no separate webhook secret — so we try the client secret
-// first, and also CASHFREE_WEBHOOK_SECRET if one was explicitly configured. For
-// resilience across Cashfree products/versions we also accept the legacy
-// body-only message (no timestamp) and hex / base64url encodings.
+// Cashfree Payouts (payout-api.cashfree.com) does NOT use header signatures. It
+// delivers the signature as a `signature` field INSIDE the JSON body, computed
+// as base64(HMAC-SHA256(concatenation of the other top-level field values
+// ordered by ascending key name, CLIENT_SECRET)). We verify that first. The
+// header-based scheme (used by other Cashfree products) is kept as a fallback.
+//
+// `signature` / `timestamp` are the header values (empty for Payouts); they only
+// feed the header fallback.
 func (p *CashfreeProvider) ValidateWebhookSignature(payload []byte, signature, timestamp string) bool {
+	if p.validatePayoutBodySignature(payload) {
+		return true
+	}
+	return p.validateHeaderSignature(payload, signature, timestamp)
+}
+
+// validatePayoutBodySignature implements the Cashfree Payouts body-signature
+// scheme: strip the `signature` field, sort the remaining top-level keys
+// ascending, concatenate their string values, HMAC-SHA256 with the client
+// secret, base64-encode, and compare to the delivered `signature`.
+func (p *CashfreeProvider) validatePayoutBodySignature(payload []byte) bool {
+	var body map[string]interface{}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return false
+	}
+	sigRaw, ok := body["signature"].(string)
+	if !ok || strings.TrimSpace(sigRaw) == "" {
+		return false
+	}
+	delete(body, "signature")
+
+	keys := make([]string, 0, len(body))
+	for k := range body {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var sb strings.Builder
+	for _, k := range keys {
+		// Cashfree sends flat string values; format defensively for any non-string.
+		switch v := body[k].(type) {
+		case string:
+			sb.WriteString(v)
+		default:
+			sb.WriteString(fmt.Sprintf("%v", v))
+		}
+	}
+
+	// Client secret is the documented signing key; also try an explicit webhook
+	// secret if one was configured.
+	var lastExpected string
+	for _, key := range p.signingKeys() {
+		mac := hmac.New(sha256.New, key)
+		mac.Write([]byte(sb.String()))
+		expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+		lastExpected = expected
+		if hmac.Equal([]byte(expected), []byte(strings.TrimSpace(sigRaw))) {
+			return true
+		}
+	}
+	// TEMPORARY diagnostic: if the body carried a signature but it didn't match,
+	// log the concatenated string and computed vs received signature (never the
+	// secret) so a field-order/format mismatch can be pinned. Remove once the
+	// Payouts scheme is confirmed working live.
+	log.Printf("[cashfree] payout body-signature MISMATCH: concat=%q computed=%q received=%q",
+		sb.String(), lastExpected, strings.TrimSpace(sigRaw))
+	return false
+}
+
+// validateHeaderSignature verifies header-delivered HMAC signatures (Cashfree
+// PG / unified scheme): base64/hex of HMAC-SHA256 over timestamp+body or body.
+func (p *CashfreeProvider) validateHeaderSignature(payload []byte, signature, timestamp string) bool {
 	sig := strings.TrimSpace(signature)
 	if sig == "" {
 		return false
 	}
 	sig = strings.TrimPrefix(sig, "sha256=")
 
-	// Candidate signing keys.
-	var keys [][]byte
-	if p.cfg.ClientSecret != "" {
-		keys = append(keys, []byte(p.cfg.ClientSecret))
-	}
-	if p.cfg.WebhookSecret != "" {
-		keys = append(keys, []byte(p.cfg.WebhookSecret))
-	}
+	keys := p.signingKeys()
 	if len(keys) == 0 {
 		return false
 	}
 
-	// Candidate signed messages: Cashfree's correct timestamp-prefixed body,
-	// plus the legacy body-only form as a fallback.
 	msgs := [][]byte{}
 	if ts := strings.TrimSpace(timestamp); ts != "" {
 		msgs = append(msgs, append([]byte(ts), payload...))
@@ -336,6 +392,19 @@ func (p *CashfreeProvider) ValidateWebhookSignature(payload []byte, signature, t
 		}
 	}
 	return false
+}
+
+// signingKeys returns the candidate HMAC keys: the account client secret (the
+// documented Payouts signing key) first, plus an explicit webhook secret if set.
+func (p *CashfreeProvider) signingKeys() [][]byte {
+	var keys [][]byte
+	if p.cfg.ClientSecret != "" {
+		keys = append(keys, []byte(p.cfg.ClientSecret))
+	}
+	if p.cfg.WebhookSecret != "" {
+		keys = append(keys, []byte(p.cfg.WebhookSecret))
+	}
+	return keys
 }
 
 func (p *CashfreeProvider) setHeaders(req *http.Request) error {

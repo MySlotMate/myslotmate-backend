@@ -43,6 +43,7 @@ type Provider interface {
 	// CheckStatus queries the provider for current transfer status.
 	CheckStatus(ctx context.Context, providerRefID string) (*TransferResponse, error)
 
-	// ValidateWebhookSignature verifies the callback is genuine.
-	ValidateWebhookSignature(payload []byte, signature string) bool
+	// ValidateWebhookSignature verifies the callback is genuine. `timestamp` is
+	// the x-webhook-timestamp header value (Cashfree signs timestamp+body).
+	ValidateWebhookSignature(payload []byte, signature, timestamp string) bool
 }

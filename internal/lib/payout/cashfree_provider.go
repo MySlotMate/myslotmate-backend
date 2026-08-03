@@ -282,33 +282,60 @@ func (p *CashfreeProvider) CheckStatus(ctx context.Context, providerRefID string
 	return parsed, nil
 }
 
-// ValidateWebhookSignature verifies Cashfree webhook signature using HMAC-SHA256.
-func (p *CashfreeProvider) ValidateWebhookSignature(payload []byte, signature string) bool {
-	if p.cfg.WebhookSecret == "" {
-		return false
-	}
-
+// ValidateWebhookSignature verifies a Cashfree Payouts webhook.
+//
+// Cashfree signs webhooks as base64(HMAC-SHA256(x-webhook-timestamp + rawBody,
+// clientSecret)), delivered in the x-webhook-signature header (see Cashfree
+// "Webhook Signature Verification"). The signing key is the account CLIENT
+// SECRET — Payouts has no separate webhook secret — so we try the client secret
+// first, and also CASHFREE_WEBHOOK_SECRET if one was explicitly configured. For
+// resilience across Cashfree products/versions we also accept the legacy
+// body-only message (no timestamp) and hex / base64url encodings.
+func (p *CashfreeProvider) ValidateWebhookSignature(payload []byte, signature, timestamp string) bool {
 	sig := strings.TrimSpace(signature)
 	if sig == "" {
 		return false
 	}
 	sig = strings.TrimPrefix(sig, "sha256=")
 
-	mac := hmac.New(sha256.New, []byte(p.cfg.WebhookSecret))
-	mac.Write(payload)
-	sum := mac.Sum(nil)
-
-	expectedHex := hex.EncodeToString(sum)
-	expectedB64 := base64.StdEncoding.EncodeToString(sum)
-	expectedB64URL := base64.URLEncoding.EncodeToString(sum)
-
-	if hmac.Equal([]byte(strings.ToLower(expectedHex)), []byte(strings.ToLower(sig))) {
-		return true
+	// Candidate signing keys.
+	var keys [][]byte
+	if p.cfg.ClientSecret != "" {
+		keys = append(keys, []byte(p.cfg.ClientSecret))
 	}
-	if hmac.Equal([]byte(expectedB64), []byte(sig)) {
-		return true
+	if p.cfg.WebhookSecret != "" {
+		keys = append(keys, []byte(p.cfg.WebhookSecret))
 	}
-	return hmac.Equal([]byte(expectedB64URL), []byte(sig))
+	if len(keys) == 0 {
+		return false
+	}
+
+	// Candidate signed messages: Cashfree's correct timestamp-prefixed body,
+	// plus the legacy body-only form as a fallback.
+	msgs := [][]byte{}
+	if ts := strings.TrimSpace(timestamp); ts != "" {
+		msgs = append(msgs, append([]byte(ts), payload...))
+	}
+	msgs = append(msgs, payload)
+
+	for _, key := range keys {
+		for _, msg := range msgs {
+			mac := hmac.New(sha256.New, key)
+			mac.Write(msg)
+			sum := mac.Sum(nil)
+
+			if hmac.Equal([]byte(strings.ToLower(hex.EncodeToString(sum))), []byte(strings.ToLower(sig))) {
+				return true
+			}
+			if hmac.Equal([]byte(base64.StdEncoding.EncodeToString(sum)), []byte(sig)) {
+				return true
+			}
+			if hmac.Equal([]byte(base64.URLEncoding.EncodeToString(sum)), []byte(sig)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *CashfreeProvider) setHeaders(req *http.Request) error {

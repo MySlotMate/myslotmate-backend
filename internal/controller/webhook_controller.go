@@ -118,7 +118,14 @@ func (c *WebhookController) HandlePayoutWebhook(w http.ResponseWriter, r *http.R
 		r.Header.Get("x-cashfree-signature"),
 		r.Header.Get("X-Cashfree-Signature"),
 	)
-	if !c.payoutProvider.ValidateWebhookSignature(body, signature) {
+	// Cashfree signs timestamp+body; the timestamp arrives in this header.
+	timestamp := pickFirst(
+		r.Header.Get("x-webhook-timestamp"),
+		r.Header.Get("X-Webhook-Timestamp"),
+	)
+	if !c.payoutProvider.ValidateWebhookSignature(body, signature, timestamp) {
+		log.Printf("[webhook/payout] signature rejected: sig_present=%t timestamp_present=%t body_len=%d",
+			signature != "", timestamp != "", len(body))
 		RespondError(w, http.StatusUnauthorized, "Invalid webhook signature")
 		return
 	}

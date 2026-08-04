@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -107,6 +108,66 @@ func TestValidateWebhookSignature_PayoutBody_WrongSecretRejected(t *testing.T) {
 	p := newTestCashfree("wrong_secret")
 	if p.ValidateWebhookSignature(body, "", "") {
 		t.Fatalf("expected signature under a different secret to be rejected")
+	}
+}
+
+// signCashfreePayoutForm builds an x-www-form-urlencoded transfer webhook body
+// (as Cashfree Payouts actually sends), signed the same way: ksort field values,
+// HMAC-SHA256 with client secret, base64, then URL-encoded into the query string.
+func signCashfreePayoutForm(t *testing.T, fields map[string]string, secret string) []byte {
+	t.Helper()
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for _, k := range keys {
+		sb.WriteString(fields[k])
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(sb.String()))
+	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	q := url.Values{}
+	for k, v := range fields {
+		q.Set(k, v)
+	}
+	q.Set("signature", sig)
+	return []byte(q.Encode())
+}
+
+func TestValidateWebhookSignature_PayoutForm_TransferFailed(t *testing.T) {
+	const secret = "form_secret_xyz"
+	// Mirrors the real payload: event=TRANSFER_FAILED&transferId=..&referenceId=..&reason=..
+	fields := map[string]string{
+		"event":       "TRANSFER_FAILED",
+		"transferId":  "227e1a1f-e258-4551-819c-d9e6087aaba6",
+		"referenceId": "2374845107",
+		"reason":      "SOURCE_BANK_DECLINED",
+	}
+	body := signCashfreePayoutForm(t, fields, secret)
+
+	p := newTestCashfree(secret)
+	if !p.ValidateWebhookSignature(body, "", "") {
+		t.Fatalf("expected valid form-encoded transfer webhook signature to pass")
+	}
+}
+
+func TestValidateWebhookSignature_PayoutForm_TamperedRejected(t *testing.T) {
+	const secret = "form_secret_xyz"
+	fields := map[string]string{
+		"event":      "TRANSFER_SUCCESS",
+		"transferId": "227e1a1f-e258-4551-819c-d9e6087aaba6",
+		"referenceId": "2374845107",
+	}
+	body := signCashfreePayoutForm(t, fields, secret)
+	// Flip TRANSFER_SUCCESS → TRANSFER_FAILED after signing.
+	tampered := []byte(strings.Replace(string(body), "TRANSFER_SUCCESS", "TRANSFER_FAILED", 1))
+
+	p := newTestCashfree(secret)
+	if p.ValidateWebhookSignature(tampered, "", "") {
+		t.Fatalf("expected tampered form-encoded payload to be rejected")
 	}
 }
 

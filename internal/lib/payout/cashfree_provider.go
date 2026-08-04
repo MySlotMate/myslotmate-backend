@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -312,35 +313,26 @@ func (p *CashfreeProvider) ValidateWebhookSignature(payload []byte, signature, t
 }
 
 // validatePayoutBodySignature implements the Cashfree Payouts body-signature
-// scheme: strip the `signature` field, sort the remaining top-level keys
-// ascending, concatenate their string values, HMAC-SHA256 with the client
-// secret, base64-encode, and compare to the delivered `signature`.
+// scheme: strip the `signature` field, sort the remaining fields by ascending
+// key name, concatenate their values, HMAC-SHA256 with the client secret,
+// base64-encode, and compare to the delivered `signature`. Cashfree Payouts
+// sends ALERT webhooks as JSON but TRANSFER webhooks as x-www-form-urlencoded —
+// payoutWebhookFields normalises both into the same field map.
 func (p *CashfreeProvider) validatePayoutBodySignature(payload []byte) bool {
-	var body map[string]interface{}
-	if err := json.Unmarshal(payload, &body); err != nil {
+	fields, sigRaw := payoutWebhookFields(payload)
+	if strings.TrimSpace(sigRaw) == "" {
 		return false
 	}
-	sigRaw, ok := body["signature"].(string)
-	if !ok || strings.TrimSpace(sigRaw) == "" {
-		return false
-	}
-	delete(body, "signature")
 
-	keys := make([]string, 0, len(body))
-	for k := range body {
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
 	var sb strings.Builder
 	for _, k := range keys {
-		// Cashfree sends flat string values; format defensively for any non-string.
-		switch v := body[k].(type) {
-		case string:
-			sb.WriteString(v)
-		default:
-			sb.WriteString(fmt.Sprintf("%v", v))
-		}
+		sb.WriteString(fields[k])
 	}
 
 	// Client secret is the documented signing key; also try an explicit webhook
@@ -354,6 +346,41 @@ func (p *CashfreeProvider) validatePayoutBodySignature(payload []byte) bool {
 		}
 	}
 	return false
+}
+
+// payoutWebhookFields parses a Cashfree Payouts webhook body — JSON (alerts) or
+// x-www-form-urlencoded (transfers) — into a flat map of string values plus the
+// extracted `signature`. Form values are returned URL-decoded (Cashfree signs
+// the decoded values).
+func payoutWebhookFields(payload []byte) (map[string]string, string) {
+	fields := map[string]string{}
+
+	trimmed := strings.TrimSpace(string(payload))
+	if strings.HasPrefix(trimmed, "{") {
+		var body map[string]interface{}
+		if err := json.Unmarshal(payload, &body); err != nil {
+			return fields, ""
+		}
+		for k, v := range body {
+			if s, ok := v.(string); ok {
+				fields[k] = s
+			} else {
+				fields[k] = fmt.Sprintf("%v", v)
+			}
+		}
+	} else {
+		vals, err := url.ParseQuery(trimmed)
+		if err != nil {
+			return fields, ""
+		}
+		for k := range vals {
+			fields[k] = vals.Get(k)
+		}
+	}
+
+	sig := fields["signature"]
+	delete(fields, "signature")
+	return fields, sig
 }
 
 // validateHeaderSignature verifies header-delivered HMAC signatures (Cashfree

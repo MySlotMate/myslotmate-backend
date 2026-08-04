@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -93,6 +94,32 @@ func mapCashfreeWebhookStatus(eventName string, status string) string {
 	}
 }
 
+// parsePayoutWebhookEvent decodes a Cashfree Payouts webhook body into the event
+// struct. Alerts arrive as JSON; transfer events (TRANSFER_SUCCESS / _FAILED /
+// _REVERSED) arrive as x-www-form-urlencoded (e.g.
+// event=TRANSFER_FAILED&transferId=...&referenceId=...&reason=...). Form keys use
+// camelCase, so map them explicitly.
+func parsePayoutWebhookEvent(body []byte) (CashfreePayoutWebhookEvent, error) {
+	var event CashfreePayoutWebhookEvent
+
+	if strings.HasPrefix(strings.TrimSpace(string(body)), "{") {
+		return event, json.Unmarshal(body, &event)
+	}
+
+	vals, err := url.ParseQuery(string(body))
+	if err != nil {
+		return event, err
+	}
+	event.Event = pickFirst(vals.Get("event"), vals.Get("type"))
+	event.Type = vals.Get("type")
+	event.TransferID = pickFirst(vals.Get("transferId"), vals.Get("transfer_id"))
+	event.ReferenceID = pickFirst(vals.Get("referenceId"), vals.Get("reference_id"))
+	event.Status = pickFirst(vals.Get("status"), vals.Get("event"))
+	event.Reason = vals.Get("reason")
+	event.ErrorMessage = pickFirst(vals.Get("errorMsg"), vals.Get("error_message"), vals.Get("reason"))
+	return event, nil
+}
+
 func pickFirst(values ...string) string {
 	for _, value := range values {
 		trimmed := strings.TrimSpace(value)
@@ -147,9 +174,10 @@ func (c *WebhookController) HandlePayoutWebhook(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// 3. Parse Cashfree webhook event
-	var event CashfreePayoutWebhookEvent
-	if err := json.Unmarshal(body, &event); err != nil {
+	// 3. Parse Cashfree webhook event — alerts arrive as JSON, transfer events as
+	// x-www-form-urlencoded, so handle both.
+	event, err := parsePayoutWebhookEvent(body)
+	if err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid webhook payload")
 		return
 	}

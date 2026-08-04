@@ -20,6 +20,9 @@ type PaymentRepository interface {
 	IncrementRetry(ctx context.Context, id uuid.UUID, lastError string) error
 	ListByAccountID(ctx context.Context, accountID uuid.UUID, limit, offset int) ([]*models.Payment, error)
 	ListByTypeAndAccount(ctx context.Context, accountID uuid.UUID, paymentType models.PaymentType, limit, offset int) ([]*models.Payment, error)
+	// ListStuckPayouts returns payout/withdrawal payments still in 'processing',
+	// oldest first — candidates for reconciliation against the provider.
+	ListStuckPayouts(ctx context.Context, limit int) ([]*models.Payment, error)
 	// SumActivePayoutAmountByAccount returns the total amount_cents across all
 	// payout/withdrawal payments for the account whose status is pending,
 	// processing, or completed — i.e. money that is in flight or already paid
@@ -170,6 +173,13 @@ func (r *postgresPaymentRepository) ListByAccountID(ctx context.Context, account
 func (r *postgresPaymentRepository) ListByTypeAndAccount(ctx context.Context, accountID uuid.UUID, paymentType models.PaymentType, limit, offset int) ([]*models.Payment, error) {
 	query := `SELECT ` + paymentColumns + ` FROM payments WHERE account_id = $1 AND type = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4`
 	return r.scanPayments(ctx, query, accountID, paymentType, limit, offset)
+}
+
+func (r *postgresPaymentRepository) ListStuckPayouts(ctx context.Context, limit int) ([]*models.Payment, error) {
+	query := `SELECT ` + paymentColumns + ` FROM payments
+		WHERE type IN ('payout', 'withdrawal') AND status = 'processing'
+		ORDER BY created_at ASC LIMIT $1`
+	return r.scanPayments(ctx, query, limit)
 }
 
 // SumActiveRefundsAgainstPayment returns the total amount_cents across refund-

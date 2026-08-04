@@ -52,6 +52,7 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Put("/{hostID}/platform-fee", c.SetHostPlatformFee)
 		r.Put("/{hostID}/profile", c.UpdateHostProfile)
 		r.Put("/{hostID}/active", c.SetHostActive)
+		r.Get("/{hostID}/earnings", c.GetHostEarnings)
 	})
 
 	r.Route("/admin/platform", func(r chi.Router) {
@@ -74,6 +75,10 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		// for special cases (disputes, chargebacks, regulatory).
 		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 		r.Post("/{paymentID}/source-refund", c.RequestSourceRefund)
+
+		// Manual "Sync payout status" — polls Cashfree for every payout stuck in
+		// 'processing' and finalizes those that reached a terminal state.
+		r.Post("/reconcile-payouts", c.ReconcilePayouts)
 
 		// Read-only admin Payments dashboard views.
 		r.Get("/list", c.ListPayments)
@@ -283,6 +288,37 @@ func (c *AdminController) UpdateHostProfile(w http.ResponseWriter, r *http.Reque
 	}
 
 	RespondSuccess(w, http.StatusOK, host)
+}
+
+// GetHostEarnings returns a host's live earnings + balance breakdown — the same
+// figures the host sees on their own dashboard (total, available, pending
+// clearance, in-flight payouts, current balance) — for the admin Host profile.
+func (c *AdminController) GetHostEarnings(w http.ResponseWriter, r *http.Request) {
+	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		return
+	}
+
+	summary, err := c.payoutService.GetEarningsSummary(r.Context(), hostID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, summary)
+}
+
+// ReconcilePayouts polls Cashfree for every payout stuck in 'processing' and
+// finalizes the ones that reached a terminal state — the manual "Sync payout
+// status" action. Returns a summary (checked / finalized / skipped / errors).
+func (c *AdminController) ReconcilePayouts(w http.ResponseWriter, r *http.Request) {
+	res, err := c.payoutService.ReconcilePendingPayouts(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, res)
 }
 
 // SetHostActive deactivates (active=false) or reactivates (active=true) a host.

@@ -49,6 +49,11 @@ type PayoutService interface {
 	// Webhook
 	HandlePayoutWebhook(ctx context.Context, paymentID uuid.UUID, status string, providerError string) error
 
+	// ReconcilePendingPayouts polls the provider for every payout stuck in
+	// 'processing' and finalizes those that have reached a terminal state — the
+	// safety net for missed payout webhooks. Safe to call repeatedly.
+	ReconcilePendingPayouts(ctx context.Context) (ReconcileResult, error)
+
 	// Platform Settings Settings
 	GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error)
 	SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error
@@ -871,6 +876,60 @@ func (s *payoutService) HandlePayoutWebhook(ctx context.Context, paymentID uuid.
 		fmt.Printf("[PAYOUT] Webhook: unknown payout status: %s\n", status)
 		return fmt.Errorf("unknown payout status: %s", status)
 	}
+}
+
+// ReconcileResult summarises a reconciliation run.
+type ReconcileResult struct {
+	Checked   int `json:"checked"`   // payouts inspected
+	Finalized int `json:"finalized"` // transitioned to completed/failed/reversed
+	Skipped   int `json:"skipped"`   // still processing at the provider
+	Errors    int `json:"errors"`    // provider/finalize errors (left for next run)
+}
+
+// ReconcilePendingPayouts is the safety net for missed payout webhooks: it polls
+// the provider for every payout stuck in 'processing' and, for those that have
+// reached a terminal state, applies the SAME finalize logic the webhook uses
+// (via HandlePayoutWebhook, which is idempotent — the reversal ledger's unique
+// key and webhook_executions dedup mean a later real webhook can't double-apply).
+func (s *payoutService) ReconcilePendingPayouts(ctx context.Context) (ReconcileResult, error) {
+	var res ReconcileResult
+
+	stuck, err := s.paymentRepo.ListStuckPayouts(ctx, 200)
+	if err != nil {
+		return res, fmt.Errorf("list stuck payouts: %w", err)
+	}
+	fmt.Printf("[PAYOUT] Reconcile: %d payout(s) in 'processing'\n", len(stuck))
+
+	for _, p := range stuck {
+		res.Checked++
+
+		// Cashfree's transfer_id is our payment ID (see buildCashfreeTransferRequest),
+		// so we can query status even when gateway_payment_id was never stored.
+		resp, err := s.provider.CheckStatus(ctx, p.ID.String())
+		if err != nil {
+			fmt.Printf("[PAYOUT] Reconcile: CheckStatus failed for %s: %v\n", p.ID, err)
+			res.Errors++
+			continue
+		}
+
+		switch resp.Status {
+		case "completed", "failed", "reversed":
+			if err := s.HandlePayoutWebhook(ctx, p.ID, resp.Status, resp.Error); err != nil {
+				fmt.Printf("[PAYOUT] Reconcile: finalize %s as %s failed: %v\n", p.ID, resp.Status, err)
+				res.Errors++
+				continue
+			}
+			fmt.Printf("[PAYOUT] Reconcile: finalized %s as %s\n", p.ID, resp.Status)
+			res.Finalized++
+		default:
+			// "processing" / unknown — still in flight; leave for a later run.
+			res.Skipped++
+		}
+	}
+
+	fmt.Printf("[PAYOUT] Reconcile done: checked=%d finalized=%d skipped=%d errors=%d\n",
+		res.Checked, res.Finalized, res.Skipped, res.Errors)
+	return res, nil
 }
 
 // ── Admin Platform Payout Management ────────────────────────────────────────

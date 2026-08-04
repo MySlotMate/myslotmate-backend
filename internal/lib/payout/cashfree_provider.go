@@ -241,13 +241,22 @@ func (p *CashfreeProvider) InitiateTransfer(ctx context.Context, req TransferReq
 	return parsed, nil
 }
 
-func (p *CashfreeProvider) CheckStatus(ctx context.Context, providerRefID string) (*TransferResponse, error) {
-	if providerRefID == "" {
-		return nil, fmt.Errorf("providerRefID is required")
+// CheckStatus fetches a transfer's current status from Cashfree by OUR
+// transfer_id (= our payment ID). Cashfree Payouts V2 (2024-01-01) exposes this
+// as GET /payout/transfers?transfer_id={id}; the transfer_id is a UUID so it
+// needs no URL escaping. Requires a fresh bearer token (same as InitiateTransfer).
+func (p *CashfreeProvider) CheckStatus(ctx context.Context, transferID string) (*TransferResponse, error) {
+	if transferID == "" {
+		return nil, fmt.Errorf("transferID is required")
 	}
 
-	path := "/payout/transfers/" + providerRefID
-	url := strings.TrimRight(p.cfg.BaseURL, "/") + path
+	token, err := p.authorize(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to authorize cashfree payout: %w", err)
+	}
+	p.cfg.BearerToken = token
+
+	url := strings.TrimRight(p.cfg.BaseURL, "/") + "/payout/transfers?transfer_id=" + transferID
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
@@ -267,6 +276,8 @@ func (p *CashfreeProvider) CheckStatus(ctx context.Context, providerRefID string
 		return nil, fmt.Errorf("failed to read cashfree response: %w", err)
 	}
 
+	fmt.Printf("[CASHFREE] CheckStatus transfer_id=%s httpStatus=%d body=%s\n", transferID, resp.StatusCode, string(respBody))
+
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("cashfree API error (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
@@ -277,7 +288,7 @@ func (p *CashfreeProvider) CheckStatus(ctx context.Context, providerRefID string
 	}
 
 	if parsed.ProviderRefID == "" {
-		parsed.ProviderRefID = providerRefID
+		parsed.ProviderRefID = transferID
 	}
 
 	return parsed, nil

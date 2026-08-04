@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 
 	"myslotmate-backend/internal/lib/payment"
@@ -110,6 +111,23 @@ func (c *WebhookController) HandlePayoutWebhook(w http.ResponseWriter, r *http.R
 		return
 	}
 	defer r.Body.Close()
+
+	// TEMPORARY diagnostic: log EVERY inbound payout webhook (headers + raw body)
+	// so we can confirm whether Cashfree delivers real TRANSFER_* events and what
+	// their payload/signature looks like. Remove once transfer webhooks are
+	// confirmed finalizing. The signing secret is never logged.
+	{
+		hdrs := make([]string, 0, len(r.Header))
+		for k := range r.Header {
+			hdrs = append(hdrs, k)
+		}
+		sort.Strings(hdrs)
+		bodyPreview := string(body)
+		if len(bodyPreview) > 1500 {
+			bodyPreview = bodyPreview[:1500]
+		}
+		log.Printf("[webhook/payout] INBOUND headers=%v body=%s", hdrs, bodyPreview)
+	}
 
 	// 2. Verify Cashfree webhook signature
 	signature := pickFirst(

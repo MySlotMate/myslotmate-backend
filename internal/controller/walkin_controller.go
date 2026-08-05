@@ -1,14 +1,17 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/models"
+	"myslotmate-backend/internal/repository"
 	"myslotmate-backend/internal/service"
 
 	fbauth "firebase.google.com/go/v4/auth"
@@ -20,14 +23,20 @@ import (
 // enters a guest's name + phone, then collects payment via Razorpay on-screen.
 type WalkInController struct {
 	walkInService service.WalkInService
-	firebaseAuth  *fbauth.Client
-	adminEmail    string
-	jwtSecret     string
+	// userRepo/hostRepo back resolveHostID — the auth token is the only accepted
+	// source of "which host is acting" on the host lookup route.
+	userRepo     repository.UserRepository
+	hostRepo     repository.HostRepository
+	firebaseAuth *fbauth.Client
+	adminEmail   string
+	jwtSecret    string
 }
 
-func NewWalkInController(ws service.WalkInService, fa *fbauth.Client, adminEmail, jwtSecret string) *WalkInController {
+func NewWalkInController(ws service.WalkInService, ur repository.UserRepository, hr repository.HostRepository, fa *fbauth.Client, adminEmail, jwtSecret string) *WalkInController {
 	return &WalkInController{
 		walkInService: ws,
+		userRepo:      ur,
+		hostRepo:      hr,
 		firebaseAuth:  fa,
 		adminEmail:    adminEmail,
 		jwtSecret:     jwtSecret,
@@ -44,12 +53,20 @@ func (c *WalkInController) RegisterRoutes(r chi.Router) {
 
 	// Host on-spot booking — a host books a guest onto their OWN event. Scoped by
 	// host_id (ownership verified in the service), matching the /events posture;
-	// no admin session required. Lookup is intentionally NOT exposed here — it
-	// takes only a phone and would enable open account enumeration; the host flow
-	// works without it (findOrCreateGuest matches an existing account by phone).
+	// no admin session required.
 	r.Route("/host/bookings/walk-in", func(r chi.Router) {
 		r.Post("/initiate", c.HostInitiate)
 		r.Post("/complete", c.HostComplete)
+
+		// Lookup is phone→name, so it stays behind auth even though its siblings
+		// don't: unauthenticated it would be an open account-enumeration oracle.
+		// RequireUser proves a real account, resolveHostID proves that account is
+		// a host, and the event_id ownership check confines them to guests they
+		// could already have booked. Body host_id is ignored here on purpose.
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireUser(c.firebaseAuth, c.jwtSecret))
+			r.Get("/lookup", c.HostLookup)
+		})
 	})
 }
 
@@ -63,6 +80,62 @@ func (c *WalkInController) Lookup(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := c.walkInService.LookupByPhone(r.Context(), phone)
 	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, res)
+}
+
+// resolveHostID derives the caller's host UUID from the auth context — the
+// single source of truth for "which host is acting". Any host_id in the query
+// or body MUST be ignored (mirrors PayoutController.resolveHostID).
+func (c *WalkInController) resolveHostID(ctx context.Context) (uuid.UUID, error) {
+	uid, ok := ctx.Value(auth.ContextKeyUID).(string)
+	if !ok || uid == "" {
+		return uuid.Nil, errors.New("unauthenticated")
+	}
+	user, err := c.userRepo.GetByAuthUID(ctx, uid)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("user lookup failed: %w", err)
+	}
+	if user == nil {
+		return uuid.Nil, errors.New("user not found")
+	}
+	host, err := c.hostRepo.GetByUserID(ctx, user.ID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("host lookup failed: %w", err)
+	}
+	if host == nil {
+		return uuid.Nil, errors.New("caller is not a host")
+	}
+	return host.ID, nil
+}
+
+// HostLookup is the host-side phone lookup, confined to events the caller owns.
+// GET /host/bookings/walk-in/lookup?phone=+91XXXXXXXXXX&event_id=<uuid>
+func (c *WalkInController) HostLookup(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	phone := strings.TrimSpace(r.URL.Query().Get("phone"))
+	if phone == "" {
+		RespondError(w, http.StatusBadRequest, "phone is required")
+		return
+	}
+	eventID, err := uuid.Parse(strings.TrimSpace(r.URL.Query().Get("event_id")))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "valid event_id is required")
+		return
+	}
+
+	res, err := c.walkInService.LookupByPhoneForHost(r.Context(), hostID, eventID, phone)
+	if err != nil {
+		if errors.Is(err, service.ErrWalkInNotOwner) {
+			RespondError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

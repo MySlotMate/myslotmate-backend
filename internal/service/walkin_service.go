@@ -38,6 +38,14 @@ type WalkInService interface {
 	// LookupByPhone tells the admin UI whether a phone already belongs to a user
 	// so it can auto-fill (and lock) the name before booking.
 	LookupByPhone(ctx context.Context, phone string) (*WalkInGuestLookup, error)
+	// LookupByPhoneForHost is the same lookup for the host on-spot modal, gated
+	// on the caller owning the event they are booking for. Phone→name is exactly
+	// the kind of thing that invites account enumeration, so the host variant is
+	// deliberately narrower than the admin one: the caller must be an
+	// authenticated host (enforced by middleware) AND own this event — i.e. they
+	// could already have booked this guest onto it and read the name back off
+	// the initiate response.
+	LookupByPhoneForHost(ctx context.Context, hostID, eventID uuid.UUID, phone string) (*WalkInGuestLookup, error)
 }
 
 // WalkInGuestLookup is the result of a phone lookup for the on-spot modal.
@@ -77,6 +85,15 @@ type WalkInInitiateResponse struct {
 	Booking        *models.Booking `json:"booking,omitempty"`
 	GuestUserID    uuid.UUID       `json:"guest_user_id"`
 	OccurrenceDate time.Time       `json:"occurrence_date"`
+
+	// GuestName is the name actually on the account the booking was attached to,
+	// and GuestExisting reports whether that account already existed for this
+	// phone. Together they let the host UI say "booked for <name>" after the
+	// fact, without a lookup endpoint that would allow phone→name enumeration
+	// (see the note on the route registration in walkin_controller.go). The
+	// caller already proved event ownership, so this leaks nothing new.
+	GuestName     string `json:"guest_name"`
+	GuestExisting bool   `json:"guest_existing"`
 
 	// Razorpay checkout fields (paid path only).
 	OrderID     string `json:"order_id,omitempty"`
@@ -201,7 +218,7 @@ func (s *walkInService) InitiateWalkIn(ctx context.Context, req WalkInInitiateRe
 
 	// Existing phone → reuse that account (admin UI auto-fills its name); new
 	// phone → create a fresh email-less, phone-first account.
-	guest, err := s.findOrCreateGuest(ctx, name, phone)
+	guest, guestExisted, err := s.findOrCreateGuest(ctx, name, phone)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +297,8 @@ func (s *walkInService) InitiateWalkIn(ctx context.Context, req WalkInInitiateRe
 			Booking:        booking,
 			GuestUserID:    guest.ID,
 			OccurrenceDate: occurrenceDate,
+			GuestName:      guest.Name,
+			GuestExisting:  guestExisted,
 		}, nil
 	}
 
@@ -297,6 +316,8 @@ func (s *walkInService) InitiateWalkIn(ctx context.Context, req WalkInInitiateRe
 		Paid:           true,
 		GuestUserID:    guest.ID,
 		OccurrenceDate: occurrenceDate,
+		GuestName:      guest.Name,
+		GuestExisting:  guestExisted,
 		OrderID:        order.OrderID,
 		KeyID:          order.KeyID,
 		AmountCents:    order.AmountCents,
@@ -392,19 +413,39 @@ func (s *walkInService) LookupByPhone(ctx context.Context, phone string) (*WalkI
 	return &WalkInGuestLookup{Exists: true, UserID: u.ID, Name: u.Name}, nil
 }
 
+// LookupByPhoneForHost gates LookupByPhone on the caller owning the event. The
+// host ID must come from the auth token, never from the request body — see the
+// controller.
+func (s *walkInService) LookupByPhoneForHost(ctx context.Context, hostID, eventID uuid.UUID, phone string) (*WalkInGuestLookup, error) {
+	evt, err := s.eventRepo.GetByID(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	if evt == nil {
+		return nil, errors.New("event not found")
+	}
+	if err := verifyHostOwnership(evt, &hostID); err != nil {
+		return nil, err
+	}
+	return s.LookupByPhone(ctx, phone)
+}
+
 // findOrCreateGuest returns the existing user for this phone (booking attaches to
 // it; the admin UI shows its name), or creates a fresh phone-first account.
 //
 // New accounts have NO email — they are claimable later via phone login (Phase 2).
 // They carry a placeholder auth_uid (walkin_<uuid>) so they don't collide with
 // Firebase-authenticated users until claimed.
-func (s *walkInService) findOrCreateGuest(ctx context.Context, name, phone string) (*models.User, error) {
+// The second return value reports whether the account already existed, so the
+// caller can tell the host their guest was matched to a known account rather
+// than newly created.
+func (s *walkInService) findOrCreateGuest(ctx context.Context, name, phone string) (*models.User, bool, error) {
 	existing, err := s.userRepo.GetByPhone(ctx, phone)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if existing != nil {
-		return existing, nil
+		return existing, true, nil
 	}
 
 	id := uuid.New()
@@ -419,9 +460,9 @@ func (s *walkInService) findOrCreateGuest(ctx context.Context, name, phone strin
 		UpdatedAt: now,
 	}
 	if err := s.userRepo.Create(ctx, guest); err != nil {
-		return nil, fmt.Errorf("failed to create guest: %w", err)
+		return nil, false, fmt.Errorf("failed to create guest: %w", err)
 	}
-	return guest, nil
+	return guest, false, nil
 }
 
 // resolveWalkInOccurrence determines the booking's occurrence datetime. For

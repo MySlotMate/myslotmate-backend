@@ -147,6 +147,7 @@ type AdminEventRow struct {
 	TotalBookings int64
 	AvgRating     sql.NullFloat64
 	Status        string
+	IsExpired     bool
 	HostFirstName sql.NullString
 	HostLastName  sql.NullString
 	HostCity      sql.NullString
@@ -205,6 +206,7 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 			e.total_bookings,
 			e.avg_rating,
 			e.status,
+			(NOT e.is_recurring AND e.time IS NOT NULL AND e.time < now()) AS is_expired,
 			h.first_name,
 			h.last_name,
 			h.city
@@ -225,7 +227,7 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 		var e AdminEventRow
 		if err := rows.Scan(
 			&e.ID, &e.HostID, &e.IsRecurring, &e.Title, &e.Mood, &e.PriceCents, &e.IsFree,
-			&e.TotalBookings, &e.AvgRating, &e.Status,
+			&e.TotalBookings, &e.AvgRating, &e.Status, &e.IsExpired,
 			&e.HostFirstName, &e.HostLastName, &e.HostCity,
 		); err != nil {
 			return nil, 0, err

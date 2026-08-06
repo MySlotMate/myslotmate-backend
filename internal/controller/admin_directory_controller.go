@@ -163,7 +163,8 @@ type adminEventDTO struct {
 	IsFree   bool    `json:"isFree"`
 	Bookings int64   `json:"bookings"`
 	Rating   float64 `json:"rating"`
-	Status   string  `json:"status"` // draft | live | paused | cancelled
+	Status   string  `json:"status"`     // draft | live | paused | cancelled
+	IsExpired bool   `json:"is_expired"` // non-recurring event whose time has passed
 }
 
 type adminHostDTO struct {
@@ -376,9 +377,10 @@ func (c *AdminDirectoryController) ListEvents(w http.ResponseWriter, r *http.Req
 			Category: category,
 			Price:    price,
 			IsFree:   e.IsFree,
-			Bookings: e.TotalBookings,
-			Rating:   rating,
-			Status:   e.Status,
+			Bookings:  e.TotalBookings,
+			Rating:    rating,
+			Status:    e.Status,
+			IsExpired: e.IsExpired,
 		})
 	}
 

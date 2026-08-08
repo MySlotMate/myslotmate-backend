@@ -273,3 +273,31 @@ func (c *KapsoClient) SendTicketTemplateMessage(ctx context.Context, to string, 
 
 	return c.SendTemplateMessage(ctx, to, templateName, languageCode, components)
 }
+
+// SendHostPendingAlertTemplateMessage sends a host application pending template message
+func (c *KapsoClient) SendHostPendingAlertTemplateMessage(ctx context.Context, to string, templateName string, languageCode string, hostName string, hostCity string, hostPhone string) error {
+	components := []TemplateComponent{
+		{
+			Type: "body",
+			Parameters: []TemplateParameter{
+				{
+					Type:          "text",
+					ParameterName: "name",
+					Text:          hostName,
+				},
+				{
+					Type:          "text",
+					ParameterName: "city",
+					Text:          hostCity,
+				},
+				{
+					Type:          "text",
+					ParameterName: "phone",
+					Text:          hostPhone,
+				},
+			},
+		},
+	}
+
+	return c.SendTemplateMessage(ctx, to, templateName, languageCode, components)
+}

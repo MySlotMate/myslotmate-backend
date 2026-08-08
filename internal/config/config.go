@@ -94,12 +94,14 @@ type PineconeConfig struct {
 
 // KapsoConfig holds Kapso AI WhatsApp notifications settings.
 type KapsoConfig struct {
-	APIKey               string
-	PhoneNumberID        string
-	TicketTemplateName   string
-	TicketTemplateLang   string
-	ReminderTemplateName string
-	ReminderTemplateLang string
+	APIKey                string
+	PhoneNumberID         string
+	TicketTemplateName    string
+	TicketTemplateLang    string
+	ReminderTemplateName  string
+	ReminderTemplateLang  string
+	HostAlertTemplateName string
+	HostAlertTemplateLang string
 }
 
 // MessageCentralConfig holds Message Central VerifyNow credentials.
@@ -223,12 +225,14 @@ func Load() (*Config, error) {
 			Environment: getEnv("PINECONE_ENVIRONMENT", "us-east-1"),
 		},
 		Kapso: KapsoConfig{
-			APIKey:               getEnv("KAPSO_API_KEY", ""),
-			PhoneNumberID:        getEnv("KAPSO_PHONE_NUMBER_ID", ""),
-			TicketTemplateName:   getEnv("KAPSO_TICKET_TEMPLATE_NAME", "ticket_confirmation"),
-			TicketTemplateLang:   getEnv("KAPSO_TICKET_TEMPLATE_LANG", "en_US"),
-			ReminderTemplateName: getEnv("KAPSO_REMINDER_TEMPLATE_NAME", "event_reminder"),
-			ReminderTemplateLang: getEnv("KAPSO_REMINDER_TEMPLATE_LANG", "en_US"),
+			APIKey:                getEnv("KAPSO_API_KEY", ""),
+			PhoneNumberID:         getEnv("KAPSO_PHONE_NUMBER_ID", ""),
+			TicketTemplateName:    getEnv("KAPSO_TICKET_TEMPLATE_NAME", "ticket_confirmation"),
+			TicketTemplateLang:    getEnv("KAPSO_TICKET_TEMPLATE_LANG", "en_US"),
+			ReminderTemplateName:  getEnv("KAPSO_REMINDER_TEMPLATE_NAME", "event_reminder"),
+			ReminderTemplateLang:  getEnv("KAPSO_REMINDER_TEMPLATE_LANG", "en_US"),
+			HostAlertTemplateName: getEnv("KAPSO_HOST_ALERT_TEMPLATE_NAME", "host_application_alert"),
+			HostAlertTemplateLang: getEnv("KAPSO_HOST_ALERT_TEMPLATE_LANG", "en_US"),
 		},
 		MessageCentral: MessageCentralConfig{
 			CustomerID: getEnv("MSGCENTRAL_CUSTOMER_ID", ""),

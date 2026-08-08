@@ -196,7 +196,7 @@ func main() {
 	otpClient := messagecentral.NewClient(cfg.MessageCentral.CustomerID, cfg.MessageCentral.Password)
 
 	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, ledgerRepo, attendeeProfileRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService, otpClient, cfg.AdminAuth.JWTSecret, fbApp.Auth)
-	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, uploadService, dispatcher)
+	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, uploadService, dispatcher, notifService)
 	bookingService := service.NewBookingService(dbConn, bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, couponRepo, userService, dispatcher, notifService)
 	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, dispatcher, bookingService)
 	reviewService := service.NewReviewService(reviewRepo, eventRepo, hostRepo, dispatcher)

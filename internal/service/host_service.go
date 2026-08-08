@@ -2,13 +2,16 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"myslotmate-backend/internal/lib/event"
 	"myslotmate-backend/internal/lib/instagram"
+	"myslotmate-backend/internal/lib/notification"
 	"myslotmate-backend/internal/lib/slug"
 	"myslotmate-backend/internal/lib/storage"
 	"myslotmate-backend/internal/lib/validation"
@@ -188,6 +191,7 @@ type hostService struct {
 	accountRepo repository.AccountRepository
 	uploads     *storage.UploadService // nil when S3 is not configured
 	dispatcher  *event.Dispatcher
+	notifSvc    notification.NotificationService
 }
 
 func NewHostService(
@@ -200,6 +204,7 @@ func NewHostService(
 	ar repository.AccountRepository,
 	us *storage.UploadService,
 	d *event.Dispatcher,
+	ns notification.NotificationService,
 ) HostService {
 	return &hostService{
 		hostRepo:    hr,
@@ -211,6 +216,7 @@ func NewHostService(
 		accountRepo: ar,
 		uploads:     us,
 		dispatcher:  d,
+		notifSvc:    ns,
 	}
 }
 
@@ -272,6 +278,7 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		}
 		if status == models.HostApplicationPending {
 			s.maybeScrapeInstagramMedia(existing)
+			s.triggerAdminHostPendingAlert(existing)
 		}
 		return existing, nil
 	}
@@ -321,9 +328,74 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 	if status == models.HostApplicationPending {
 		s.dispatcher.Publish(event.HostCreated, newHost)
 		s.maybeScrapeInstagramMedia(newHost)
+		s.triggerAdminHostPendingAlert(newHost)
 	}
 
 	return newHost, nil
+}
+
+type AdminNotificationSettings struct {
+	AdminWhatsAppNumbers []AdminWhatsAppNumber `json:"admin_whatsapp_numbers"`
+}
+
+type AdminWhatsAppNumber struct {
+	Label  string `json:"label"`
+	Phone  string `json:"phone"`
+	Active bool   `json:"active"`
+}
+
+func (s *hostService) triggerAdminHostPendingAlert(host *models.Host) {
+	if s.notifSvc == nil {
+		log.Println("[ADMIN_ALERT] notifSvc is nil in hostService; skipping WhatsApp alert")
+		return
+	}
+	if host == nil {
+		log.Println("[ADMIN_ALERT] host is nil; skipping WhatsApp alert")
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		setting, err := s.payoutRepo.GetPlatformSetting(ctx, "admin_notification_settings")
+		if err != nil {
+			log.Printf("[ADMIN_ALERT] Error fetching admin_notification_settings platform setting: %v\n", err)
+			return
+		}
+		if setting == nil {
+			log.Println("[ADMIN_ALERT] Platform setting 'admin_notification_settings' is not set yet in DB")
+			return
+		}
+
+		var cfg AdminNotificationSettings
+		if err := json.Unmarshal(setting, &cfg); err != nil {
+			log.Printf("[ADMIN_ALERT] Error unmarshaling admin_notification_settings: %v\n", err)
+			return
+		}
+
+		var activeNumbers []string
+		for _, item := range cfg.AdminWhatsAppNumbers {
+			if item.Active && strings.TrimSpace(item.Phone) != "" {
+				activeNumbers = append(activeNumbers, item.Phone)
+			}
+		}
+
+		if len(activeNumbers) == 0 {
+			log.Println("[ADMIN_ALERT] No active admin WhatsApp numbers found in config")
+			return
+		}
+
+		hostName := strings.TrimSpace(host.FirstName + " " + host.LastName)
+		if hostName == "" {
+			hostName = host.City
+		}
+
+		log.Printf("[ADMIN_ALERT] Dispatching pending host alert for '%s' to %d numbers: %v\n", hostName, len(activeNumbers), activeNumbers)
+		if err := s.notifSvc.SendAdminHostPendingAlert(ctx, hostName, host.City, host.PhnNumber, activeNumbers); err != nil {
+			log.Printf("[ADMIN_ALERT] SendAdminHostPendingAlert error: %v\n", err)
+		}
+	}()
 }
 
 // maybeScrapeInstagramMedia runs the one-time Instagram scrape in the

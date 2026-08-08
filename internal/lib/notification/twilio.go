@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"fmt"
+	"log"
 	"myslotmate-backend/internal/config"
 	"myslotmate-backend/internal/lib/timeutil"
 	"myslotmate-backend/internal/models"
@@ -61,6 +62,7 @@ type NotificationService interface {
 	SendSMS(ctx context.Context, to string, body string) error
 	GetKapsoClient() *KapsoClient
 	SendCustomEmail(ctx context.Context, to string, subject string, htmlBody string) error
+	SendAdminHostPendingAlert(ctx context.Context, hostName string, hostCity string, hostPhone string, adminPhoneNumbers []string) error
 }
 
 // NewTwilioNotificationService creates a new Twilio notification service
@@ -370,4 +372,70 @@ func (s *TwilioNotificationService) SendCustomEmail(ctx context.Context, to stri
 		return fmt.Errorf("email service not initialized")
 	}
 	return s.emailSvc.SendEmail(to, subject, htmlBody)
+}
+
+// SendAdminHostPendingAlert sends a Kapso WhatsApp alert message to configured admin phone numbers when a host submits a pending application
+func (s *TwilioNotificationService) SendAdminHostPendingAlert(ctx context.Context, hostName string, hostCity string, hostPhone string, adminPhoneNumbers []string) error {
+	if len(adminPhoneNumbers) == 0 {
+		log.Println("[ADMIN_ALERT] No active admin phone numbers configured for host pending alert")
+		return nil
+	}
+
+	message := fmt.Sprintf(
+		"🚨 NEW HOST APPLICATION PENDING APPROVAL!\n\nHost Name: %s\nCity: %s\nPhone: %s\n\nPlease log in to the Admin Dashboard to review and approve/reject.",
+		hostName,
+		hostCity,
+		hostPhone,
+	)
+
+	var lastErr error
+	for _, adminPhone := range adminPhoneNumbers {
+		adminPhone = strings.TrimSpace(adminPhone)
+		if adminPhone == "" {
+			continue
+		}
+
+		if s.kapsoClient != nil {
+			log.Printf("[ADMIN_ALERT] Sending Kapso WhatsApp alert to %s for host %s...\n", adminPhone, hostName)
+			err := s.kapsoClient.SendTextMessage(ctx, adminPhone, message)
+			if err != nil && (strings.Contains(err.Error(), "422") || strings.Contains(err.Error(), "24-hour")) {
+				log.Printf("[ADMIN_ALERT] 24-hour window restriction detected. Retrying using WhatsApp template message...\n")
+				templateName := "host_application_alert"
+				templateLang := "en_US"
+				if s.kapsoCfg != nil {
+					if s.kapsoCfg.HostAlertTemplateName != "" {
+						templateName = s.kapsoCfg.HostAlertTemplateName
+					}
+					if s.kapsoCfg.HostAlertTemplateLang != "" {
+						templateLang = s.kapsoCfg.HostAlertTemplateLang
+					}
+				}
+				err = s.kapsoClient.SendHostPendingAlertTemplateMessage(ctx, adminPhone, templateName, templateLang, hostName, hostCity, hostPhone)
+			}
+
+			if err != nil {
+				log.Printf("[ADMIN_ALERT] Failed to send Kapso WhatsApp alert to %s: %v\n", adminPhone, err)
+				lastErr = err
+			} else {
+				log.Printf("[ADMIN_ALERT] Successfully sent Kapso WhatsApp alert to %s\n", adminPhone)
+			}
+		} else if s.cfg != nil && s.cfg.WhatsappNumber != "" {
+			log.Printf("[ADMIN_ALERT] Sending Twilio WhatsApp alert to %s for host %s...\n", adminPhone, hostName)
+			params := &twilioapiv2010.CreateMessageParams{}
+			params.SetFrom("whatsapp:" + formatPhoneNumber(s.cfg.WhatsappNumber))
+			params.SetTo("whatsapp:" + formatPhoneNumber(adminPhone))
+			params.SetBody(message)
+
+			if _, err := s.client.Api.CreateMessage(params); err != nil {
+				log.Printf("[ADMIN_ALERT] Failed to send Twilio WhatsApp alert to %s: %v\n", adminPhone, err)
+				lastErr = err
+			} else {
+				log.Printf("[ADMIN_ALERT] Successfully sent Twilio WhatsApp alert to %s\n", adminPhone)
+			}
+		} else {
+			log.Printf("[ADMIN_ALERT] Warning: Neither Kapso nor Twilio WhatsApp service is configured!\n")
+		}
+	}
+
+	return lastErr
 }

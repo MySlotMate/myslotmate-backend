@@ -7,6 +7,14 @@ import (
 	"github.com/lib/pq"
 )
 
+type ScheduleType string
+
+const (
+	ScheduleTypeOneTime     ScheduleType = "one_time"
+	ScheduleTypeRecurring   ScheduleType = "recurring"
+	ScheduleTypeCustomDates ScheduleType = "custom_dates"
+)
+
 // Event (Experience) is created by a host. Contains all listing details.
 type Event struct {
 	ID     uuid.UUID `db:"id" json:"id"`
@@ -43,12 +51,14 @@ type Event struct {
 	Level     *string        `db:"level" json:"level,omitempty"` // Beginner Friendly / Intermediate / Advanced
 
 	// ── Schedule & Pricing ──────────────────────────────────────────────────
-	PriceCents     *int64     `db:"price_cents" json:"price_cents,omitempty"` // per guest; nil = free
-	IsFree         bool       `db:"is_free" json:"is_free"`
-	Time           time.Time  `db:"time" json:"time"`
-	EndTime        *time.Time `db:"end_time" json:"end_time,omitempty"`
-	IsRecurring    bool       `db:"is_recurring" json:"is_recurring"`
-	RecurrenceRule *string    `db:"recurrence_rule" json:"recurrence_rule,omitempty"` // e.g. "FREQ=WEEKLY;BYDAY=MO"
+	ScheduleType   ScheduleType   `db:"schedule_type" json:"schedule_type"`
+	PriceCents     *int64         `db:"price_cents" json:"price_cents,omitempty"` // per guest; nil = free
+	IsFree         bool           `db:"is_free" json:"is_free"`
+	Time           time.Time      `db:"time" json:"time"`
+	EndTime        *time.Time     `db:"end_time" json:"end_time,omitempty"`
+	IsRecurring    bool           `db:"is_recurring" json:"is_recurring"`
+	RecurrenceRule *string        `db:"recurrence_rule" json:"recurrence_rule,omitempty"` // e.g. "FREQ=WEEKLY;BYDAY=MO"
+	CustomDates    pq.StringArray `db:"custom_dates" json:"custom_dates"`                 // ISO timestamps for custom/dynamic date slots
 
 	// ── Attendee details ────────────────────────────────────────────────────
 	// When RequiresAttendeeDetails is true, guests must supply the fields listed

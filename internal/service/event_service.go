@@ -84,6 +84,8 @@ type EventCreateRequest struct {
 	AISuggestion       *string                    `json:"ai_suggestion,omitempty"`
 	PriceTiers         []PriceTierInput           `json:"price_tiers,omitempty"` // named ticket tiers; empty = single-price via PriceCents
 
+	ScheduleType       *models.ScheduleType       `json:"schedule_type,omitempty"`
+	CustomDates        []string                   `json:"custom_dates,omitempty"`
 	RequiresAttendeeDetails bool     `json:"requires_attendee_details"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
@@ -119,6 +121,8 @@ type EventUpdateRequest struct {
 	EndTime            *time.Time                 `json:"end_time,omitempty"`
 	IsRecurring        *bool                      `json:"is_recurring,omitempty"`
 	RecurrenceRule     *string                    `json:"recurrence_rule,omitempty"`
+	ScheduleType       *models.ScheduleType       `json:"schedule_type,omitempty"`
+	CustomDates        []string                   `json:"custom_dates,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
 	PriceTiers         []PriceTierInput           `json:"price_tiers,omitempty"` // when non-nil, replaces the event's tier set
 
@@ -197,6 +201,15 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		return nil, fmt.Errorf("invalid status %q: a new event must be draft or live", status)
 	}
 
+	schedType := models.ScheduleTypeOneTime
+	if req.ScheduleType != nil && *req.ScheduleType != "" {
+		schedType = *req.ScheduleType
+	} else if len(req.CustomDates) > 0 {
+		schedType = models.ScheduleTypeCustomDates
+	} else if req.IsRecurring {
+		schedType = models.ScheduleTypeRecurring
+	}
+
 	newEvent := &models.Event{
 		ID:                 uuid.New(),
 		HostID:             hostID,
@@ -224,6 +237,8 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		EndTime:            req.EndTime,
 		IsRecurring:        req.IsRecurring,
 		RecurrenceRule:     req.RecurrenceRule,
+		ScheduleType:       schedType,
+		CustomDates:        pq.StringArray(req.CustomDates),
 		CancellationPolicy: req.CancellationPolicy,
 		Status:             status,
 		AISuggestion:       req.AISuggestion,
@@ -404,6 +419,12 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 	}
 	if req.RecurrenceRule != nil {
 		evt.RecurrenceRule = req.RecurrenceRule
+	}
+	if req.ScheduleType != nil {
+		evt.ScheduleType = *req.ScheduleType
+	}
+	if req.CustomDates != nil {
+		evt.CustomDates = pq.StringArray(req.CustomDates)
 	}
 	if req.CancellationPolicy != nil {
 		evt.CancellationPolicy = req.CancellationPolicy
@@ -691,6 +712,29 @@ func (s *eventService) GetCalendarEvents(ctx context.Context, hostID uuid.UUID, 
 
 	var result []*models.Event
 	for _, e := range events {
+		if e.ScheduleType == models.ScheduleTypeCustomDates || len(e.CustomDates) > 0 {
+			for _, dateStr := range e.CustomDates {
+				parsedDate, parseErr := time.Parse(time.RFC3339, dateStr)
+				if parseErr != nil {
+					parsedDate, parseErr = time.Parse("2006-01-02T15:04:05Z07:00", dateStr)
+				}
+				if parseErr != nil {
+					parsedDate, parseErr = time.Parse("2006-01-02 15:04:05", dateStr)
+				}
+				if parseErr == nil && (parsedDate.After(start) || parsedDate.Equal(start)) && parsedDate.Before(end) {
+					instance := *e
+					instance.Time = parsedDate
+					if e.EndTime != nil {
+						duration := e.EndTime.Sub(e.Time)
+						newEnd := parsedDate.Add(duration)
+						instance.EndTime = &newEnd
+					}
+					result = append(result, &instance)
+				}
+			}
+			continue
+		}
+
 		if !e.IsRecurring || e.RecurrenceRule == nil || *e.RecurrenceRule == "" {
 			if (e.Time.After(start) || e.Time.Equal(start)) && e.Time.Before(end) {
 				result = append(result, e)
@@ -918,7 +962,7 @@ func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset in
 	for _, e := range events {
 		eventOccupancy := occupancyMap[e.ID]
 		
-		if e.IsRecurring && e.RecurrenceRule != nil {
+		if (e.IsRecurring && e.RecurrenceRule != nil) || e.ScheduleType == models.ScheduleTypeCustomDates || len(e.CustomDates) > 0 {
 			// calculateAvailabilityInternal(includePaused=false) already drops
 			// paused occurrences, so anything left here is bookable.
 			avail := s.calculateAvailabilityInternal(e, eventOccupancy, false)
@@ -1030,8 +1074,24 @@ func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupanc
 	}
 	var occurrences []occurrence
 
-	// Generate occurrences using rrule
-	if (evt.IsRecurring || (evt.RecurrenceRule != nil && *evt.RecurrenceRule != "")) && evt.RecurrenceRule != nil {
+	// Generate occurrences using custom_dates if ScheduleType is custom_dates or custom_dates is provided
+	if evt.ScheduleType == models.ScheduleTypeCustomDates || len(evt.CustomDates) > 0 {
+		for _, dateStr := range evt.CustomDates {
+			parsedDate, err := time.Parse(time.RFC3339, dateStr)
+			if err != nil {
+				parsedDate, err = time.Parse("2006-01-02T15:04:05Z07:00", dateStr)
+			}
+			if err != nil {
+				parsedDate, err = time.Parse("2006-01-02 15:04:05", dateStr)
+			}
+			if err == nil {
+				p := isOccurrencePaused(evt, parsedDate)
+				if !p || includePaused {
+					occurrences = append(occurrences, occurrence{t: parsedDate, isPaused: p})
+				}
+			}
+		}
+	} else if (evt.IsRecurring || (evt.RecurrenceRule != nil && *evt.RecurrenceRule != "")) && evt.RecurrenceRule != nil {
 		ruleStr := normalizeRRule(*evt.RecurrenceRule)
 		var r *rrule.RRule
 		var err error

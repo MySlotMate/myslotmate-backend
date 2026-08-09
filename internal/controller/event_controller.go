@@ -121,6 +121,8 @@ type EventCreateRequestBody struct {
 	IsFree             bool                       `json:"is_free"`
 	IsRecurring        bool                       `json:"is_recurring"`
 	RecurrenceRule     *string                    `json:"recurrence_rule,omitempty"`
+	ScheduleType       *models.ScheduleType       `json:"schedule_type,omitempty"`
+	CustomDates        []string                   `json:"custom_dates,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
 	AISuggestion       *string                    `json:"ai_suggestion,omitempty"`
 	PriceTiers         []service.PriceTierInput   `json:"price_tiers,omitempty"`
@@ -168,6 +170,8 @@ type EventUpdateRequestBody struct {
 	IsFree             *bool                      `json:"is_free,omitempty"`
 	IsRecurring        *bool                      `json:"is_recurring,omitempty"`
 	RecurrenceRule     *string                    `json:"recurrence_rule,omitempty"`
+	ScheduleType       *models.ScheduleType       `json:"schedule_type,omitempty"`
+	CustomDates        []string                   `json:"custom_dates,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
 	PriceTiers         []service.PriceTierInput   `json:"price_tiers,omitempty"`
 
@@ -242,6 +246,8 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		IsFree:             req.IsFree,
 		IsRecurring:        req.IsRecurring,
 		RecurrenceRule:     req.RecurrenceRule,
+		ScheduleType:       req.ScheduleType,
+		CustomDates:        req.CustomDates,
 		CancellationPolicy: req.CancellationPolicy,
 		AISuggestion:       req.AISuggestion,
 		PriceTiers:         req.PriceTiers,
@@ -311,6 +317,8 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		IsFree:             body.IsFree,
 		IsRecurring:        body.IsRecurring,
 		RecurrenceRule:     body.RecurrenceRule,
+		ScheduleType:       body.ScheduleType,
+		CustomDates:        body.CustomDates,
 		CancellationPolicy: body.CancellationPolicy,
 		PriceTiers:         body.PriceTiers,
 

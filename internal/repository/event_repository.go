@@ -78,7 +78,8 @@ var eventColumns = `id, host_id,
 	created_at, updated_at,
 	requires_attendee_details, attendee_fields,
 	terms_and_conditions, slug,
-	is_private, access_passkey, passkey_grants_free`
+	is_private, access_passkey, passkey_grants_free,
+	schedule_type, custom_dates`
 
 func scanEvent(row interface {
 	Scan(dest ...interface{}) error
@@ -97,6 +98,7 @@ func scanEvent(row interface {
 		&e.RequiresAttendeeDetails, &e.AttendeeFields,
 		&e.TermsAndConditions, &e.Slug,
 		&e.IsPrivate, &e.AccessPasskey, &e.PasskeyGrantsFree,
+		&e.ScheduleType, &e.CustomDates,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -127,7 +129,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			created_at, updated_at,
 			requires_attendee_details, attendee_fields,
 			terms_and_conditions, slug,
-			is_private, access_passkey, passkey_grants_free
+			is_private, access_passkey, passkey_grants_free,
+			schedule_type, custom_dates
 		) VALUES (
 			$1, $2,
 			$3, $4, $5, $6,
@@ -140,11 +143,15 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			$33, $34,
 			$35, $36,
 			$37, $38,
-			$39, $40, $41
+			$39, $40, $41,
+			$42, $43
 		)
 	`
 	if event.ID == uuid.Nil {
 		event.ID = uuid.New()
+	}
+	if event.ScheduleType == "" {
+		event.ScheduleType = models.ScheduleTypeOneTime
 	}
 	_, err := r.db.ExecContext(ctx, query,
 		event.ID, event.HostID,
@@ -159,6 +166,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 		event.RequiresAttendeeDetails, pq.Array(event.AttendeeFields),
 		event.TermsAndConditions, event.Slug,
 		event.IsPrivate, event.AccessPasskey, event.PasskeyGrantsFree,
+		event.ScheduleType, pq.Array(event.CustomDates),
 	)
 	return err
 }
@@ -175,9 +183,13 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 			ai_suggestion = $31, avg_rating = $32, total_bookings = $33,
 			requires_attendee_details = $34, attendee_fields = $35,
 			terms_and_conditions = $36, slug = $37,
-			is_private = $38, access_passkey = $39, passkey_grants_free = $40
-		WHERE id = $41
+			is_private = $38, access_passkey = $39, passkey_grants_free = $40,
+			schedule_type = $41, custom_dates = $42
+		WHERE id = $43
 	`
+	if event.ScheduleType == "" {
+		event.ScheduleType = models.ScheduleTypeOneTime
+	}
 	_, err := r.db.ExecContext(ctx, query,
 		event.Title, event.HookLine, event.Mood, event.Description,
 		event.CoverImageURL, pq.Array(event.GalleryURLs),
@@ -189,6 +201,7 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 		event.RequiresAttendeeDetails, pq.Array(event.AttendeeFields),
 		event.TermsAndConditions, event.Slug,
 		event.IsPrivate, event.AccessPasskey, event.PasskeyGrantsFree,
+		event.ScheduleType, pq.Array(event.CustomDates),
 		event.ID,
 	)
 	return err
@@ -334,6 +347,7 @@ func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, 
 			&e.RequiresAttendeeDetails, &e.AttendeeFields,
 			&e.TermsAndConditions, &e.Slug,
 			&e.IsPrivate, &e.AccessPasskey, &e.PasskeyGrantsFree,
+			&e.ScheduleType, &e.CustomDates,
 		); err != nil {
 			fmt.Printf("[EVENT_REPO] scanEvents Scan ERROR: %v\n", err)
 			return nil, err

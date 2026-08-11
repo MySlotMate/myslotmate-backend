@@ -527,8 +527,13 @@ func (r *postgresBookingRepository) GetOccupancyForEvents(ctx context.Context, e
 		if _, ok := result[eid]; !ok {
 			result[eid] = make(map[string]int)
 		}
-		// Format date to ISO string for consistent map lookup
-		result[eid][date.Format(time.RFC3339)] = qty
+		// Key on the UTC instant. Callers look this up with occurrence times that
+		// came from different sources — some scanned from TIMESTAMPTZ (which the
+		// driver hands back in the connection's zone), some parsed out of the
+		// custom_dates strings (UTC). RFC3339 renders the same instant with
+		// different offsets in those two zones, so normalising to UTC on both
+		// sides is what makes the lookup actually hit.
+		result[eid][date.UTC().Format(time.RFC3339)] = qty
 	}
 	return result, rows.Err()
 }

@@ -266,9 +266,10 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	}
 
 	// 5. Overbooking prevention — check capacity per occurrence date.
-	// NOTE: this is still a check-then-insert race (bug C4). Wrapping the writes
-	// in a transaction gives atomicity but does NOT serialise two concurrent
-	// capacity checks — closing C4 needs a SELECT ... FOR UPDATE on the event row.
+	// This is a cheap early rejection so an obviously-full slot never reaches the
+	// wallet debit. It is NOT the guard: two concurrent requests can both pass it.
+	// The authoritative check runs under a row lock inside the transaction below
+	// (bug C4).
 	currentBooked, err := s.bookingRepo.GetTotalBookedQuantityForOccurrence(ctx, req.EventID, occurrenceDate)
 	if err != nil {
 		return nil, err
@@ -391,6 +392,28 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	bookingTx := s.bookingRepo.WithTx(tx)
 	paymentTx := s.paymentRepo.WithTx(tx)
 	payoutTx := s.payoutRepo.WithTx(tx)
+
+	// ── Capacity re-check under a row lock (closes bug C4) ────────────────
+	// Locking the event row serialises every concurrent booking for this event,
+	// so the count below cannot be stale by the time we insert. The step-5 check
+	// above only avoids doing work for an already-full slot; this one is what
+	// actually prevents the overbook. It matters most for one-on-one events,
+	// where capacity is 1 and an off-by-one means two guests hold the same slot.
+	// Capacity is re-read from the locked row rather than reused from the copy
+	// fetched at step 4, so a host shrinking capacity mid-flight is respected.
+	var lockedCapacity int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT capacity FROM events WHERE id = $1 FOR UPDATE`, evt.ID,
+	).Scan(&lockedCapacity); err != nil {
+		return nil, fmt.Errorf("booking: lock event: %w", err)
+	}
+	bookedNow, err := bookingTx.GetTotalBookedQuantityForOccurrence(ctx, req.EventID, occurrenceDate)
+	if err != nil {
+		return nil, err
+	}
+	if bookedNow+req.Quantity > lockedCapacity {
+		return nil, errors.New("event capacity exceeded")
+	}
 
 	// ─────────────────────────────────────────────────────────────────────
 	// SWIGGY-STYLE LEDGER FLOW (Immutable Journal)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -84,8 +85,16 @@ type EventCreateRequest struct {
 	AISuggestion       *string                    `json:"ai_suggestion,omitempty"`
 	PriceTiers         []PriceTierInput           `json:"price_tiers,omitempty"` // named ticket tiers; empty = single-price via PriceCents
 
-	ScheduleType       *models.ScheduleType       `json:"schedule_type,omitempty"`
-	CustomDates        []string                   `json:"custom_dates,omitempty"`
+	ScheduleType *models.ScheduleType `json:"schedule_type,omitempty"`
+	CustomDates  []string             `json:"custom_dates,omitempty"`
+
+	// One-on-one sessions: the client expands SessionWindows into CustomDates
+	// and sends both — the windows are stored only so the edit form can show
+	// the host what they originally typed.
+	SessionType    *models.SessionType   `json:"session_type,omitempty"`
+	BreakMinutes   *int                  `json:"break_minutes,omitempty"`
+	SessionWindows models.SessionWindows `json:"session_windows,omitempty"`
+
 	RequiresAttendeeDetails bool     `json:"requires_attendee_details"`
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
@@ -123,6 +132,9 @@ type EventUpdateRequest struct {
 	RecurrenceRule     *string                    `json:"recurrence_rule,omitempty"`
 	ScheduleType       *models.ScheduleType       `json:"schedule_type,omitempty"`
 	CustomDates        []string                   `json:"custom_dates,omitempty"`
+	SessionType        *models.SessionType        `json:"session_type,omitempty"`
+	BreakMinutes       *int                       `json:"break_minutes,omitempty"`
+	SessionWindows     models.SessionWindows      `json:"session_windows,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
 	PriceTiers         []PriceTierInput           `json:"price_tiers,omitempty"` // when non-nil, replaces the event's tier set
 
@@ -210,6 +222,42 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		schedType = models.ScheduleTypeRecurring
 	}
 
+	// One-on-one events are custom_dates events with exactly one seat per slot.
+	// Both are enforced here rather than trusted from the client — capacity is
+	// what stops a second guest taking a slot that is already booked.
+	sessType := models.SessionTypeGroup
+	if req.SessionType != nil && *req.SessionType != "" {
+		sessType = *req.SessionType
+	}
+	breakMinutes := 0
+	if req.BreakMinutes != nil && *req.BreakMinutes > 0 {
+		breakMinutes = *req.BreakMinutes
+	}
+	capacity := req.Capacity
+	isRecurring := req.IsRecurring
+	customDates := req.CustomDates
+	recurrenceRule := req.RecurrenceRule
+	if sessType == models.SessionTypeOneOnOne {
+		capacity = 1
+		// Weekly windows = recurring office hours generated on read; dated
+		// windows = a fixed list of sessions already expanded into CustomDates.
+		if event.HasWeeklyWindows(req.SessionWindows) {
+			schedType = models.ScheduleTypeRecurring
+			isRecurring = true
+			// The windows carry the weekdays, so the rule only has to say
+			// "weekly". It is stored for consistency with schedule_type, not
+			// used to generate sessions — lib/event does that from the windows.
+			if recurrenceRule == nil || *recurrenceRule == "" {
+				weekly := "FREQ=WEEKLY"
+				recurrenceRule = &weekly
+			}
+			customDates = nil
+		} else {
+			schedType = models.ScheduleTypeCustomDates
+			isRecurring = false
+		}
+	}
+
 	newEvent := &models.Event{
 		ID:                 uuid.New(),
 		HostID:             hostID,
@@ -228,17 +276,20 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		DurationMinutes:    req.DurationMinutes,
 		MinGroupSize:       req.MinGroupSize,
 		MaxGroupSize:       req.MaxGroupSize,
-		Capacity:           req.Capacity,
+		Capacity:           capacity,
 		Languages:          pq.StringArray(req.Languages),
 		Level:              req.Level,
 		PriceCents:         req.PriceCents,
 		IsFree:             req.IsFree,
 		Time:               req.Time,
 		EndTime:            req.EndTime,
-		IsRecurring:        req.IsRecurring,
-		RecurrenceRule:     req.RecurrenceRule,
+		IsRecurring:        isRecurring,
+		RecurrenceRule:     recurrenceRule,
 		ScheduleType:       schedType,
-		CustomDates:        pq.StringArray(req.CustomDates),
+		CustomDates:        pq.StringArray(customDates),
+		SessionType:        sessType,
+		BreakMinutes:       breakMinutes,
+		SessionWindows:     req.SessionWindows,
 		CancellationPolicy: req.CancellationPolicy,
 		Status:             status,
 		AISuggestion:       req.AISuggestion,
@@ -425,6 +476,32 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 	}
 	if req.CustomDates != nil {
 		evt.CustomDates = pq.StringArray(req.CustomDates)
+	}
+	if req.SessionType != nil && *req.SessionType != "" {
+		evt.SessionType = *req.SessionType
+	}
+	if req.BreakMinutes != nil {
+		evt.BreakMinutes = *req.BreakMinutes
+	}
+	if req.SessionWindows != nil {
+		evt.SessionWindows = req.SessionWindows
+	}
+	// Same invariants as create: one seat per slot, and the schedule kind is
+	// derived from the windows rather than trusted from the client.
+	if evt.SessionType == models.SessionTypeOneOnOne {
+		evt.Capacity = 1
+		if event.HasWeeklyWindows(evt.SessionWindows) {
+			evt.ScheduleType = models.ScheduleTypeRecurring
+			evt.IsRecurring = true
+			evt.CustomDates = nil
+			if evt.RecurrenceRule == nil || *evt.RecurrenceRule == "" {
+				weekly := "FREQ=WEEKLY"
+				evt.RecurrenceRule = &weekly
+			}
+		} else {
+			evt.ScheduleType = models.ScheduleTypeCustomDates
+			evt.IsRecurring = false
+		}
 	}
 	if req.CancellationPolicy != nil {
 		evt.CancellationPolicy = req.CancellationPolicy
@@ -712,6 +789,28 @@ func (s *eventService) GetCalendarEvents(ctx context.Context, hostID uuid.UUID, 
 
 	var result []*models.Event
 	for _, e := range events {
+		// Recurring one-on-one: sessions are generated from the weekly windows,
+		// so expand them into the requested range like any other occurrence.
+		if isRecurringOneOnOne(e) {
+			duration := 60
+			if e.DurationMinutes != nil && *e.DurationMinutes > 0 {
+				duration = *e.DurationMinutes
+			}
+			for _, slot := range event.GenerateWeeklySessions(
+				e.SessionWindows, duration, e.BreakMinutes, start,
+			) {
+				if slot.Before(start) || !slot.Before(end) {
+					continue
+				}
+				instance := *e
+				instance.Time = slot
+				slotEnd := slot.Add(time.Duration(duration) * time.Minute)
+				instance.EndTime = &slotEnd
+				result = append(result, &instance)
+			}
+			continue
+		}
+
 		if e.ScheduleType == models.ScheduleTypeCustomDates || len(e.CustomDates) > 0 {
 			for _, dateStr := range e.CustomDates {
 				parsedDate, parseErr := time.Parse(time.RFC3339, dateStr)
@@ -961,8 +1060,8 @@ func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset in
 	// 3. For each event, calculate next available date using the batch data
 	for _, e := range events {
 		eventOccupancy := occupancyMap[e.ID]
-		
-		if (e.IsRecurring && e.RecurrenceRule != nil) || e.ScheduleType == models.ScheduleTypeCustomDates || len(e.CustomDates) > 0 {
+
+		if (e.IsRecurring && e.RecurrenceRule != nil) || e.ScheduleType == models.ScheduleTypeCustomDates || len(e.CustomDates) > 0 || isRecurringOneOnOne(e) {
 			// calculateAvailabilityInternal(includePaused=false) already drops
 			// paused occurrences, so anything left here is bookable.
 			avail := s.calculateAvailabilityInternal(e, eventOccupancy, false)
@@ -976,7 +1075,7 @@ func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset in
 			// Non-recurring: the single occurrence must be neither paused nor
 			// full. Without the pause check a paused one-off event kept a
 			// next_available_date and stayed visible in the public feed.
-			booked := eventOccupancy[e.Time.Format(time.RFC3339)]
+			booked := eventOccupancy[e.Time.UTC().Format(time.RFC3339)]
 			if booked < e.Capacity && !isOccurrencePaused(e, e.Time) {
 				e.NextAvailableDate = &e.Time
 			}
@@ -998,6 +1097,27 @@ func (s *eventService) ListPublishedEvents(ctx context.Context, limit, offset in
 	return finalEvents, nil
 }
 
+// isRecurringOneOnOne reports whether an event is a one-on-one calendar defined
+// by repeating weekly windows rather than by a fixed list of dates.
+func isRecurringOneOnOne(evt *models.Event) bool {
+	return evt.SessionType == models.SessionTypeOneOnOne &&
+		event.HasWeeklyWindows(evt.SessionWindows)
+}
+
+// pausedDateMatchesWholeDay is the loose fallback for paused_dates entries that
+// aren't an exact timestamp match: a stored "2026-08-15…" pauses everything on
+// 15 Aug. That is right for group events, which hold at most one session a day,
+// but wrong for one-on-one events, where a day is a dozen independent slots and
+// pausing 10:00 must not take 10:30 with it. For those, only an exact timestamp
+// match (checked by the caller) counts — unless the host stored a bare date,
+// which can only mean "the whole day".
+func pausedDateMatchesWholeDay(evt *models.Event, pausedDate string, t time.Time) bool {
+	if !strings.HasPrefix(pausedDate, t.Format("2006-01-02")) {
+		return false
+	}
+	return evt.SessionType != models.SessionTypeOneOnOne || len(pausedDate) == len("2006-01-02")
+}
+
 // isOccurrencePaused reports whether one specific occurrence of an event is
 // paused. Mirrors the rule used by calculateAvailabilityInternal so the public
 // feed and the availability calendar agree:
@@ -1009,7 +1129,7 @@ func isOccurrencePaused(evt *models.Event, t time.Time) bool {
 		if pd, err := time.Parse(time.RFC3339, pdStr); err == nil && pd.Equal(t) {
 			return true
 		}
-		if strings.HasPrefix(pdStr, t.Format("2006-01-02")) {
+		if pausedDateMatchesWholeDay(evt, pdStr, t) {
 			return true
 		}
 	}
@@ -1074,8 +1194,24 @@ func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupanc
 	}
 	var occurrences []occurrence
 
-	// Generate occurrences using custom_dates if ScheduleType is custom_dates or custom_dates is provided
-	if evt.ScheduleType == models.ScheduleTypeCustomDates || len(evt.CustomDates) > 0 {
+	// A recurring one-on-one event stores no dates — its sessions are weekly
+	// office hours, generated on read so the calendar never runs out. This has to
+	// come first: the event is is_recurring, but its RRULE describes nothing on
+	// its own (the windows carry the weekdays).
+	if isRecurringOneOnOne(evt) {
+		duration := 60
+		if evt.DurationMinutes != nil && *evt.DurationMinutes > 0 {
+			duration = *evt.DurationMinutes
+		}
+		for _, start := range event.GenerateWeeklySessions(
+			evt.SessionWindows, duration, evt.BreakMinutes, time.Now(),
+		) {
+			p := isOccurrencePaused(evt, start)
+			if !p || includePaused {
+				occurrences = append(occurrences, occurrence{t: start, isPaused: p})
+			}
+		}
+	} else if evt.ScheduleType == models.ScheduleTypeCustomDates || len(evt.CustomDates) > 0 {
 		for _, dateStr := range evt.CustomDates {
 			parsedDate, err := time.Parse(time.RFC3339, dateStr)
 			if err != nil {
@@ -1085,12 +1221,23 @@ func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupanc
 				parsedDate, err = time.Parse("2006-01-02 15:04:05", dateStr)
 			}
 			if err == nil {
+				// A one-on-one calendar is a long list of short slots, most of
+				// which go stale within the day — drop the ones that have already
+				// started so the booking UI only ever offers real options.
+				if evt.SessionType == models.SessionTypeOneOnOne && parsedDate.Before(time.Now()) {
+					continue
+				}
 				p := isOccurrencePaused(evt, parsedDate)
 				if !p || includePaused {
 					occurrences = append(occurrences, occurrence{t: parsedDate, isPaused: p})
 				}
 			}
 		}
+		// custom_dates is stored in the order the host entered their windows,
+		// which need not be chronological.
+		sort.Slice(occurrences, func(i, j int) bool {
+			return occurrences[i].t.Before(occurrences[j].t)
+		})
 	} else if (evt.IsRecurring || (evt.RecurrenceRule != nil && *evt.RecurrenceRule != "")) && evt.RecurrenceRule != nil {
 		ruleStr := normalizeRRule(*evt.RecurrenceRule)
 		var r *rrule.RRule
@@ -1164,7 +1311,12 @@ func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupanc
 		}
 	}
 
-	if len(occurrences) == 0 && (evt.Status != models.EventStatusPaused || includePaused) {
+	// The base-time fallback covers events with no generated occurrences. It must
+	// not fire for a one-on-one calendar whose slots are simply all in the past —
+	// that would re-offer a slot the loop above deliberately dropped.
+	isExhaustedOneOnOne := evt.SessionType == models.SessionTypeOneOnOne &&
+		(len(evt.CustomDates) > 0 || isRecurringOneOnOne(evt))
+	if len(occurrences) == 0 && !isExhaustedOneOnOne && (evt.Status != models.EventStatusPaused || includePaused) {
 		isPaused := evt.Status == models.EventStatusPaused
 		occurrences = append(occurrences, occurrence{t: evt.Time, isPaused: isPaused})
 	}
@@ -1173,7 +1325,7 @@ func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupanc
 	for _, o := range occurrences {
 		booked := 0
 		if occupancy != nil {
-			booked = occupancy[o.t.Format(time.RFC3339)]
+			booked = occupancy[o.t.UTC().Format(time.RFC3339)]
 		}
 
 		availability = append(availability, models.OccurrenceAvailability{

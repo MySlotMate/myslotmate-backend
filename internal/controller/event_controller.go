@@ -123,6 +123,9 @@ type EventCreateRequestBody struct {
 	RecurrenceRule     *string                    `json:"recurrence_rule,omitempty"`
 	ScheduleType       *models.ScheduleType       `json:"schedule_type,omitempty"`
 	CustomDates        []string                   `json:"custom_dates,omitempty"`
+	SessionType        *models.SessionType        `json:"session_type,omitempty"`
+	BreakMinutes       *int                       `json:"break_minutes,omitempty"`
+	SessionWindows     models.SessionWindows      `json:"session_windows,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
 	AISuggestion       *string                    `json:"ai_suggestion,omitempty"`
 	PriceTiers         []service.PriceTierInput   `json:"price_tiers,omitempty"`
@@ -172,6 +175,9 @@ type EventUpdateRequestBody struct {
 	RecurrenceRule     *string                    `json:"recurrence_rule,omitempty"`
 	ScheduleType       *models.ScheduleType       `json:"schedule_type,omitempty"`
 	CustomDates        []string                   `json:"custom_dates,omitempty"`
+	SessionType        *models.SessionType        `json:"session_type,omitempty"`
+	BreakMinutes       *int                       `json:"break_minutes,omitempty"`
+	SessionWindows     models.SessionWindows      `json:"session_windows,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
 	PriceTiers         []service.PriceTierInput   `json:"price_tiers,omitempty"`
 
@@ -248,6 +254,9 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		RecurrenceRule:     req.RecurrenceRule,
 		ScheduleType:       req.ScheduleType,
 		CustomDates:        req.CustomDates,
+		SessionType:        req.SessionType,
+		BreakMinutes:       req.BreakMinutes,
+		SessionWindows:     req.SessionWindows,
 		CancellationPolicy: req.CancellationPolicy,
 		AISuggestion:       req.AISuggestion,
 		PriceTiers:         req.PriceTiers,
@@ -319,6 +328,9 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		RecurrenceRule:     body.RecurrenceRule,
 		ScheduleType:       body.ScheduleType,
 		CustomDates:        body.CustomDates,
+		SessionType:        body.SessionType,
+		BreakMinutes:       body.BreakMinutes,
+		SessionWindows:     body.SessionWindows,
 		CancellationPolicy: body.CancellationPolicy,
 		PriceTiers:         body.PriceTiers,
 

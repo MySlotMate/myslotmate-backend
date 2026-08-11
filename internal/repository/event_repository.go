@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"myslotmate-backend/internal/lib/event"
 	"myslotmate-backend/internal/lib/recurrence"
 	"myslotmate-backend/internal/models"
 	"strings"
@@ -18,10 +19,33 @@ import (
 // shows it. Non-recurring events and recurring events whose stored time is
 // already in the future are left untouched.
 func applyRecurrence(e *models.Event) {
-	if e == nil || !e.IsRecurring || e.RecurrenceRule == nil {
+	if e == nil {
 		return
 	}
 	now := time.Now()
+
+	// A recurring one-on-one event's sessions come from its weekly windows, not
+	// from `time`. Its RRULE says only "weekly", so stepping it in 7-day hops
+	// would pin `time` to whichever weekday the event was first created on —
+	// which stops being a real session the moment the host edits their windows.
+	// Derive the anchor from the windows instead, so it is always the next
+	// genuinely bookable session.
+	if e.SessionType == models.SessionTypeOneOnOne && event.HasWeeklyWindows(e.SessionWindows) {
+		duration := 60
+		if e.DurationMinutes != nil && *e.DurationMinutes > 0 {
+			duration = *e.DurationMinutes
+		}
+		if next, ok := event.NextWeeklySession(e.SessionWindows, duration, e.BreakMinutes, now); ok {
+			e.Time = next
+			end := next.Add(time.Duration(duration) * time.Minute)
+			e.EndTime = &end
+		}
+		return
+	}
+
+	if !e.IsRecurring || e.RecurrenceRule == nil {
+		return
+	}
 	if !e.Time.Before(now) {
 		return
 	}
@@ -79,7 +103,8 @@ var eventColumns = `id, host_id,
 	requires_attendee_details, attendee_fields,
 	terms_and_conditions, slug,
 	is_private, access_passkey, passkey_grants_free,
-	schedule_type, custom_dates`
+	schedule_type, custom_dates,
+	session_type, break_minutes, session_windows`
 
 func scanEvent(row interface {
 	Scan(dest ...interface{}) error
@@ -99,6 +124,7 @@ func scanEvent(row interface {
 		&e.TermsAndConditions, &e.Slug,
 		&e.IsPrivate, &e.AccessPasskey, &e.PasskeyGrantsFree,
 		&e.ScheduleType, &e.CustomDates,
+		&e.SessionType, &e.BreakMinutes, &e.SessionWindows,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -130,7 +156,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			requires_attendee_details, attendee_fields,
 			terms_and_conditions, slug,
 			is_private, access_passkey, passkey_grants_free,
-			schedule_type, custom_dates
+			schedule_type, custom_dates,
+			session_type, break_minutes, session_windows
 		) VALUES (
 			$1, $2,
 			$3, $4, $5, $6,
@@ -144,7 +171,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			$35, $36,
 			$37, $38,
 			$39, $40, $41,
-			$42, $43
+			$42, $43,
+			$44, $45, $46
 		)
 	`
 	if event.ID == uuid.Nil {
@@ -152,6 +180,9 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 	}
 	if event.ScheduleType == "" {
 		event.ScheduleType = models.ScheduleTypeOneTime
+	}
+	if event.SessionType == "" {
+		event.SessionType = models.SessionTypeGroup
 	}
 	_, err := r.db.ExecContext(ctx, query,
 		event.ID, event.HostID,
@@ -167,6 +198,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 		event.TermsAndConditions, event.Slug,
 		event.IsPrivate, event.AccessPasskey, event.PasskeyGrantsFree,
 		event.ScheduleType, pq.Array(event.CustomDates),
+		event.SessionType, event.BreakMinutes, event.SessionWindows,
 	)
 	return err
 }
@@ -184,11 +216,15 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 			requires_attendee_details = $34, attendee_fields = $35,
 			terms_and_conditions = $36, slug = $37,
 			is_private = $38, access_passkey = $39, passkey_grants_free = $40,
-			schedule_type = $41, custom_dates = $42
-		WHERE id = $43
+			schedule_type = $41, custom_dates = $42,
+			session_type = $43, break_minutes = $44, session_windows = $45
+		WHERE id = $46
 	`
 	if event.ScheduleType == "" {
 		event.ScheduleType = models.ScheduleTypeOneTime
+	}
+	if event.SessionType == "" {
+		event.SessionType = models.SessionTypeGroup
 	}
 	_, err := r.db.ExecContext(ctx, query,
 		event.Title, event.HookLine, event.Mood, event.Description,
@@ -202,6 +238,7 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 		event.TermsAndConditions, event.Slug,
 		event.IsPrivate, event.AccessPasskey, event.PasskeyGrantsFree,
 		event.ScheduleType, pq.Array(event.CustomDates),
+		event.SessionType, event.BreakMinutes, event.SessionWindows,
 		event.ID,
 	)
 	return err
@@ -348,6 +385,7 @@ func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, 
 			&e.TermsAndConditions, &e.Slug,
 			&e.IsPrivate, &e.AccessPasskey, &e.PasskeyGrantsFree,
 			&e.ScheduleType, &e.CustomDates,
+			&e.SessionType, &e.BreakMinutes, &e.SessionWindows,
 		); err != nil {
 			fmt.Printf("[EVENT_REPO] scanEvents Scan ERROR: %v\n", err)
 			return nil, err

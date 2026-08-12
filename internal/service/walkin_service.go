@@ -74,6 +74,21 @@ type WalkInInitiateRequest struct {
 	// event: when set, the event must belong to this host. Nil for the admin
 	// flow, which can book any event.
 	HostID *uuid.UUID
+	// PaymentCollectedOffline marks a paid event whose fee the host collected
+	// outside the platform (bulk import only — the interactive modal always takes
+	// payment through Razorpay). Books at ₹0 with no ledger or host earnings; see
+	// BookingCreateRequest.PaymentCollectedOffline.
+	PaymentCollectedOffline bool
+	// Source/ImportJobID tag the resulting booking for reporting. Source defaults
+	// to models.BookingSourceWalkIn when unset.
+	Source      string
+	ImportJobID *uuid.UUID
+	// IdempotencyKey overrides the random key the free path generates. The
+	// interactive modal leaves it empty (each click is a distinct attempt), but
+	// the bulk importer sets a key derived from job+row so a job re-driven after
+	// a process restart re-books nothing. Ignored on the paid path, whose key is
+	// already pinned to the Razorpay order.
+	IdempotencyKey string
 }
 
 // WalkInInitiateResponse tells the admin UI what to do next.
@@ -282,13 +297,23 @@ func (s *walkInService) InitiateWalkIn(ctx context.Context, req WalkInInitiateRe
 		}
 	}
 
-	// FREE event, or a coupon that comps it → create + confirm immediately, no
-	// gateway. CreateBooking validates + redeems the coupon and waives the price.
-	if totalAmount == 0 || couponCode != "" {
+	// FREE event, a coupon that comps it, or a paid event whose fee the host
+	// already collected offline → create + confirm immediately, no gateway.
+	// CreateBooking validates + redeems the coupon and waives the price.
+	if totalAmount == 0 || couponCode != "" || req.PaymentCollectedOffline {
 		// Unique per attempt — the duplicate guard above already prevents a guest
-		// double-booking the same slot, so a fresh key here is safe.
-		freeKey := "walkin_free_" + uuid.New().String()
-		booking, err := s.createAndConfirm(ctx, guest.ID, req.EventID, req.Quantity, occurrenceDate, freeKey, couponCode)
+		// double-booking the same slot, so a fresh key here is safe. Callers that
+		// need to retry an identical attempt safely (the bulk importer, resuming a
+		// job after a restart) supply their own stable key instead.
+		freeKey := strings.TrimSpace(req.IdempotencyKey)
+		if freeKey == "" {
+			freeKey = "walkin_free_" + uuid.New().String()
+		}
+		booking, err := s.createAndConfirm(ctx, guest.ID, req.EventID, req.Quantity, occurrenceDate, freeKey, couponCode, walkInBookingTags{
+			Source:                  req.Source,
+			ImportJobID:             req.ImportJobID,
+			PaymentCollectedOffline: req.PaymentCollectedOffline,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -380,13 +405,25 @@ func (s *walkInService) CompleteWalkIn(ctx context.Context, req WalkInCompleteRe
 	// payment books (a deterministic guest+event+date key would collide across
 	// separate attempts and silently skip the booking).
 	paidKey := "walkin_paid_" + req.RazorpayOrderID
-	return s.createAndConfirm(ctx, req.GuestUserID, req.EventID, req.Quantity, occurrenceDate, paidKey, "")
+	return s.createAndConfirm(ctx, req.GuestUserID, req.EventID, req.Quantity, occurrenceDate, paidKey, "", walkInBookingTags{})
+}
+
+// walkInBookingTags carries the reporting/money flags an on-spot or imported
+// booking needs. Zero value = a plain on-spot booking that paid normally.
+type walkInBookingTags struct {
+	Source                  string
+	ImportJobID             *uuid.UUID
+	PaymentCollectedOffline bool
 }
 
 // createAndConfirm runs the normal booking debit and confirms it in the same
 // transaction (AutoConfirm), without notifying the guest (synthetic contact).
-func (s *walkInService) createAndConfirm(ctx context.Context, guestID, eventID uuid.UUID, quantity int, occurrenceDate time.Time, idempotencyKey, couponCode string) (*models.Booking, error) {
+func (s *walkInService) createAndConfirm(ctx context.Context, guestID, eventID uuid.UUID, quantity int, occurrenceDate time.Time, idempotencyKey, couponCode string, tags walkInBookingTags) (*models.Booking, error) {
 	occ := occurrenceDate
+	source := tags.Source
+	if source == "" {
+		source = models.BookingSourceWalkIn
+	}
 	return s.bookingService.CreateBooking(ctx, guestID, BookingCreateRequest{
 		EventID:        eventID,
 		Quantity:       quantity,
@@ -396,7 +433,10 @@ func (s *walkInService) createAndConfirm(ctx context.Context, guestID, eventID u
 		AutoConfirm:    true,
 		Notify:         false,
 		// Host-driven on-spot booking for their own event — skip the guest passkey gate.
-		BypassPasskey: true,
+		BypassPasskey:           true,
+		Source:                  source,
+		ImportJobID:             tags.ImportJobID,
+		PaymentCollectedOffline: tags.PaymentCollectedOffline,
 	})
 }
 

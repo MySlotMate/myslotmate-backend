@@ -111,6 +111,41 @@ type BookingCreateRequest struct {
 	// gets the WhatsApp/email confirmation (false for admin on-spot bookings).
 	AutoConfirm bool
 	Notify      bool
+
+	// PaymentCollectedOffline records that the host already took the money for
+	// this booking OUTSIDE the platform (cash/UPI at the door), so the booking is
+	// written at amount_cents = 0.
+	//
+	// This is NOT "the booking is free" — money changed hands, the platform just
+	// never touched it. The consequences are deliberate and must stay true:
+	// no wallet debit, no transaction_ledger rows, no IncrementEarnings, no
+	// AddPendingClearance — the host is not owed a payout for money they already
+	// hold. Crediting earnings here would invent funds the platform never
+	// received and would later be paid out for real.
+	//
+	// The seat's value is still recorded: UnitPriceCents is snapshotted before
+	// the zeroing, so amount_cents = 0 with unit_price_cents > 0 is exactly the
+	// signature of a paid-offline seat.
+	//
+	// Set only by trusted server flows (bulk import). Never from an HTTP request
+	// — see the note on BypassPasskey; the controller builds this struct field by
+	// field from a separate body type, so it is not reachable from JSON.
+	PaymentCollectedOffline bool
+
+	// Source records how the booking was made (models.BookingSource*). Empty
+	// defaults to "online". ImportJobID links a bulk-imported booking back to its
+	// upload. Both are server-set only.
+	Source      string
+	ImportJobID *uuid.UUID
+}
+
+// bookingSource defaults an unset source to the normal guest checkout, so every
+// booking row carries a meaningful value without every call site setting one.
+func bookingSource(s string) string {
+	if s == "" {
+		return models.BookingSourceOnline
+	}
+	return s
 }
 
 // RefundDestination is where the refund money ends up on a user-initiated
@@ -333,6 +368,17 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		}
 	}
 
+	// 6c. Paid-offline (bulk import): the host already collected this money
+	// themselves, so nothing may move through the platform. Zeroing the total
+	// here — after unitPriceCents was snapshotted above — routes the rest of this
+	// function down the same no-money path a free event takes: no wallet debit,
+	// no ledger entries, no host earnings, no pending clearance. See the field
+	// comment on PaymentCollectedOffline for why crediting earnings would be a
+	// money-invention bug rather than a convenience.
+	if req.PaymentCollectedOffline {
+		totalAmount = 0
+	}
+
 	// 7. Get user account (must exist)
 	userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, userID)
 	if err != nil {
@@ -523,6 +569,8 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		PriceTierID:     priceTierID,
 		UnitPriceCents:  &unitPriceCents,
 		CouponID:        couponID,
+		Source:          bookingSource(req.Source),
+		ImportJobID:     req.ImportJobID,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
 	}

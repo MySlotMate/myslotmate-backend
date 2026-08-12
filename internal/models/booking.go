@@ -11,13 +11,29 @@ import (
 // instead of opaque user IDs.
 type Attendee struct {
 	Booking
-	UserName      string  `db:"user_name" json:"user_name"`
-	UserEmail     string  `db:"user_email" json:"user_email"`
+	UserName  string `db:"user_name" json:"user_name"`
+	UserEmail string `db:"user_email" json:"user_email"`
+	// UserPhone backs the host's "send ticket over WhatsApp" action. The host can
+	// already see this guest's name and email on their own event's roster, and
+	// cannot message them without it.
+	UserPhone     string  `db:"user_phone" json:"user_phone"`
 	UserAvatarURL *string `db:"user_avatar_url" json:"user_avatar_url,omitempty"`
 	// AttendeeProfile is the guest's submitted attendee details (name, age,
 	// Govt-ID URL, etc.), attached for the host roster. Nil when none saved.
 	AttendeeProfile *AttendeeProfile `json:"attendee_profile,omitempty"`
 }
+
+// How a booking was created. Recorded on every booking so host-made bookings
+// can be told apart from guest checkouts in reporting.
+//
+// BookingSourceWalkIn does NOT mean "no money moved" — the on-spot paid path
+// runs a real wallet debit. Only BookingSourceBulkImport on a job whose
+// PaymentMode is ImportPaymentOffline means the platform never saw the money.
+const (
+	BookingSourceOnline     = "online"
+	BookingSourceWalkIn     = "walk_in"
+	BookingSourceBulkImport = "bulk_import"
+)
 
 // Booking links a user to an event with quantity and status.
 type Booking struct {
@@ -35,6 +51,8 @@ type Booking struct {
 	PriceTierID                      *uuid.UUID    `db:"price_tier_id" json:"price_tier_id,omitempty"`           // chosen ticket tier (nil = single-price/free)
 	UnitPriceCents                   *int64        `db:"unit_price_cents" json:"unit_price_cents,omitempty"`     // per-ticket price snapshot at booking time
 	CouponID                         *uuid.UUID    `db:"coupon_id" json:"coupon_id,omitempty"`                   // comp coupon used to waive this booking (nil = none)
+	Source                           string        `db:"source" json:"source"`                                   // online | walk_in | bulk_import — see BookingSource* above
+	ImportJobID                      *uuid.UUID    `db:"import_job_id" json:"import_job_id,omitempty"`           // the bulk upload that created this booking (nil otherwise)
 	CheckedInCount                   int           `db:"checked_in_count" json:"checked_in_count"`               // guests admitted so far; a group may arrive in waves, capped at Quantity
 	LastCheckedInAt                  *time.Time    `db:"last_checked_in_at" json:"last_checked_in_at,omitempty"` // most recent door scan
 	CreatedAt                        time.Time     `db:"created_at" json:"created_at"`

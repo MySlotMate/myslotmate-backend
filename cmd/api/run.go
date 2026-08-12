@@ -128,6 +128,7 @@ func main() {
 	experienceTemplateRepo := repository.NewExperienceTemplateRepository(dbConn)
 	eventPriceTierRepo := repository.NewEventPriceTierRepository(dbConn)
 	attendeeProfileRepo := repository.NewAttendeeProfileRepository(dbConn)
+	bookingImportRepo := repository.NewBookingImportRepository(dbConn)
 	couponRepo := repository.NewCouponRepository(dbConn)
 
 	// Ensure platform account exists for fee tracking
@@ -218,6 +219,12 @@ func main() {
 	couponController := controller.NewCouponController(couponRepo, bookingService, eventRepo)
 	walkInService := service.NewWalkInService(userRepo, bookingRepo, eventRepo, eventPriceTierRepo, attendeeProfileRepo, userService, bookingService)
 	walkInController := controller.NewWalkInController(walkInService, userRepo, hostRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
+	bookingImportService := service.NewBookingImportService(bookingImportRepo, eventRepo, eventPriceTierRepo, walkInService, bookingService, workerPool)
+	bookingImportController := controller.NewBookingImportController(bookingImportService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
+	// Re-drive imports a previous process left mid-flight — the worker pool is
+	// in-memory, so a PM2/Render restart otherwise strands them at 'processing'
+	// with rows still pending.
+	bookingImportService.ResumeInterrupted(context.Background())
 	reviewController := controller.NewReviewController(reviewService)
 	inboxController := controller.NewInboxController(inboxService)
 	payoutController := controller.NewPayoutController(payoutService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
@@ -271,6 +278,7 @@ func main() {
 		bookingController,
 		couponController,
 		walkInController,
+		bookingImportController,
 		reviewController,
 		inboxController,
 		payoutController,

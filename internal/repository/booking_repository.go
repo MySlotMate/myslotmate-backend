@@ -249,13 +249,15 @@ func (r *postgresBookingRepository) CheckInGuests(ctx context.Context, p CheckIn
 }
 
 // bookingColumns is the canonical column list for SELECT queries.
-const bookingColumns = `id, event_id, user_id, occurrence_date, quantity, status, payment_id, idempotency_key, amount_cents, service_fee_cents, net_earning_cents, created_at, updated_at, cancelled_at, notification_sent_whatsapp, notification_sent_email, reminder_notification_sent_email, reminder_notification_sent_at, reminder_notification_sent_whatsapp, reminder_whatsapp_sent_at, price_tier_id, unit_price_cents, checked_in_count, last_checked_in_at, coupon_id`
+const bookingColumns = `id, event_id, user_id, occurrence_date, quantity, status, payment_id, idempotency_key, amount_cents, service_fee_cents, net_earning_cents, created_at, updated_at, cancelled_at, notification_sent_whatsapp, notification_sent_email, reminder_notification_sent_email, reminder_notification_sent_at, reminder_notification_sent_whatsapp, reminder_whatsapp_sent_at, price_tier_id, unit_price_cents, checked_in_count, last_checked_in_at, coupon_id, source, import_job_id`
 
 // scanBooking scans a single row into a Booking struct.
-func scanBooking(scanner interface{ Scan(dest ...interface{}) error }) (*models.Booking, error) {
+func scanBooking(scanner interface {
+	Scan(dest ...interface{}) error
+}) (*models.Booking, error) {
 	b := &models.Booking{}
 	err := scanner.Scan(
-		&b.ID, &b.EventID, &b.UserID, &b.OccurrenceDate, &b.Quantity, &b.Status, &b.PaymentID, &b.IdempotencyKey, &b.AmountCents, &b.ServiceFeeCents, &b.NetEarningCents, &b.CreatedAt, &b.UpdatedAt, &b.CancelledAt, &b.NotificationSentWhatsapp, &b.NotificationSentEmail, &b.ReminderNotificationSentEmail, &b.ReminderNotificationSentAt, &b.ReminderNotificationSentWhatsapp, &b.ReminderWhatsappSentAt, &b.PriceTierID, &b.UnitPriceCents, &b.CheckedInCount, &b.LastCheckedInAt, &b.CouponID,
+		&b.ID, &b.EventID, &b.UserID, &b.OccurrenceDate, &b.Quantity, &b.Status, &b.PaymentID, &b.IdempotencyKey, &b.AmountCents, &b.ServiceFeeCents, &b.NetEarningCents, &b.CreatedAt, &b.UpdatedAt, &b.CancelledAt, &b.NotificationSentWhatsapp, &b.NotificationSentEmail, &b.ReminderNotificationSentEmail, &b.ReminderNotificationSentAt, &b.ReminderNotificationSentWhatsapp, &b.ReminderWhatsappSentAt, &b.PriceTierID, &b.UnitPriceCents, &b.CheckedInCount, &b.LastCheckedInAt, &b.CouponID, &b.Source, &b.ImportJobID,
 	)
 	if err != nil {
 		return nil, err
@@ -278,14 +280,14 @@ func scanBookingRows(rows *sql.Rows) ([]*models.Booking, error) {
 
 func (r *postgresBookingRepository) Create(ctx context.Context, booking *models.Booking) error {
 	query := `
-		INSERT INTO bookings (id, event_id, user_id, occurrence_date, quantity, status, payment_id, idempotency_key, amount_cents, service_fee_cents, net_earning_cents, notification_sent_whatsapp, notification_sent_email, reminder_notification_sent_email, reminder_notification_sent_whatsapp, created_at, updated_at, price_tier_id, unit_price_cents, coupon_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		INSERT INTO bookings (id, event_id, user_id, occurrence_date, quantity, status, payment_id, idempotency_key, amount_cents, service_fee_cents, net_earning_cents, notification_sent_whatsapp, notification_sent_email, reminder_notification_sent_email, reminder_notification_sent_whatsapp, created_at, updated_at, price_tier_id, unit_price_cents, coupon_id, source, import_job_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 	`
 	if booking.ID == uuid.Nil {
 		booking.ID = uuid.New()
 	}
 	_, err := r.db.ExecContext(ctx, query,
-		booking.ID, booking.EventID, booking.UserID, booking.OccurrenceDate, booking.Quantity, booking.Status, booking.PaymentID, booking.IdempotencyKey, booking.AmountCents, booking.ServiceFeeCents, booking.NetEarningCents, booking.NotificationSentWhatsapp, booking.NotificationSentEmail, booking.ReminderNotificationSentEmail, booking.ReminderNotificationSentWhatsapp, booking.CreatedAt, booking.UpdatedAt, booking.PriceTierID, booking.UnitPriceCents, booking.CouponID,
+		booking.ID, booking.EventID, booking.UserID, booking.OccurrenceDate, booking.Quantity, booking.Status, booking.PaymentID, booking.IdempotencyKey, booking.AmountCents, booking.ServiceFeeCents, booking.NetEarningCents, booking.NotificationSentWhatsapp, booking.NotificationSentEmail, booking.ReminderNotificationSentEmail, booking.ReminderNotificationSentWhatsapp, booking.CreatedAt, booking.UpdatedAt, booking.PriceTierID, booking.UnitPriceCents, booking.CouponID, booking.Source, booking.ImportJobID,
 	)
 	return err
 }
@@ -324,15 +326,15 @@ func (r *postgresBookingRepository) ListByEventID(ctx context.Context, eventID u
 }
 
 // attendeeColumns extends bookingColumns with the joined user fields.
-const attendeeColumns = `b.id, b.event_id, b.user_id, b.occurrence_date, b.quantity, b.status, b.payment_id, b.idempotency_key, b.amount_cents, b.service_fee_cents, b.net_earning_cents, b.created_at, b.updated_at, b.cancelled_at, b.notification_sent_whatsapp, b.notification_sent_email, b.reminder_notification_sent_email, b.reminder_notification_sent_at, b.reminder_notification_sent_whatsapp, b.reminder_whatsapp_sent_at, b.price_tier_id, b.unit_price_cents, u.name AS user_name, u.email AS user_email, u.avatar_url AS user_avatar_url`
+const attendeeColumns = `b.id, b.event_id, b.user_id, b.occurrence_date, b.quantity, b.status, b.payment_id, b.idempotency_key, b.amount_cents, b.service_fee_cents, b.net_earning_cents, b.created_at, b.updated_at, b.cancelled_at, b.notification_sent_whatsapp, b.notification_sent_email, b.reminder_notification_sent_email, b.reminder_notification_sent_at, b.reminder_notification_sent_whatsapp, b.reminder_whatsapp_sent_at, b.price_tier_id, b.unit_price_cents, b.source, b.import_job_id, u.name AS user_name, u.email AS user_email, u.phn_number AS user_phone, u.avatar_url AS user_avatar_url`
 
 func scanAttendeeRows(rows *sql.Rows) ([]*models.Attendee, error) {
 	var attendees []*models.Attendee
 	for rows.Next() {
 		a := &models.Attendee{}
 		if err := rows.Scan(
-			&a.ID, &a.EventID, &a.UserID, &a.OccurrenceDate, &a.Quantity, &a.Status, &a.PaymentID, &a.IdempotencyKey, &a.AmountCents, &a.ServiceFeeCents, &a.NetEarningCents, &a.CreatedAt, &a.UpdatedAt, &a.CancelledAt, &a.NotificationSentWhatsapp, &a.NotificationSentEmail, &a.ReminderNotificationSentEmail, &a.ReminderNotificationSentAt, &a.ReminderNotificationSentWhatsapp, &a.ReminderWhatsappSentAt, &a.PriceTierID, &a.UnitPriceCents,
-			&a.UserName, &a.UserEmail, &a.UserAvatarURL,
+			&a.ID, &a.EventID, &a.UserID, &a.OccurrenceDate, &a.Quantity, &a.Status, &a.PaymentID, &a.IdempotencyKey, &a.AmountCents, &a.ServiceFeeCents, &a.NetEarningCents, &a.CreatedAt, &a.UpdatedAt, &a.CancelledAt, &a.NotificationSentWhatsapp, &a.NotificationSentEmail, &a.ReminderNotificationSentEmail, &a.ReminderNotificationSentAt, &a.ReminderNotificationSentWhatsapp, &a.ReminderWhatsappSentAt, &a.PriceTierID, &a.UnitPriceCents, &a.Source, &a.ImportJobID,
+			&a.UserName, &a.UserEmail, &a.UserPhone, &a.UserAvatarURL,
 		); err != nil {
 			return nil, err
 		}

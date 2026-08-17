@@ -206,7 +206,25 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 			e.total_bookings,
 			e.avg_rating,
 			e.status,
-			(NOT e.is_recurring AND e.time IS NOT NULL AND e.time < now()) AS is_expired,
+			-- An event is expired only when nothing of it is still ahead.
+			--
+			-- e.time is the FIRST date and is never rolled forward for a
+			-- custom_dates event, so "time < now()" alone marks a three-date
+			-- event expired the moment its first date passes — while the other
+			-- two are still bookable. Any future entry in custom_dates keeps it
+			-- live. The CASE guards the cast: a malformed entry yields NULL
+			-- rather than erroring the whole listing query.
+			(
+				NOT e.is_recurring
+				AND e.time IS NOT NULL
+				AND e.time < now()
+				AND NOT EXISTS (
+					SELECT 1
+					FROM unnest(COALESCE(e.custom_dates, '{}'::text[])) AS d
+					WHERE (CASE WHEN d ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+						THEN d::timestamptz ELSE NULL END) > now()
+				)
+			) AS is_expired,
 			h.first_name,
 			h.last_name,
 			h.city

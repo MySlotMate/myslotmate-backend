@@ -104,7 +104,8 @@ var eventColumns = `id, host_id,
 	terms_and_conditions, slug,
 	is_private, access_passkey, passkey_grants_free,
 	schedule_type, custom_dates,
-	session_type, break_minutes, session_windows`
+	session_type, break_minutes, session_windows,
+	private_access_mode`
 
 func scanEvent(row interface {
 	Scan(dest ...interface{}) error
@@ -125,6 +126,7 @@ func scanEvent(row interface {
 		&e.IsPrivate, &e.AccessPasskey, &e.PasskeyGrantsFree,
 		&e.ScheduleType, &e.CustomDates,
 		&e.SessionType, &e.BreakMinutes, &e.SessionWindows,
+		&e.PrivateAccessMode,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -157,7 +159,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			terms_and_conditions, slug,
 			is_private, access_passkey, passkey_grants_free,
 			schedule_type, custom_dates,
-			session_type, break_minutes, session_windows
+			session_type, break_minutes, session_windows,
+			private_access_mode
 		) VALUES (
 			$1, $2,
 			$3, $4, $5, $6,
@@ -172,7 +175,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			$37, $38,
 			$39, $40, $41,
 			$42, $43,
-			$44, $45, $46
+			$44, $45, $46,
+			$47
 		)
 	`
 	if event.ID == uuid.Nil {
@@ -183,6 +187,9 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 	}
 	if event.SessionType == "" {
 		event.SessionType = models.SessionTypeGroup
+	}
+	if event.PrivateAccessMode == "" {
+		event.PrivateAccessMode = models.PrivateAccessModePasskey
 	}
 	_, err := r.db.ExecContext(ctx, query,
 		event.ID, event.HostID,
@@ -199,6 +206,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 		event.IsPrivate, event.AccessPasskey, event.PasskeyGrantsFree,
 		event.ScheduleType, pq.Array(event.CustomDates),
 		event.SessionType, event.BreakMinutes, event.SessionWindows,
+		event.PrivateAccessMode,
 	)
 	return err
 }
@@ -217,14 +225,18 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 			terms_and_conditions = $36, slug = $37,
 			is_private = $38, access_passkey = $39, passkey_grants_free = $40,
 			schedule_type = $41, custom_dates = $42,
-			session_type = $43, break_minutes = $44, session_windows = $45
-		WHERE id = $46
+			session_type = $43, break_minutes = $44, session_windows = $45,
+			private_access_mode = $46
+		WHERE id = $47
 	`
 	if event.ScheduleType == "" {
 		event.ScheduleType = models.ScheduleTypeOneTime
 	}
 	if event.SessionType == "" {
 		event.SessionType = models.SessionTypeGroup
+	}
+	if event.PrivateAccessMode == "" {
+		event.PrivateAccessMode = models.PrivateAccessModePasskey
 	}
 	_, err := r.db.ExecContext(ctx, query,
 		event.Title, event.HookLine, event.Mood, event.Description,
@@ -239,6 +251,7 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 		event.IsPrivate, event.AccessPasskey, event.PasskeyGrantsFree,
 		event.ScheduleType, pq.Array(event.CustomDates),
 		event.SessionType, event.BreakMinutes, event.SessionWindows,
+		event.PrivateAccessMode,
 		event.ID,
 	)
 	return err
@@ -386,6 +399,7 @@ func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, 
 			&e.IsPrivate, &e.AccessPasskey, &e.PasskeyGrantsFree,
 			&e.ScheduleType, &e.CustomDates,
 			&e.SessionType, &e.BreakMinutes, &e.SessionWindows,
+			&e.PrivateAccessMode,
 		); err != nil {
 			fmt.Printf("[EVENT_REPO] scanEvents Scan ERROR: %v\n", err)
 			return nil, err

@@ -145,6 +145,11 @@ type Event struct {
 	IsPrivate         bool    `db:"is_private" json:"is_private"`
 	AccessPasskey     *string `db:"access_passkey" json:"access_passkey,omitempty"`
 	PasskeyGrantsFree bool    `db:"passkey_grants_free" json:"passkey_grants_free"`
+	// PrivateAccessMode picks WHICH gate a private event uses: a passkey the
+	// guest types, or an approved join request. Meaningless when IsPrivate is
+	// false. Unlike AccessPasskey this is NOT stripped from the public event
+	// response — the booking page has to know which gate to render.
+	PrivateAccessMode PrivateAccessMode `db:"private_access_mode" json:"private_access_mode"`
 
 	// ── Policies ────────────────────────────────────────────────────────────
 	CancellationPolicy *CancellationPolicy `db:"cancellation_policy" json:"cancellation_policy,omitempty"`

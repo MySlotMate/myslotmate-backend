@@ -21,13 +21,13 @@ import (
 	cfgfirebase "myslotmate-backend/internal/firebase"
 	"myslotmate-backend/internal/lib/event"
 	"myslotmate-backend/internal/lib/identity"
+	"myslotmate-backend/internal/lib/messagecentral"
 	"myslotmate-backend/internal/lib/notification"
 	"myslotmate-backend/internal/lib/payment"
 	"myslotmate-backend/internal/lib/payout"
 	"myslotmate-backend/internal/lib/rag"
 	"myslotmate-backend/internal/lib/realtime"
 	"myslotmate-backend/internal/lib/storage"
-	"myslotmate-backend/internal/lib/messagecentral"
 	"myslotmate-backend/internal/lib/worker"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
@@ -130,6 +130,7 @@ func main() {
 	attendeeProfileRepo := repository.NewAttendeeProfileRepository(dbConn)
 	bookingImportRepo := repository.NewBookingImportRepository(dbConn)
 	couponRepo := repository.NewCouponRepository(dbConn)
+	joinRequestRepo := repository.NewJoinRequestRepository(dbConn)
 
 	// Ensure platform account exists for fee tracking
 	if err := ensurePlatformAccount(ctx, accountRepo); err != nil {
@@ -198,8 +199,9 @@ func main() {
 
 	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, ledgerRepo, attendeeProfileRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService, otpClient, cfg.AdminAuth.JWTSecret, fbApp.Auth)
 	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, uploadService, dispatcher, notifService)
-	bookingService := service.NewBookingService(dbConn, bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, couponRepo, userService, dispatcher, notifService)
+	bookingService := service.NewBookingService(dbConn, bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, couponRepo, joinRequestRepo, userService, dispatcher, notifService)
 	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, dispatcher, bookingService)
+	joinRequestService := service.NewJoinRequestService(joinRequestRepo, eventRepo, attendeeProfileRepo, hostRepo, service.NewJoinRequestNotifier(notifService))
 	reviewService := service.NewReviewService(reviewRepo, eventRepo, hostRepo, dispatcher)
 	inboxService := service.NewInboxService(inboxRepo, eventRepo, socketService)
 	supportService := service.NewSupportService(supportRepo)
@@ -217,6 +219,7 @@ func main() {
 	eventController := controller.NewEventController(eventService)
 	bookingController := controller.NewBookingController(bookingService)
 	couponController := controller.NewCouponController(couponRepo, bookingService, eventRepo)
+	joinRequestController := controller.NewJoinRequestController(joinRequestService, userRepo, hostRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	walkInService := service.NewWalkInService(userRepo, bookingRepo, eventRepo, eventPriceTierRepo, attendeeProfileRepo, userService, bookingService)
 	walkInController := controller.NewWalkInController(walkInService, userRepo, hostRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	bookingImportService := service.NewBookingImportService(bookingImportRepo, eventRepo, eventPriceTierRepo, walkInService, bookingService, workerPool)
@@ -277,6 +280,7 @@ func main() {
 		eventController,
 		bookingController,
 		couponController,
+		joinRequestController,
 		walkInController,
 		bookingImportController,
 		reviewController,

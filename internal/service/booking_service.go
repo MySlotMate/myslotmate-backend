@@ -173,6 +173,7 @@ type bookingService struct {
 	tierRepo            repository.EventPriceTierRepository
 	attendeeRepo        repository.AttendeeProfileRepository
 	couponRepo          repository.CouponRepository
+	joinRequestRepo     repository.JoinRequestRepository
 	userService         UserService // for chaining source-refund on cancel
 	dispatcher          *event.Dispatcher
 	notificationService notification.NotificationService
@@ -191,6 +192,7 @@ func NewBookingService(
 	tr repository.EventPriceTierRepository,
 	apr repository.AttendeeProfileRepository,
 	cr repository.CouponRepository,
+	jrr repository.JoinRequestRepository,
 	us UserService,
 	d *event.Dispatcher,
 	ns notification.NotificationService,
@@ -208,6 +210,7 @@ func NewBookingService(
 		tierRepo:            tr,
 		attendeeRepo:        apr,
 		couponRepo:          cr,
+		joinRequestRepo:     jrr,
 		userService:         us,
 		dispatcher:          d,
 		notificationService: ns,
@@ -267,13 +270,33 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	}
 
 	// 3c. Private-event gate — the authoritative check behind the client's unlock
-	// prompt. A private event books only with either (a) the shared access
-	// passkey, or (b) a valid per-guest code (a coupon), whichever the guest
-	// entered. The per-guest code may arrive in coupon_code or the passkey field.
-	// A code that unlocks also comps the booking (see step 6b). Never trust a
-	// client-side "unlocked" flag; trusted host flows (walk-in) bypass this.
+	// prompt. Never trust a client-side "unlocked" flag; trusted host flows
+	// (walk-in) bypass this deliberately, because a host admitting someone at the
+	// door IS the approval.
+	//
+	// Which gate applies depends on the event's PrivateAccessMode:
+	//
+	//   rsvp    — the guest must hold an APPROVED join request. A passkey or
+	//             coupon must NOT open this door, or the host's vetting could be
+	//             bypassed by anyone holding a code.
+	//   passkey — the original behaviour: the shared access passkey, or a valid
+	//             per-guest code (a coupon), whichever the guest entered. The
+	//             code may arrive in coupon_code or the passkey field, and a code
+	//             that unlocks also comps the booking (see step 6b).
 	var gateCoupon *models.Coupon
-	if evt.IsPrivate && !req.BypassPasskey {
+	if evt.IsPrivate && !req.BypassPasskey && evt.PrivateAccessMode == models.PrivateAccessModeRSVP {
+		approved := false
+		if s.joinRequestRepo != nil {
+			jr, err := s.joinRequestRepo.GetLiveForUser(ctx, evt.ID, userID)
+			if err != nil {
+				return nil, err
+			}
+			approved = jr != nil && jr.Status == models.JoinRequestApproved
+		}
+		if !approved {
+			return nil, errors.New("your request to join this experience hasn't been approved yet")
+		}
+	} else if evt.IsPrivate && !req.BypassPasskey {
 		unlocked := passkeyMatches(evt, req.Passkey)
 		if !unlocked {
 			candidate := strings.TrimSpace(req.CouponCode)

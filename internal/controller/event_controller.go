@@ -126,6 +126,7 @@ type EventCreateRequestBody struct {
 	SessionType        *models.SessionType        `json:"session_type,omitempty"`
 	BreakMinutes       *int                       `json:"break_minutes,omitempty"`
 	SessionWindows     models.SessionWindows      `json:"session_windows,omitempty"`
+	PrivateAccessMode  *models.PrivateAccessMode  `json:"private_access_mode,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
 	AISuggestion       *string                    `json:"ai_suggestion,omitempty"`
 	PriceTiers         []service.PriceTierInput   `json:"price_tiers,omitempty"`
@@ -178,6 +179,7 @@ type EventUpdateRequestBody struct {
 	SessionType        *models.SessionType        `json:"session_type,omitempty"`
 	BreakMinutes       *int                       `json:"break_minutes,omitempty"`
 	SessionWindows     models.SessionWindows      `json:"session_windows,omitempty"`
+	PrivateAccessMode  *models.PrivateAccessMode  `json:"private_access_mode,omitempty"`
 	CancellationPolicy *models.CancellationPolicy `json:"cancellation_policy,omitempty"`
 	PriceTiers         []service.PriceTierInput   `json:"price_tiers,omitempty"`
 
@@ -257,6 +259,7 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		SessionType:        req.SessionType,
 		BreakMinutes:       req.BreakMinutes,
 		SessionWindows:     req.SessionWindows,
+		PrivateAccessMode:  req.PrivateAccessMode,
 		CancellationPolicy: req.CancellationPolicy,
 		AISuggestion:       req.AISuggestion,
 		PriceTiers:         req.PriceTiers,
@@ -331,6 +334,7 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		SessionType:        body.SessionType,
 		BreakMinutes:       body.BreakMinutes,
 		SessionWindows:     body.SessionWindows,
+		PrivateAccessMode:  body.PrivateAccessMode,
 		CancellationPolicy: body.CancellationPolicy,
 		PriceTiers:         body.PriceTiers,
 

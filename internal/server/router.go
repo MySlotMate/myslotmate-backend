@@ -46,6 +46,7 @@ func NewRouter(
 	eventCtrl *controller.EventController,
 	bookingCtrl *controller.BookingController,
 	couponCtrl *controller.CouponController,
+	joinRequestCtrl *controller.JoinRequestController,
 	walkInCtrl *controller.WalkInController,
 	bookingImportCtrl *controller.BookingImportController,
 	reviewCtrl *controller.ReviewController,
@@ -114,6 +115,11 @@ func NewRouter(
 
 	if couponCtrl != nil {
 		couponCtrl.RegisterRoutes(r)
+	}
+
+	if joinRequestCtrl != nil {
+		joinRequestCtrl.RegisterRoutes(r)
+		joinRequestCtrl.RegisterAdminRoutes(r)
 	}
 
 	if bookingCtrl != nil {

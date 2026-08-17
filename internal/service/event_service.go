@@ -99,9 +99,10 @@ type EventCreateRequest struct {
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
 
-	IsPrivate         bool    `json:"is_private"`
-	AccessPasskey     *string `json:"access_passkey,omitempty"`
-	PasskeyGrantsFree bool    `json:"passkey_grants_free"`
+	IsPrivate         bool                      `json:"is_private"`
+	AccessPasskey     *string                   `json:"access_passkey,omitempty"`
+	PrivateAccessMode *models.PrivateAccessMode `json:"private_access_mode,omitempty"`
+	PasskeyGrantsFree bool                      `json:"passkey_grants_free"`
 }
 
 type EventUpdateRequest struct {
@@ -142,9 +143,10 @@ type EventUpdateRequest struct {
 	AttendeeFields          []string `json:"attendee_fields,omitempty"`
 	TermsAndConditions      *string  `json:"terms_and_conditions,omitempty"`
 
-	IsPrivate         *bool   `json:"is_private,omitempty"`
-	AccessPasskey     *string `json:"access_passkey,omitempty"`
-	PasskeyGrantsFree *bool   `json:"passkey_grants_free,omitempty"`
+	IsPrivate         *bool                     `json:"is_private,omitempty"`
+	AccessPasskey     *string                   `json:"access_passkey,omitempty"`
+	PrivateAccessMode *models.PrivateAccessMode `json:"private_access_mode,omitempty"`
+	PasskeyGrantsFree *bool                     `json:"passkey_grants_free,omitempty"`
 }
 
 type eventService struct {
@@ -302,6 +304,7 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 
 		IsPrivate:         req.IsPrivate,
 		AccessPasskey:     normalizePasskey(req.AccessPasskey),
+		PrivateAccessMode: privateAccessMode(req.PrivateAccessMode),
 		PasskeyGrantsFree: req.PasskeyGrantsFree,
 	}
 
@@ -315,6 +318,11 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		return s.eventRepo.SlugExists(ctx, candidate)
 	})
 	if err != nil {
+		return nil, err
+	}
+
+	applyPrivacyInvariants(newEvent)
+	if err := validatePrivacyConfig(newEvent); err != nil {
 		return nil, err
 	}
 
@@ -341,6 +349,47 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 }
 
 // tierInputsToModels converts API tier inputs into tier models for persistence.
+// privateAccessMode defaults an unset mode to the original passkey behaviour,
+// so every existing caller keeps working unchanged.
+func privateAccessMode(m *models.PrivateAccessMode) models.PrivateAccessMode {
+	if m != nil && *m == models.PrivateAccessModeRSVP {
+		return models.PrivateAccessModeRSVP
+	}
+	return models.PrivateAccessModePasskey
+}
+
+// validatePrivacyConfig rejects a private event whose gate can't actually work.
+//
+// An RSVP host decides who gets in from what the guest submits, so the request
+// form must ask for something: with no required attendee fields every request
+// would arrive as a bare name and there would be nothing to judge. The clients
+// check this too, but this is the guard that actually holds.
+func validatePrivacyConfig(evt *models.Event) error {
+	if !evt.IsPrivate || evt.PrivateAccessMode != models.PrivateAccessModeRSVP {
+		return nil
+	}
+	if !evt.RequiresAttendeeDetails || len(evt.AttendeeFields) == 0 {
+		return errors.New("a request-to-join experience must require attendee details with at least one field")
+	}
+	return nil
+}
+
+// applyPrivacyInvariants keeps the two private-access gates mutually exclusive.
+//
+// An RSVP event must carry no passkey: leaving one behind would give the event a
+// second, unintended door that bypasses the host's vetting entirely (the booking
+// gate checks one OR the other, never both). A public event carries neither.
+func applyPrivacyInvariants(evt *models.Event) {
+	if !evt.IsPrivate {
+		evt.PrivateAccessMode = models.PrivateAccessModePasskey
+		return
+	}
+	if evt.PrivateAccessMode == models.PrivateAccessModeRSVP {
+		evt.AccessPasskey = nil
+		evt.PasskeyGrantsFree = false
+	}
+}
+
 // normalizePasskey trims a supplied passkey; an empty (or whitespace-only) value
 // becomes nil so a private event never carries a blank, un-typeable passkey.
 func normalizePasskey(p *string) *string {
@@ -521,11 +570,19 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 	// A nil AccessPasskey keeps the current passkey (so the host can toggle other
 	// fields without re-entering it); a supplied value replaces it. An explicit
 	// empty string clears it.
+	if req.PrivateAccessMode != nil && *req.PrivateAccessMode != "" {
+		evt.PrivateAccessMode = privateAccessMode(req.PrivateAccessMode)
+	}
 	if req.AccessPasskey != nil {
 		evt.AccessPasskey = normalizePasskey(req.AccessPasskey)
 	}
 	if req.PasskeyGrantsFree != nil {
 		evt.PasskeyGrantsFree = *req.PasskeyGrantsFree
+	}
+
+	applyPrivacyInvariants(evt)
+	if err := validatePrivacyConfig(evt); err != nil {
+		return nil, err
 	}
 
 	if err := s.eventRepo.Update(ctx, evt); err != nil {

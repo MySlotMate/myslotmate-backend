@@ -301,3 +301,25 @@ func (c *KapsoClient) SendHostPendingAlertTemplateMessage(ctx context.Context, t
 
 	return c.SendTemplateMessage(ctx, to, templateName, languageCode, components)
 }
+
+// SendTwoParamTemplateMessage sends a body-only template with two named text
+// parameters. Both RSVP templates have that shape — "{{name}} asked to join
+// {{event_name}}" and "{{name}}, you're approved for {{event_name}}" — so one
+// sender covers them and any future template of the same form.
+func (c *KapsoClient) SendTwoParamTemplateMessage(
+	ctx context.Context,
+	to, templateName, languageCode string,
+	firstName, firstValue string,
+	secondName, secondValue string,
+) error {
+	components := []TemplateComponent{
+		{
+			Type: "body",
+			Parameters: []TemplateParameter{
+				{Type: "text", ParameterName: firstName, Text: firstValue},
+				{Type: "text", ParameterName: secondName, Text: secondValue},
+			},
+		},
+	}
+	return c.SendTemplateMessage(ctx, to, templateName, languageCode, components)
+}

@@ -102,6 +102,14 @@ type KapsoConfig struct {
 	ReminderTemplateLang  string
 	HostAlertTemplateName string
 	HostAlertTemplateLang string
+	// RSVP join requests: one template tells the host someone applied, the
+	// other tells the guest they were approved. Both must exist and be approved
+	// in the WhatsApp Business account before they can deliver outside the
+	// 24-hour session window.
+	JoinRequestTemplateName  string
+	JoinRequestTemplateLang  string
+	JoinApprovedTemplateName string
+	JoinApprovedTemplateLang string
 }
 
 // MessageCentralConfig holds Message Central VerifyNow credentials.
@@ -233,6 +241,11 @@ func Load() (*Config, error) {
 			ReminderTemplateLang:  getEnv("KAPSO_REMINDER_TEMPLATE_LANG", "en_US"),
 			HostAlertTemplateName: getEnv("KAPSO_HOST_ALERT_TEMPLATE_NAME", "host_application_alert"),
 			HostAlertTemplateLang: getEnv("KAPSO_HOST_ALERT_TEMPLATE_LANG", "en_US"),
+
+			JoinRequestTemplateName:  getEnv("KAPSO_JOIN_REQUEST_TEMPLATE_NAME", "join_request_received"),
+			JoinRequestTemplateLang:  getEnv("KAPSO_JOIN_REQUEST_TEMPLATE_LANG", "en_US"),
+			JoinApprovedTemplateName: getEnv("KAPSO_JOIN_APPROVED_TEMPLATE_NAME", "join_request_approved"),
+			JoinApprovedTemplateLang: getEnv("KAPSO_JOIN_APPROVED_TEMPLATE_LANG", "en_US"),
 		},
 		MessageCentral: MessageCentralConfig{
 			CustomerID: getEnv("MSGCENTRAL_CUSTOMER_ID", ""),

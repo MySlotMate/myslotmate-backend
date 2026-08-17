@@ -63,6 +63,9 @@ type NotificationService interface {
 	GetKapsoClient() *KapsoClient
 	SendCustomEmail(ctx context.Context, to string, subject string, htmlBody string) error
 	SendAdminHostPendingAlert(ctx context.Context, hostName string, hostCity string, hostPhone string, adminPhoneNumbers []string) error
+	// RSVP join requests — see the implementations for the delivery strategy.
+	SendJoinRequestReceivedWhatsapp(ctx context.Context, hostPhone, hostName, guestName, eventTitle string) error
+	SendJoinRequestApprovedWhatsapp(ctx context.Context, guestPhone, guestName, eventTitle string) error
 }
 
 // NewTwilioNotificationService creates a new Twilio notification service
@@ -438,4 +441,113 @@ func (s *TwilioNotificationService) SendAdminHostPendingAlert(ctx context.Contex
 	}
 
 	return lastErr
+}
+
+// ── RSVP join requests ──────────────────────────────────────────────────────
+//
+// Two WhatsApp messages carry the RSVP flow: the host is told someone applied,
+// and the guest is told the answer. Both follow the same delivery strategy as
+// SendAdminHostPendingAlert — try a free-form text first (cheap, and allowed
+// while a 24-hour session window is open), and fall back to a pre-approved
+// template when WhatsApp rejects it for being outside that window.
+//
+// Both are best-effort by design: a request must still be recorded, and an
+// approval must still stand, if WhatsApp is down or the template is missing.
+
+// sendWhatsAppWithTemplateFallback is the shared delivery path for the two RSVP
+// messages. `tag` only labels the logs.
+func (s *TwilioNotificationService) sendWhatsAppWithTemplateFallback(
+	ctx context.Context,
+	tag, to, message string,
+	templateName, templateLang string,
+	firstName, firstValue, secondName, secondValue string,
+) error {
+	to = strings.TrimSpace(to)
+	if to == "" {
+		log.Printf("[%s] No phone number on file — skipping WhatsApp\n", tag)
+		return nil
+	}
+
+	if s.kapsoClient != nil {
+		err := s.kapsoClient.SendTextMessage(ctx, to, message)
+		if err != nil && (strings.Contains(err.Error(), "422") || strings.Contains(err.Error(), "24-hour")) {
+			log.Printf("[%s] Outside the 24-hour window — retrying as a template\n", tag)
+			err = s.kapsoClient.SendTwoParamTemplateMessage(
+				ctx, to, templateName, templateLang,
+				firstName, firstValue, secondName, secondValue,
+			)
+		}
+		if err != nil {
+			log.Printf("[%s] WhatsApp to %s failed: %v\n", tag, to, err)
+			return err
+		}
+		log.Printf("[%s] WhatsApp sent to %s\n", tag, to)
+		return nil
+	}
+
+	if s.cfg != nil && s.cfg.WhatsappNumber != "" {
+		params := &twilioapiv2010.CreateMessageParams{}
+		params.SetFrom("whatsapp:" + formatPhoneNumber(s.cfg.WhatsappNumber))
+		params.SetTo("whatsapp:" + formatPhoneNumber(to))
+		params.SetBody(message)
+		if _, err := s.client.Api.CreateMessage(params); err != nil {
+			log.Printf("[%s] Twilio WhatsApp to %s failed: %v\n", tag, to, err)
+			return err
+		}
+		log.Printf("[%s] Twilio WhatsApp sent to %s\n", tag, to)
+		return nil
+	}
+
+	log.Printf("[%s] Neither Kapso nor Twilio WhatsApp is configured\n", tag)
+	return nil
+}
+
+// SendJoinRequestReceivedWhatsapp tells a host that a guest has asked to join
+// one of their request-only experiences.
+func (s *TwilioNotificationService) SendJoinRequestReceivedWhatsapp(
+	ctx context.Context, hostPhone, hostName, guestName, eventTitle string,
+) error {
+	message := fmt.Sprintf(
+		"👋 New request to join!\n\n%s has asked to join *%s*.\n\nOpen your MySlotMate dashboard → Requests to approve or decline.",
+		guestName, eventTitle,
+	)
+	templateName, templateLang := "join_request_received", "en_US"
+	if s.kapsoCfg != nil {
+		if s.kapsoCfg.JoinRequestTemplateName != "" {
+			templateName = s.kapsoCfg.JoinRequestTemplateName
+		}
+		if s.kapsoCfg.JoinRequestTemplateLang != "" {
+			templateLang = s.kapsoCfg.JoinRequestTemplateLang
+		}
+	}
+	return s.sendWhatsAppWithTemplateFallback(
+		ctx, "JOIN_REQUEST", hostPhone, message, templateName, templateLang,
+		"name", guestName, "event_name", eventTitle,
+	)
+}
+
+// SendJoinRequestApprovedWhatsapp tells a guest their request was accepted.
+//
+// Deliberately explicit that approval is not a booking: the guest still has to
+// come back and book, and nothing is held for them until they do.
+func (s *TwilioNotificationService) SendJoinRequestApprovedWhatsapp(
+	ctx context.Context, guestPhone, guestName, eventTitle string,
+) error {
+	message := fmt.Sprintf(
+		"🎉 You're approved!\n\nHi %s, the host has accepted your request to join *%s*.\n\nHead back to MySlotMate to book your spot — it isn't held until you do.",
+		guestName, eventTitle,
+	)
+	templateName, templateLang := "join_request_approved", "en_US"
+	if s.kapsoCfg != nil {
+		if s.kapsoCfg.JoinApprovedTemplateName != "" {
+			templateName = s.kapsoCfg.JoinApprovedTemplateName
+		}
+		if s.kapsoCfg.JoinApprovedTemplateLang != "" {
+			templateLang = s.kapsoCfg.JoinApprovedTemplateLang
+		}
+	}
+	return s.sendWhatsAppWithTemplateFallback(
+		ctx, "JOIN_APPROVED", guestPhone, message, templateName, templateLang,
+		"name", guestName, "event_name", eventTitle,
+	)
 }

@@ -456,6 +456,21 @@ func (s *TwilioNotificationService) SendAdminHostPendingAlert(ctx context.Contex
 
 // sendWhatsAppWithTemplateFallback is the shared delivery path for the two RSVP
 // messages. `tag` only labels the logs.
+//
+// The template is tried FIRST, not as a fallback, because these are
+// business-initiated messages: nobody has necessarily messaged us recently, so
+// there is usually no open 24-hour session window and a plain text is rejected.
+//
+// Trying text first cannot work here, and the reason is worth spelling out:
+// Kapso ACCEPTS the message (HTTP 200) and forwards it to Meta, which rejects
+// it asynchronously with error 131047 "re-engagement message". Nothing about
+// that failure is visible in the HTTP response, so a text-then-template retry
+// never fires — the send looks successful and the message silently never
+// arrives. A template works whether or not a window is open.
+//
+// Plain text remains as the fallback for the case the template itself is
+// rejected synchronously (wrong name, not approved yet, parameter mismatch) —
+// then an in-window recipient still gets something.
 func (s *TwilioNotificationService) sendWhatsAppWithTemplateFallback(
 	ctx context.Context,
 	tag, to, message string,
@@ -469,19 +484,20 @@ func (s *TwilioNotificationService) sendWhatsAppWithTemplateFallback(
 	}
 
 	if s.kapsoClient != nil {
-		err := s.kapsoClient.SendTextMessage(ctx, to, message)
-		if err != nil && (strings.Contains(err.Error(), "422") || strings.Contains(err.Error(), "24-hour")) {
-			log.Printf("[%s] Outside the 24-hour window — retrying as a template\n", tag)
-			err = s.kapsoClient.SendTwoParamTemplateMessage(
-				ctx, to, templateName, templateLang,
-				firstName, firstValue, secondName, secondValue,
-			)
+		err := s.kapsoClient.SendTwoParamTemplateMessage(
+			ctx, to, templateName, templateLang,
+			firstName, firstValue, secondName, secondValue,
+		)
+		if err != nil {
+			log.Printf("[%s] Template %q failed (%v) — falling back to plain text\n",
+				tag, templateName, err)
+			err = s.kapsoClient.SendTextMessage(ctx, to, message)
 		}
 		if err != nil {
 			log.Printf("[%s] WhatsApp to %s failed: %v\n", tag, to, err)
 			return err
 		}
-		log.Printf("[%s] WhatsApp sent to %s\n", tag, to)
+		log.Printf("[%s] WhatsApp sent to %s via template %q\n", tag, to, templateName)
 		return nil
 	}
 

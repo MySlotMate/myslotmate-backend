@@ -1278,10 +1278,14 @@ func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupanc
 				parsedDate, err = time.Parse("2006-01-02 15:04:05", dateStr)
 			}
 			if err == nil {
-				// A one-on-one calendar is a long list of short slots, most of
-				// which go stale within the day — drop the ones that have already
-				// started so the booking UI only ever offers real options.
-				if evt.SessionType == models.SessionTypeOneOnOne && parsedDate.Before(time.Now()) {
+				// Drop dates that have already started. A custom-dates event is a
+				// list of independent sessions: once 16 Aug has passed there is
+				// nothing to offer on it, but 23 Aug is still perfectly bookable.
+				// Keeping past dates here made next_available_date report the
+				// FIRST date forever, which read as "this event is over" to every
+				// consumer downstream, and let the booking page offer a session
+				// that had already happened.
+				if parsedDate.Before(time.Now()) {
 					continue
 				}
 				p := isOccurrencePaused(evt, parsedDate)
@@ -1371,9 +1375,13 @@ func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupanc
 	// The base-time fallback covers events with no generated occurrences. It must
 	// not fire for a one-on-one calendar whose slots are simply all in the past —
 	// that would re-offer a slot the loop above deliberately dropped.
-	isExhaustedOneOnOne := evt.SessionType == models.SessionTypeOneOnOne &&
-		(len(evt.CustomDates) > 0 || isRecurringOneOnOne(evt))
-	if len(occurrences) == 0 && !isExhaustedOneOnOne && (evt.Status != models.EventStatusPaused || includePaused) {
+	// Every date of a custom-dates event (or every generated one-on-one session)
+	// being in the past is a real "nothing left" answer, not a gap to paper over
+	// with the base time — which is itself just the first, already-past date.
+	isExhausted := len(evt.CustomDates) > 0 ||
+		evt.ScheduleType == models.ScheduleTypeCustomDates ||
+		isRecurringOneOnOne(evt)
+	if len(occurrences) == 0 && !isExhausted && (evt.Status != models.EventStatusPaused || includePaused) {
 		isPaused := evt.Status == models.EventStatusPaused
 		occurrences = append(occurrences, occurrence{t: evt.Time, isPaused: isPaused})
 	}

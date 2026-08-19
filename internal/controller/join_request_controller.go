@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	firebaseauth "firebase.google.com/go/v4/auth"
 	"github.com/go-chi/chi/v5"
@@ -122,6 +123,9 @@ func (c *JoinRequestController) resolveHostID(ctx context.Context) (uuid.UUID, e
 type submitJoinRequestBody struct {
 	Message string                  `json:"message"`
 	Answers *models.AttendeeProfile `json:"answers,omitempty"`
+	// OccurrenceDate names the session being asked about. Omitted only for a
+	// single-date event, where the service falls back to the event's own time.
+	OccurrenceDate *time.Time `json:"occurrence_date,omitempty"`
 }
 
 func (c *JoinRequestController) Submit(w http.ResponseWriter, r *http.Request) {
@@ -141,10 +145,15 @@ func (c *JoinRequestController) Submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, err := c.svc.Submit(r.Context(), eventID, userID, service.JoinRequestInput{
+	input := service.JoinRequestInput{
 		Message: body.Message,
 		Answers: body.Answers,
-	})
+	}
+	if body.OccurrenceDate != nil {
+		input.OccurrenceDate = *body.OccurrenceDate
+	}
+
+	req, err := c.svc.Submit(r.Context(), eventID, userID, input)
 	if err != nil {
 		RespondError(w, joinRequestStatusCode(err), err.Error())
 		return
@@ -163,9 +172,17 @@ func (c *JoinRequestController) GetMine(w http.ResponseWriter, r *http.Request) 
 		RespondError(w, http.StatusBadRequest, "invalid event id")
 		return
 	}
+	// Which session the caller is asking about. Approval is per slot, so the
+	// booking page must say which one it is rendering.
+	occurrenceDate, err := occurrenceFromQuery(r)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// A guest who has never asked gets null, not a 404 — "not requested" is a
 	// normal state the page renders a button for.
-	req, err := c.svc.GetForUser(r.Context(), eventID, userID)
+	req, err := c.svc.GetForUser(r.Context(), eventID, userID, occurrenceDate)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -341,6 +358,20 @@ func joinRequestStatusCode(err error) int {
 	default:
 		return http.StatusBadRequest
 	}
+}
+
+// occurrenceFromQuery reads ?occurrence_date=<RFC3339>. An absent value yields
+// the zero time, which the service reads as "this event has only one session".
+func occurrenceFromQuery(r *http.Request) (time.Time, error) {
+	raw := r.URL.Query().Get("occurrence_date")
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, errors.New("invalid occurrence_date")
+	}
+	return t, nil
 }
 
 func pageParams(r *http.Request) (int, int) {

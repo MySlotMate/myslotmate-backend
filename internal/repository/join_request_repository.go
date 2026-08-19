@@ -19,11 +19,13 @@ type JoinRequestRepository interface {
 	Create(ctx context.Context, req *models.EventJoinRequest) error
 	GetByID(ctx context.Context, id uuid.UUID) (*models.EventJoinRequest, error)
 	// GetLiveForUser returns the guest's pending or approved request for this
-	// event, or nil. This is what the booking gate reads.
-	GetLiveForUser(ctx context.Context, eventID, userID uuid.UUID) (*models.EventJoinRequest, error)
-	// GetLatestForUser returns the guest's most recent request whatever its
-	// status, so the public page can show "rejected" rather than "not asked".
-	GetLatestForUser(ctx context.Context, eventID, userID uuid.UUID) (*models.EventJoinRequest, error)
+	// exact slot, or nil. This is what the booking gate reads — approval on one
+	// occurrence says nothing about any other.
+	GetLiveForUser(ctx context.Context, eventID, userID uuid.UUID, occurrenceDate time.Time) (*models.EventJoinRequest, error)
+	// GetLatestForUser returns the guest's most recent request for this slot
+	// whatever its status, so the public page can show "rejected" rather than
+	// "not asked".
+	GetLatestForUser(ctx context.Context, eventID, userID uuid.UUID, occurrenceDate time.Time) (*models.EventJoinRequest, error)
 	ListByEvent(ctx context.Context, eventID uuid.UUID, status string) ([]*models.EventJoinRequest, error)
 	// ListByHost spans every event the host owns — the dashboard queue.
 	ListByHost(ctx context.Context, hostID uuid.UUID, status string, limit, offset int) ([]*models.EventJoinRequest, error)
@@ -44,7 +46,7 @@ func NewJoinRequestRepository(db *sql.DB) JoinRequestRepository {
 	return &postgresJoinRequestRepository{db: db}
 }
 
-const joinRequestColumns = `r.id, r.event_id, r.user_id, r.status, r.message,
+const joinRequestColumns = `r.id, r.event_id, r.user_id, r.occurrence_date, r.status, r.message,
 	r.answers_snapshot, r.reviewed_by_kind, r.reviewed_by_id, r.reviewed_by_label,
 	r.reviewed_at, r.review_note, r.created_at, r.updated_at`
 
@@ -61,7 +63,7 @@ const joinRequestSelect = `
 func scanJoinRequest(row interface{ Scan(dest ...any) error }) (*models.EventJoinRequest, error) {
 	jr := &models.EventJoinRequest{}
 	err := row.Scan(
-		&jr.ID, &jr.EventID, &jr.UserID, &jr.Status, &jr.Message,
+		&jr.ID, &jr.EventID, &jr.UserID, &jr.OccurrenceDate, &jr.Status, &jr.Message,
 		&jr.AnswersSnapshot, &jr.ReviewedByKind, &jr.ReviewedByID, &jr.ReviewedByLabel,
 		&jr.ReviewedAt, &jr.ReviewNote, &jr.CreatedAt, &jr.UpdatedAt,
 		&jr.UserName, &jr.UserEmail, &jr.UserPhone, &jr.UserAvatarURL,
@@ -97,10 +99,12 @@ func (r *postgresJoinRequestRepository) Create(ctx context.Context, req *models.
 		req.Status = models.JoinRequestPending
 	}
 	const query = `
-		INSERT INTO event_join_requests (id, event_id, user_id, status, message, answers_snapshot)
-		VALUES ($1, $2, $3, $4, $5, $6)`
+		INSERT INTO event_join_requests
+			(id, event_id, user_id, occurrence_date, status, message, answers_snapshot)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`
 	_, err := r.db.ExecContext(ctx, query,
-		req.ID, req.EventID, req.UserID, req.Status, req.Message, req.AnswersSnapshot)
+		req.ID, req.EventID, req.UserID, req.OccurrenceDate,
+		req.Status, req.Message, req.AnswersSnapshot)
 	return err
 }
 
@@ -108,22 +112,22 @@ func (r *postgresJoinRequestRepository) GetByID(ctx context.Context, id uuid.UUI
 	return scanJoinRequest(r.db.QueryRowContext(ctx, joinRequestSelect+` WHERE r.id = $1`, id))
 }
 
-func (r *postgresJoinRequestRepository) GetLiveForUser(ctx context.Context, eventID, userID uuid.UUID) (*models.EventJoinRequest, error) {
-	const where = ` WHERE r.event_id = $1 AND r.user_id = $2
+func (r *postgresJoinRequestRepository) GetLiveForUser(ctx context.Context, eventID, userID uuid.UUID, occurrenceDate time.Time) (*models.EventJoinRequest, error) {
+	const where = ` WHERE r.event_id = $1 AND r.user_id = $2 AND r.occurrence_date = $3
 		AND r.status IN ('pending', 'approved')`
-	return scanJoinRequest(r.db.QueryRowContext(ctx, joinRequestSelect+where, eventID, userID))
+	return scanJoinRequest(r.db.QueryRowContext(ctx, joinRequestSelect+where, eventID, userID, occurrenceDate))
 }
 
-func (r *postgresJoinRequestRepository) GetLatestForUser(ctx context.Context, eventID, userID uuid.UUID) (*models.EventJoinRequest, error) {
-	const where = ` WHERE r.event_id = $1 AND r.user_id = $2
+func (r *postgresJoinRequestRepository) GetLatestForUser(ctx context.Context, eventID, userID uuid.UUID, occurrenceDate time.Time) (*models.EventJoinRequest, error) {
+	const where = ` WHERE r.event_id = $1 AND r.user_id = $2 AND r.occurrence_date = $3
 		ORDER BY r.created_at DESC LIMIT 1`
-	return scanJoinRequest(r.db.QueryRowContext(ctx, joinRequestSelect+where, eventID, userID))
+	return scanJoinRequest(r.db.QueryRowContext(ctx, joinRequestSelect+where, eventID, userID, occurrenceDate))
 }
 
 func (r *postgresJoinRequestRepository) ListByEvent(ctx context.Context, eventID uuid.UUID, status string) ([]*models.EventJoinRequest, error) {
 	query := joinRequestSelect + ` WHERE r.event_id = $1
 		AND ($2 = '' OR r.status = $2)
-		ORDER BY r.created_at DESC`
+		ORDER BY r.occurrence_date ASC, r.created_at DESC`
 	rows, err := r.db.QueryContext(ctx, query, eventID, status)
 	if err != nil {
 		return nil, err

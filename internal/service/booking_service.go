@@ -269,6 +269,15 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		}
 	}
 
+	// 3b-bis. Resolve the occurrence first: the RSVP gate below is per-session,
+	// so it has to know which session is being booked. For recurring and
+	// custom-date events the client sends the date the guest picked; otherwise
+	// the event has exactly one and that is it.
+	occurrenceDate := evt.Time
+	if req.OccurrenceDate != nil {
+		occurrenceDate = *req.OccurrenceDate
+	}
+
 	// 3c. Private-event gate — the authoritative check behind the client's unlock
 	// prompt. Never trust a client-side "unlocked" flag; trusted host flows
 	// (walk-in) bypass this deliberately, because a host admitting someone at the
@@ -276,9 +285,10 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	//
 	// Which gate applies depends on the event's PrivateAccessMode:
 	//
-	//   rsvp    — the guest must hold an APPROVED join request. A passkey or
-	//             coupon must NOT open this door, or the host's vetting could be
-	//             bypassed by anyone holding a code.
+	//   rsvp    — the guest must hold an APPROVED join request FOR THIS SLOT. A
+	//             passkey or coupon must NOT open this door, or the host's
+	//             vetting could be bypassed by anyone holding a code, and an
+	//             approval on one date must not carry to another.
 	//   passkey — the original behaviour: the shared access passkey, or a valid
 	//             per-guest code (a coupon), whichever the guest entered. The
 	//             code may arrive in coupon_code or the passkey field, and a code
@@ -287,14 +297,14 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	if evt.IsPrivate && !req.BypassPasskey && evt.PrivateAccessMode == models.PrivateAccessModeRSVP {
 		approved := false
 		if s.joinRequestRepo != nil {
-			jr, err := s.joinRequestRepo.GetLiveForUser(ctx, evt.ID, userID)
+			jr, err := s.joinRequestRepo.GetLiveForUser(ctx, evt.ID, userID, occurrenceDate)
 			if err != nil {
 				return nil, err
 			}
 			approved = jr != nil && jr.Status == models.JoinRequestApproved
 		}
 		if !approved {
-			return nil, errors.New("your request to join this experience hasn't been approved yet")
+			return nil, errors.New("your request to join this session hasn't been approved yet")
 		}
 	} else if evt.IsPrivate && !req.BypassPasskey {
 		unlocked := passkeyMatches(evt, req.Passkey)
@@ -315,13 +325,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		}
 	}
 
-	// 4. Resolve occurrence date
-	// For recurring events the frontend sends the specific date the user picked.
-	// For non-recurring events (or if omitted) we fall back to the event's own time.
-	occurrenceDate := evt.Time
-	if req.OccurrenceDate != nil {
-		occurrenceDate = *req.OccurrenceDate
-	}
+	// 4. Occurrence date was resolved at step 3b-bis, above the private gate.
 
 	// 5. Overbooking prevention — check capacity per occurrence date.
 	// This is a cheap early rejection so an obviously-full slot never reaches the

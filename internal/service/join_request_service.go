@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
@@ -33,7 +34,9 @@ type JoinRequestService interface {
 	// onto their profile, because that profile — not the request — is what the
 	// booking guard reads later.
 	Submit(ctx context.Context, eventID, userID uuid.UUID, in JoinRequestInput) (*models.EventJoinRequest, error)
-	GetForUser(ctx context.Context, eventID, userID uuid.UUID) (*models.EventJoinRequest, error)
+	// GetForUser reports the guest's request for ONE slot. Approval is per
+	// occurrence, so the caller must say which.
+	GetForUser(ctx context.Context, eventID, userID uuid.UUID, occurrenceDate time.Time) (*models.EventJoinRequest, error)
 	Withdraw(ctx context.Context, requestID, userID uuid.UUID) error
 
 	ListForHost(ctx context.Context, hostID uuid.UUID, status string, limit, offset int) ([]*models.EventJoinRequest, error)
@@ -48,8 +51,8 @@ type JoinRequestService interface {
 	// admin's username, recorded for the audit trail (admin JWTs carry no UUID).
 	ReviewAsAdmin(ctx context.Context, requestID uuid.UUID, adminLabel string, approve bool, note *string) (*models.EventJoinRequest, error)
 
-	// HasApproved is the booking gate's question: may this guest book?
-	HasApproved(ctx context.Context, eventID, userID uuid.UUID) (bool, error)
+	// HasApproved is the booking gate's question: may this guest book THIS slot?
+	HasApproved(ctx context.Context, eventID, userID uuid.UUID, occurrenceDate time.Time) (bool, error)
 }
 
 // JoinRequestInput is what the guest submits. Answers mirror the attendee-field
@@ -58,6 +61,10 @@ type JoinRequestService interface {
 type JoinRequestInput struct {
 	Message string                  `json:"message"`
 	Answers *models.AttendeeProfile `json:"answers,omitempty"`
+	// OccurrenceDate is the session being asked about. Zero means the client
+	// sent none, which only makes sense for a single-date event — it then
+	// defaults to the event's own time.
+	OccurrenceDate time.Time `json:"occurrence_date"`
 }
 
 type joinRequestService struct {
@@ -103,9 +110,18 @@ func (s *joinRequestService) Submit(ctx context.Context, eventID, userID uuid.UU
 		return nil, ErrJoinRequestNotApplicable
 	}
 
-	// One live request per guest per event. The partial unique index enforces
+	// Which session is being asked about. A single-date event has exactly one,
+	// so a client that sends nothing gets the event's own time.
+	occurrenceDate := in.OccurrenceDate
+	if occurrenceDate.IsZero() {
+		occurrenceDate = evt.Time
+	}
+
+	// One live request per guest per SLOT. The partial unique index enforces
 	// this too; checking first turns a constraint violation into a clear message.
-	if existing, err := s.repo.GetLiveForUser(ctx, eventID, userID); err != nil {
+	// A guest asking about a different date is a different request and is
+	// allowed to coexist with this one.
+	if existing, err := s.repo.GetLiveForUser(ctx, eventID, userID, occurrenceDate); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return nil, ErrJoinRequestExists
@@ -136,6 +152,7 @@ func (s *joinRequestService) Submit(ctx context.Context, eventID, userID uuid.UU
 	req := &models.EventJoinRequest{
 		EventID:         eventID,
 		UserID:          userID,
+		OccurrenceDate:  occurrenceDate,
 		Status:          models.JoinRequestPending,
 		AnswersSnapshot: snapshotAnswers(in.Answers, evt.AttendeeFields),
 	}
@@ -176,8 +193,22 @@ func (s *joinRequestService) hostContact(ctx context.Context, hostID uuid.UUID) 
 	return name, host.PhnNumber
 }
 
-func (s *joinRequestService) GetForUser(ctx context.Context, eventID, userID uuid.UUID) (*models.EventJoinRequest, error) {
-	return s.repo.GetLatestForUser(ctx, eventID, userID)
+func (s *joinRequestService) GetForUser(ctx context.Context, eventID, userID uuid.UUID, occurrenceDate time.Time) (*models.EventJoinRequest, error) {
+	// Mirror Submit: a client that names no session is asking about a
+	// single-date event, whose only session is the event's own time. Querying
+	// the zero time instead would silently match nothing and always report
+	// "never requested".
+	if occurrenceDate.IsZero() {
+		evt, err := s.eventRepo.GetByID(ctx, eventID)
+		if err != nil {
+			return nil, err
+		}
+		if evt == nil {
+			return nil, errors.New("event not found")
+		}
+		occurrenceDate = evt.Time
+	}
+	return s.repo.GetLatestForUser(ctx, eventID, userID, occurrenceDate)
 }
 
 func (s *joinRequestService) Withdraw(ctx context.Context, requestID, userID uuid.UUID) error {
@@ -269,8 +300,8 @@ func (s *joinRequestService) review(
 	return updated, nil
 }
 
-func (s *joinRequestService) HasApproved(ctx context.Context, eventID, userID uuid.UUID) (bool, error) {
-	req, err := s.repo.GetLiveForUser(ctx, eventID, userID)
+func (s *joinRequestService) HasApproved(ctx context.Context, eventID, userID uuid.UUID, occurrenceDate time.Time) (bool, error) {
+	req, err := s.repo.GetLiveForUser(ctx, eventID, userID, occurrenceDate)
 	if err != nil {
 		return false, err
 	}

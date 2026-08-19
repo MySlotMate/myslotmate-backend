@@ -76,13 +76,22 @@ func (a JoinAnswers) Value() (driver.Value, error) {
 	return json.Marshal(a)
 }
 
-// EventJoinRequest is one guest asking to be let into one private event.
-// Approval is per event, not per session: the host is vetting a person, so a
-// single approval covers every occurrence of the event.
+// EventJoinRequest is one guest asking to be let into one SESSION of a private
+// event.
+//
+// Approval is per occurrence, not per event: a host vets each date separately,
+// so a guest welcome on the 23rd is not automatically welcome on the 30th. A
+// guest may therefore hold several live requests against one event — one per
+// slot they asked about.
 type EventJoinRequest struct {
 	ID      uuid.UUID `db:"id" json:"id"`
 	EventID uuid.UUID `db:"event_id" json:"event_id"`
 	UserID  uuid.UUID `db:"user_id" json:"user_id"`
+
+	// OccurrenceDate is the exact session this request is for. It matches the
+	// occurrence_date the eventual booking will carry, which is what lets the
+	// booking gate compare the two directly.
+	OccurrenceDate time.Time `db:"occurrence_date" json:"occurrence_date"`
 
 	Status          JoinRequestStatus `db:"status" json:"status"`
 	Message         *string           `db:"message" json:"message,omitempty"`

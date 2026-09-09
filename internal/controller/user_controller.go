@@ -5,22 +5,28 @@ import (
 	"net/http"
 	"strconv"
 
+	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/service"
 
+	fbauth "firebase.google.com/go/v4/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
 // UserController handles HTTP requests for user operations
 type UserController struct {
-	userService service.UserService
+	userService  service.UserService
+	firebaseAuth *fbauth.Client
+	jwtSecret    string
 }
 
 // NewUserController Factory for UserController
-func NewUserController(s service.UserService) *UserController {
+func NewUserController(s service.UserService, fa *fbauth.Client, jwtSecret string) *UserController {
 	return &UserController{
-		userService: s,
+		userService:  s,
+		firebaseAuth: fa,
+		jwtSecret:    jwtSecret,
 	}
 }
 
@@ -34,6 +40,15 @@ func (c *UserController) RegisterRoutes(r chi.Router) {
 	r.Post("/auth/otp/login/send", c.SendLoginOTP)
 	r.Post("/auth/otp/login/verify", c.VerifyLoginOTP)
 	r.Route("/users", func(r chi.Router) {
+		// Signup prefill is the one /users route that identifies the caller by
+		// their verified token rather than a URL parameter — it must not become
+		// an email → phone number lookup for anyone who asks. Registered inside
+		// this subrouter so the static path wins over /{userID}.
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireUser(c.firebaseAuth, c.jwtSecret))
+			r.Get("/signup-prefill", c.GetSignupPrefill)
+		})
+
 		r.Get("/me", c.GetProfile)
 		r.Get("/by-firebase/{firebaseID}", c.GetUserByFirebaseID)
 		r.Put("/me", c.UpdateProfile)
@@ -145,6 +160,40 @@ func (c *UserController) HandleSignUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	RespondSuccess(w, http.StatusCreated, user)
+}
+
+// SignupPrefillResponse carries the details already on file for someone who
+// was onboarded by an admin before they ever signed in, so the signup form can
+// show them instead of asking again.
+type SignupPrefillResponse struct {
+	Name      string `json:"name"`
+	PhnNumber string `json:"phn_number"`
+}
+
+// GetSignupPrefill returns the pending record for the caller's verified email,
+// or 404 when there is none. The email comes from the verified token, never
+// from the request, so this cannot be used to look up someone else's number.
+func (c *UserController) GetSignupPrefill(w http.ResponseWriter, r *http.Request) {
+	email, _ := r.Context().Value(auth.ContextKeyEmail).(string)
+	if email == "" {
+		RespondError(w, http.StatusUnauthorized, "Token has no email")
+		return
+	}
+
+	user, err := c.userService.GetSignupPrefill(r.Context(), email)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if user == nil {
+		RespondError(w, http.StatusNotFound, "No pending record for this email")
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, SignupPrefillResponse{
+		Name:      user.Name,
+		PhnNumber: user.PhnNumber,
+	})
 }
 
 func (c *UserController) GetProfile(w http.ResponseWriter, r *http.Request) {

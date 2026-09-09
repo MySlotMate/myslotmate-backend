@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"myslotmate-backend/internal/auth"
@@ -24,6 +25,8 @@ import (
 // UserService defines the business logic interface
 type UserService interface {
 	SignUp(ctx context.Context, req SignUpRequest) (*models.User, error)
+	CreateUserByPhone(ctx context.Context, phone, name, email string) (*models.User, error)
+	GetSignupPrefill(ctx context.Context, email string) (*models.User, error)
 	GetProfile(ctx context.Context, userID uuid.UUID) (*models.User, error)
 	UpdateProfile(ctx context.Context, userID uuid.UUID, req UserProfileUpdateRequest) (*models.User, error)
 	InitiateAadharVerification(ctx context.Context, userID uuid.UUID, aadharNumber string) (string, error)
@@ -218,12 +221,25 @@ func (s *userService) SignUp(ctx context.Context, req SignUpRequest) (*models.Us
 		return nil, errors.New("email is required")
 	}
 
-	exists, err := s.repo.ExistsByEmail(ctx, req.Email)
+	// An existing row for this email is either a real account (reject) or a
+	// placeholder created before the person ever signed in — an admin
+	// onboarding them as a host, or a phone-OTP login. A placeholder is claimed
+	// here rather than duplicated: the email is verified by the identity
+	// provider, so the same email is the same person, and adopting the row keeps
+	// their host profile, bookings and wallet attached.
+	existing, err := s.repo.GetByEmail(ctx, req.Email)
 	if err != nil {
 		return nil, err
 	}
-	if exists {
-		return nil, errors.New("user already exists")
+	if existing != nil {
+		if !strings.HasPrefix(existing.AuthUID, placeholderAuthUIDPrefix) {
+			return nil, errors.New("user already exists")
+		}
+		if err := s.repo.SetAuthUID(ctx, existing.ID, req.AuthUID); err != nil {
+			return nil, err
+		}
+		existing.AuthUID = req.AuthUID
+		return existing, nil
 	}
 
 	newUser := &models.User{
@@ -256,6 +272,98 @@ func (s *userService) SignUp(ctx context.Context, req SignUpRequest) (*models.Us
 	})
 
 	return newUser, nil
+}
+
+// placeholderAuthUIDPrefix marks a user row that has never been signed into via
+// Firebase — the phone-OTP login and admin user creation both write it.
+const placeholderAuthUIDPrefix = "phone:"
+
+// normalizeIndianPhone renders a phone number the way the phone-OTP login
+// stores it (+91 + 10 digits), so an admin-created user is found by GetByPhone
+// when that person later logs in.
+func normalizeIndianPhone(phone string) (string, error) {
+	digits := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, phone)
+	if len(digits) > 10 {
+		digits = digits[len(digits)-10:]
+	}
+	if len(digits) != 10 {
+		return "", errors.New("phone must be a 10-digit Indian mobile number")
+	}
+	return "+91" + digits, nil
+}
+
+// GetSignupPrefill returns the placeholder row waiting for this email, if any —
+// the record an admin created when onboarding someone as a host before they
+// ever signed in. Returns (nil, nil) for a real account or no account, so the
+// signup form falls back to empty fields.
+func (s *userService) GetSignupPrefill(ctx context.Context, email string) (*models.User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil, nil
+	}
+	user, err := s.repo.GetByEmail(ctx, email)
+	if err != nil || user == nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(user.AuthUID, placeholderAuthUIDPrefix) {
+		return nil, nil
+	}
+	return user, nil
+}
+
+// CreateUserByPhone creates the user row an admin needs before onboarding
+// someone as a host who has never logged in. auth_uid matches what VerifyLoginOTP
+// would have written, so the person's first phone-OTP login lands on this same
+// row instead of creating a second one.
+func (s *userService) CreateUserByPhone(ctx context.Context, phone, name, email string) (*models.User, error) {
+	phone, err := normalizeIndianPhone(phone)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(name) == "" {
+		return nil, errors.New("name is required")
+	}
+
+	existing, err := s.repo.GetByPhone(ctx, phone)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, errors.New("a user with this phone number already exists")
+	}
+
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email != "" {
+		exists, err := s.repo.ExistsByEmail(ctx, email)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, errors.New("a user with this email already exists")
+		}
+	}
+
+	now := time.Now()
+	user := &models.User{
+		ID:        uuid.New(),
+		AuthUID:   placeholderAuthUIDPrefix + phone,
+		Name:      strings.TrimSpace(name),
+		PhnNumber: phone,
+		Email:     email,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.repo.Create(ctx, user); err != nil {
+		return nil, err
+	}
+
+	s.dispatcher.Publish(event.UserCreated, user)
+	return user, nil
 }
 
 func (s *userService) GetProfile(ctx context.Context, userID uuid.UUID) (*models.User, error) {
@@ -921,7 +1029,7 @@ func (s *userService) VerifyLoginOTP(ctx context.Context, phone string, sessionI
 		// Create a new user
 		user = &models.User{
 			ID:              uuid.New(),
-			AuthUID:         "phone:" + phone,
+			AuthUID:         placeholderAuthUIDPrefix + phone,
 			Name:            "Guest User",
 			PhnNumber:       phone,
 			Email:           "",

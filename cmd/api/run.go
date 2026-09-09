@@ -214,7 +214,7 @@ func main() {
 		reminderScheduler.Start(5 * time.Minute)
 	}
 
-	userController := controller.NewUserController(userService)
+	userController := controller.NewUserController(userService, fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	hostController := controller.NewHostController(hostService)
 	eventController := controller.NewEventController(eventService)
 	bookingController := controller.NewBookingController(bookingService)

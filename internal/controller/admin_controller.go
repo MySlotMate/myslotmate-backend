@@ -46,6 +46,7 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 
 		r.Get("/applications", c.ListPendingApplications)
 		r.Post("/", c.CreateHost)
+
 		r.Post("/{hostID}/approve", c.ApproveApplication)
 		r.Post("/{hostID}/reject", c.RejectApplication)
 		r.Put("/{hostID}/application-status", c.UpdateApplicationStatus)
@@ -53,6 +54,11 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Put("/{hostID}/profile", c.UpdateHostProfile)
 		r.Put("/{hostID}/active", c.SetHostActive)
 		r.Get("/{hostID}/earnings", c.GetHostEarnings)
+	})
+
+	r.Route("/admin/users", func(r chi.Router) {
+		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
+		r.Post("/", c.CreateUser)
 	})
 
 	r.Route("/admin/platform", func(r chi.Router) {
@@ -144,6 +150,34 @@ func (c *AdminController) CreateHost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	RespondSuccess(w, http.StatusCreated, approved)
+}
+
+// CreateUserRequestBody is the payload for onboarding someone who has never
+// logged in. Phone is the identity that matters — it is what the phone-OTP
+// login looks a user up by.
+type CreateUserRequestBody struct {
+	Name      string `json:"name"`
+	PhnNumber string `json:"phn_number"`
+	Email     string `json:"email"`
+}
+
+// CreateUser creates a user row for a person with no account yet, so an admin
+// can onboard them as a host in the same sitting. They sign in afterwards with
+// phone + OTP, which resolves to this row.
+func (c *AdminController) CreateUser(w http.ResponseWriter, r *http.Request) {
+	var req CreateUserRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	user, err := c.userService.CreateUserByPhone(r.Context(), req.PhnNumber, req.Name, req.Email)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusCreated, user)
 }
 
 func (c *AdminController) ApproveApplication(w http.ResponseWriter, r *http.Request) {

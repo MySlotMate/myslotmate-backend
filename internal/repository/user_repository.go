@@ -15,6 +15,7 @@ import (
 type UserRepository interface {
 	Create(ctx context.Context, user *models.User) error
 	GetByEmail(ctx context.Context, email string) (*models.User, error)
+	SetAuthUID(ctx context.Context, id uuid.UUID, authUID string) error
 	GetByPhone(ctx context.Context, phone string) (*models.User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	ExistsByEmail(ctx context.Context, email string) (bool, error)
@@ -89,6 +90,15 @@ func (r *postgresUserRepository) Update(ctx context.Context, user *models.User) 
 		user.City,
 		user.UpdatedAt,
 	)
+	return err
+}
+
+// SetAuthUID re-points a user row at a different auth identity. Used when a
+// placeholder row (auth_uid "phone:<number>", created by an admin or by a
+// phone-OTP login) is claimed by a real Firebase sign-in for the same email.
+func (r *postgresUserRepository) SetAuthUID(ctx context.Context, id uuid.UUID, authUID string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET auth_uid = $2, updated_at = now() WHERE id = $1`, id, authUID)
 	return err
 }
 

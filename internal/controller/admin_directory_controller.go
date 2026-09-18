@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"myslotmate-backend/internal/auth"
@@ -34,6 +37,7 @@ type AdminDirectoryController struct {
 	eventRepo    repository.EventRepository
 	notifService notification.NotificationService
 	jwtSecret    string
+	frontendURL  string
 }
 
 func NewAdminDirectoryController(
@@ -44,6 +48,7 @@ func NewAdminDirectoryController(
 	eventRepo repository.EventRepository,
 	notifService notification.NotificationService,
 	jwtSecret string,
+	frontendURL string,
 ) *AdminDirectoryController {
 	return &AdminDirectoryController{
 		repo:         repo,
@@ -53,6 +58,7 @@ func NewAdminDirectoryController(
 		eventRepo:    eventRepo,
 		notifService: notifService,
 		jwtSecret:    jwtSecret,
+		frontendURL:  strings.TrimRight(frontendURL, "/"),
 	}
 }
 
@@ -67,6 +73,7 @@ func (c *AdminDirectoryController) RegisterRoutes(r chi.Router) {
 		r.Get("/bookings/{bookingID}/reminder-preview", c.GetBookingReminderPreview)
 		r.Post("/bookings/{bookingID}/send-reminder", c.SendBookingReminder)
 		r.Post("/marketing/events/{eventID}/bulk-notify", c.BulkNotifyEventGuests)
+		r.Post("/marketing/events/{eventID}/promote", c.PromoteEventToAllUsers)
 	})
 }
 
@@ -809,4 +816,203 @@ func (c *AdminDirectoryController) BulkNotifyEventGuests(w http.ResponseWriter, 
 		"message":        fmt.Sprintf("Bulk notifications successfully queued to %d users", len(targetBookings)),
 		"notified_count": len(targetBookings),
 	})
+}
+
+
+// ── Marketing blast to all users ─────────────────────────────────────────────
+
+// promoteInFlight guards against a second blast starting while one is running.
+// The Send button is disabled client-side only, so without this a double-click
+// mails everyone twice.
+//
+// ponytail: one global flag, not per-event — make it a map keyed by event ID if
+// concurrent blasts for different events ever need to overlap.
+var promoteInFlight sync.Mutex
+
+type PromoteEventRequest struct {
+	Message string `json:"message"`
+	Channel string `json:"channel"` // "both" | "whatsapp" | "email"
+	City    string `json:"city"`    // optional, exact match
+	DryRun  bool   `json:"dry_run"` // resolve the audience and return, send nothing
+	// TestPhone narrows the audience to the one user holding this number, so a
+	// real send can be aimed at a single handset without touching anyone else.
+	TestPhone string `json:"test_phone"`
+}
+
+// PromoteEventToAllUsers markets an upcoming event to every registered user,
+// optionally narrowed by city — unlike BulkNotifyEventGuests, which only
+// reaches people who already booked.
+//
+// WhatsApp goes out as an approved marketing template only (no session window
+// exists for these recipients); email is a custom HTML mail. Per-channel
+// successes and failures are counted and logged when the run finishes: there is
+// no delivery table, so the log is the only record.
+func (c *AdminDirectoryController) PromoteEventToAllUsers(w http.ResponseWriter, r *http.Request) {
+	eventIDStr := chi.URLParam(r, "eventID")
+	eventID, err := uuid.Parse(eventIDStr)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid event ID")
+		return
+	}
+
+	var req PromoteEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" {
+		RespondError(w, http.StatusBadRequest, "Message is required for a marketing blast")
+		return
+	}
+	if req.Channel == "" {
+		req.Channel = "both"
+	}
+
+	event, err := c.eventRepo.GetByID(r.Context(), eventID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if event == nil {
+		RespondError(w, http.StatusNotFound, "Event not found")
+		return
+	}
+
+	recipients, err := c.repo.ListMarketingRecipients(r.Context(), req.City)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// A test send beats every other filter: keep only the matching handset.
+	// Compared on the last 10 digits because numbers are stored with and
+	// without the +91 prefix.
+	if tp := digitsOnly(req.TestPhone); tp != "" {
+		filtered := recipients[:0]
+		for _, u := range recipients {
+			if lastN(digitsOnly(u.Phone), 10) == lastN(tp, 10) {
+				filtered = append(filtered, u)
+			}
+		}
+		recipients = filtered
+	}
+
+	if len(recipients) == 0 {
+		RespondSuccess(w, http.StatusOK, map[string]interface{}{
+			"message":        "No users matched this audience",
+			"notified_count": 0,
+		})
+		return
+	}
+
+	// Dry run: the audience size is the only thing worth checking before a blast,
+	// and an empty City means EVERY user — cheap insurance against a typo.
+	if req.DryRun {
+		sample := make([]string, 0, 5)
+		for i, u := range recipients {
+			if i == 5 {
+				break
+			}
+			sample = append(sample, fmt.Sprintf("%s <%s> %s", u.Name, u.Email, u.Phone))
+		}
+		RespondSuccess(w, http.StatusOK, map[string]interface{}{
+			"message":        fmt.Sprintf("DRY RUN — would send to %d users, nothing was sent", len(recipients)),
+			"notified_count": len(recipients),
+			"dry_run":        true,
+			"event_url":      c.frontendURL + "/experience/" + event.Slug,
+			"sample":         sample,
+		})
+		return
+	}
+
+	if !promoteInFlight.TryLock() {
+		RespondError(w, http.StatusConflict, "A marketing blast is already running — wait for it to finish")
+		return
+	}
+
+	eventURL := c.frontendURL + "/experience/" + event.Slug
+
+	go func() {
+		defer promoteInFlight.Unlock()
+		// No overall deadline: a few thousand sequential sends can outlast any
+		// sane one. Each send gets its own timeout instead.
+		bgCtx := context.Background()
+
+		var waSent, waFailed, mailSent, mailFailed int
+		// Duplicate accounts sharing a phone or an email are common here, and the
+		// audience is a list of user ROWS — without this, one handset receives the
+		// same promo once per account behind it.
+		sentPhone := map[string]bool{}
+		sentEmail := map[string]bool{}
+
+		for _, u := range recipients {
+			phoneKey := lastN(digitsOnly(u.Phone), 10)
+			emailKey := strings.ToLower(strings.TrimSpace(u.Email))
+
+			if (req.Channel == "both" || req.Channel == "whatsapp") && u.Phone != "" && !sentPhone[phoneKey] {
+				sentPhone[phoneKey] = true
+				sendCtx, cancel := context.WithTimeout(bgCtx, 30*time.Second)
+				if err := c.notifService.SendEventPromoWhatsapp(sendCtx, u.Phone, u.Name, event.Title, event.Slug); err != nil {
+					waFailed++
+				} else {
+					waSent++
+				}
+				cancel()
+			}
+
+			if (req.Channel == "both" || req.Channel == "email") && emailKey != "" && !sentEmail[emailKey] {
+				sentEmail[emailKey] = true
+				sendCtx, cancel := context.WithTimeout(bgCtx, 30*time.Second)
+				subject := fmt.Sprintf("Happening soon: %s", event.Title)
+				body := fmt.Sprintf(`
+<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+	<h2>%s</h2>
+	<p>Hi %s,</p>
+	<p>%s</p>
+	<p><a href="%s" style="display:inline-block;padding:12px 20px;background:#6d28d9;color:#fff;text-decoration:none;border-radius:8px;">View experience</a></p>
+	<hr style="margin: 30px 0;">
+	<p style="font-size: 12px; color: #666;">MySlotMate - Event Management Made Easy</p>
+</body>
+</html>
+`, event.Title, u.Name, req.Message, eventURL)
+				if err := c.notifService.SendCustomEmail(sendCtx, u.Email, subject, body); err != nil {
+					mailFailed++
+				} else {
+					mailSent++
+				}
+				cancel()
+			}
+
+			// ponytail: fixed pacing, swap for a real rate limiter if a provider
+			// starts throttling. SMTP hosts drop mail silently once tripped.
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		log.Printf("[EVENT_PROMO] event=%s rows=%d whatsapp sent=%d failed=%d email sent=%d failed=%d\n",
+			eventID, len(recipients), waSent, waFailed, mailSent, mailFailed)
+	}()
+
+	RespondSuccess(w, http.StatusOK, map[string]interface{}{
+		"message":        fmt.Sprintf("Marketing blast queued to %d users", len(recipients)),
+		"notified_count": len(recipients),
+	})
+}
+
+// digitsOnly strips everything but digits from a phone number.
+func digitsOnly(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// lastN returns the final n characters of s, or all of s when it is shorter.
+func lastN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }

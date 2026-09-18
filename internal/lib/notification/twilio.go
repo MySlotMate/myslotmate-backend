@@ -66,6 +66,10 @@ type NotificationService interface {
 	// RSVP join requests — see the implementations for the delivery strategy.
 	SendJoinRequestReceivedWhatsapp(ctx context.Context, hostPhone, hostName, guestName, eventTitle string) error
 	SendJoinRequestApprovedWhatsapp(ctx context.Context, guestPhone, guestName, eventTitle string) error
+	// SendEventPromoWhatsapp markets an upcoming event to a user who has not
+	// booked anything — template only, no plain-text fallback (see the comment
+	// on the implementation).
+	SendEventPromoWhatsapp(ctx context.Context, phone, userName, eventTitle, eventSlug string) error
 }
 
 // NewTwilioNotificationService creates a new Twilio notification service
@@ -566,4 +570,69 @@ func (s *TwilioNotificationService) SendJoinRequestApprovedWhatsapp(
 		ctx, "JOIN_APPROVED", guestPhone, message, templateName, templateLang,
 		"name", guestName, "event_name", eventTitle,
 	)
+}
+
+// SendEventPromoWhatsapp sends a marketing template about an upcoming event to
+// a user who has no relationship with it — no booking, no recent message.
+//
+// Unlike sendWhatsAppWithTemplateFallback, this deliberately has NO plain-text
+// fallback. These recipients have no open 24-hour session window, so a text is
+// rejected by Meta as a re-engagement message (131047) after Kapso has already
+// returned 200 — it would look sent and never arrive. Worse, unsolicited
+// marketing text is the policy violation that gets a number rated down. If the
+// template is missing or unapproved, the correct outcome is a logged failure.
+func (s *TwilioNotificationService) SendEventPromoWhatsapp(
+	ctx context.Context, phone, userName, eventTitle, eventSlug string,
+) error {
+	phone = strings.TrimSpace(phone)
+	if phone == "" {
+		return nil
+	}
+	if s.kapsoClient == nil {
+		return fmt.Errorf("kapso client not configured")
+	}
+
+	templateName, templateLang := "event_promo", "en_US"
+	if s.kapsoCfg != nil {
+		if s.kapsoCfg.MarketingTemplateName != "" {
+			templateName = s.kapsoCfg.MarketingTemplateName
+		}
+		if s.kapsoCfg.MarketingTemplateLang != "" {
+			templateLang = s.kapsoCfg.MarketingTemplateLang
+		}
+	}
+
+	if userName == "" {
+		userName = "there"
+	}
+	// Body takes named params; the URL button takes ONE positional param, which
+	// Meta appends to the template's fixed URL prefix (…/experience/). Sending
+	// the slug is what makes the link open this event rather than the homepage.
+	components := []TemplateComponent{
+		{
+			Type: "body",
+			Parameters: []TemplateParameter{
+				{Type: "text", ParameterName: "name", Text: userName},
+				{Type: "text", ParameterName: "event_name", Text: eventTitle},
+			},
+		},
+	}
+	if eventSlug != "" {
+		components = append(components, TemplateComponent{
+			Type:    "button",
+			SubType: "url",
+			Index:   "0",
+			Parameters: []TemplateParameter{
+				{Type: "text", Text: eventSlug},
+			},
+		})
+	}
+
+	err := s.kapsoClient.SendTemplateMessage(ctx, phone, templateName, templateLang, components)
+	if err != nil {
+		log.Printf("[EVENT_PROMO] Template %q to %s failed: %v\n", templateName, phone, err)
+		return err
+	}
+	log.Printf("[EVENT_PROMO] WhatsApp sent to %s via template %q\n", phone, templateName)
+	return nil
 }

@@ -250,6 +250,7 @@ func main() {
 		eventRepo,
 		notifService,
 		cfg.AdminAuth.JWTSecret,
+		cfg.FrontendBaseURL,
 	)
 	adminDashboardController := controller.NewAdminDashboardController(adminDirectoryRepo, cfg.AdminAuth.JWTSecret)
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)

@@ -34,6 +34,51 @@ type AdminUserRow struct {
 	TotalSpentCents int64
 }
 
+// MarketingRecipient is one contactable user for a marketing blast. Separate
+// from AdminUserRow because the directory row carries booking aggregates but no
+// phone number.
+type MarketingRecipient struct {
+	ID    uuid.UUID
+	Name  string
+	Email string
+	Phone string
+}
+
+// ListMarketingRecipients returns every user reachable by email or WhatsApp,
+// optionally narrowed to one city. Unpaginated on purpose: this feeds a send
+// loop, and ListUsers caps out at maxPageSize.
+//
+// NOTE: the users table has no marketing opt-out column, so this really is
+// every registered user.
+func (r *AdminDirectoryRepository) ListMarketingRecipients(ctx context.Context, city string) ([]MarketingRecipient, error) {
+	query := `
+		SELECT u.id, u.name, COALESCE(u.email, ''), COALESCE(u.phn_number, '')
+		FROM users u
+		WHERE (COALESCE(u.email, '') <> '' OR COALESCE(u.phn_number, '') <> '')`
+	var args []any
+	if c := strings.TrimSpace(city); c != "" {
+		args = append(args, c)
+		query += fmt.Sprintf(" AND u.city = $%d", len(args))
+	}
+	query += " ORDER BY u.created_at DESC"
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []MarketingRecipient
+	for rows.Next() {
+		var m MarketingRecipient
+		if err := rows.Scan(&m.ID, &m.Name, &m.Email, &m.Phone); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // ListUsersParams controls pagination and server-side filtering of the users
 // directory.
 type ListUsersParams struct {

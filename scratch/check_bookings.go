@@ -16,6 +16,9 @@ import (
 	"github.com/joho/godotenv"
 )
 
+
+
+
 func main() {
 	_ = godotenv.Load(".env")
 	dbURL := os.Getenv("DATABASE_URL")

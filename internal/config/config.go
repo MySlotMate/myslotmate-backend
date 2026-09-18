@@ -102,6 +102,10 @@ type KapsoConfig struct {
 	ReminderTemplateLang  string
 	HostAlertTemplateName string
 	HostAlertTemplateLang string
+	// Marketing blasts to users who have no open 24-hour session window: only an
+	// approved marketing template can reach them.
+	MarketingTemplateName string
+	MarketingTemplateLang string
 	// RSVP join requests: one template tells the host someone applied, the
 	// other tells the guest they were approved. Both must exist and be approved
 	// in the WhatsApp Business account before they can deliver outside the
@@ -132,6 +136,7 @@ type Config struct {
 	HTTPPort          string
 	AdminEmail        string
 	RenderExternalURL string // RENDER_EXTERNAL_URL, used for self-ping keep-alive
+	FrontendBaseURL   string // FRONTEND_BASE_URL, public site root used to build event links
 	AdminAuth         AdminAuthConfig
 	Firebase          FirebaseConfig
 	Database          DatabaseConfig
@@ -157,6 +162,7 @@ func Load() (*Config, error) {
 		HTTPPort:          getEnv("HTTP_PORT", "8080"),
 		AdminEmail:        getEnv("ADMIN_EMAIL", ""),
 		RenderExternalURL: getEnv("RENDER_EXTERNAL_URL", ""),
+		FrontendBaseURL:   strings.TrimRight(getEnv("FRONTEND_BASE_URL", "https://myslotmate.com"), "/"),
 		AdminAuth: AdminAuthConfig{
 			Username:  getEnv("ADMIN_USERNAME", "admin@myslotmate.com"),
 			Password:  getEnv("ADMIN_PASSWORD", "Admin@12345"),
@@ -241,6 +247,8 @@ func Load() (*Config, error) {
 			ReminderTemplateLang:  getEnv("KAPSO_REMINDER_TEMPLATE_LANG", "en_US"),
 			HostAlertTemplateName: getEnv("KAPSO_HOST_ALERT_TEMPLATE_NAME", "host_application_alert"),
 			HostAlertTemplateLang: getEnv("KAPSO_HOST_ALERT_TEMPLATE_LANG", "en_US"),
+			MarketingTemplateName: getEnv("KAPSO_MARKETING_TEMPLATE_NAME", "event_promo"),
+			MarketingTemplateLang: getEnv("KAPSO_MARKETING_TEMPLATE_LANG", "en_US"),
 
 			JoinRequestTemplateName:  getEnv("KAPSO_JOIN_REQUEST_TEMPLATE_NAME", "join_request_received"),
 			JoinRequestTemplateLang:  getEnv("KAPSO_JOIN_REQUEST_TEMPLATE_LANG", "en_US"),

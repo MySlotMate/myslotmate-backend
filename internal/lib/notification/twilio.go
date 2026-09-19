@@ -69,7 +69,7 @@ type NotificationService interface {
 	// SendEventPromoWhatsapp markets an upcoming event to a user who has not
 	// booked anything — template only, no plain-text fallback (see the comment
 	// on the implementation).
-	SendEventPromoWhatsapp(ctx context.Context, phone, userName, eventTitle, eventSlug string) error
+	SendEventPromoWhatsapp(ctx context.Context, phone, userName, eventTitle, eventSlug, imageURL string) error
 }
 
 // NewTwilioNotificationService creates a new Twilio notification service
@@ -582,7 +582,7 @@ func (s *TwilioNotificationService) SendJoinRequestApprovedWhatsapp(
 // marketing text is the policy violation that gets a number rated down. If the
 // template is missing or unapproved, the correct outcome is a logged failure.
 func (s *TwilioNotificationService) SendEventPromoWhatsapp(
-	ctx context.Context, phone, userName, eventTitle, eventSlug string,
+	ctx context.Context, phone, userName, eventTitle, eventSlug, imageURL string,
 ) error {
 	phone = strings.TrimSpace(phone)
 	if phone == "" {
@@ -605,18 +605,34 @@ func (s *TwilioNotificationService) SendEventPromoWhatsapp(
 	if userName == "" {
 		userName = "there"
 	}
+	// An IMAGE header is all-or-nothing: the approved template either declares
+	// one — and then the parameter is mandatory — or it does not, and sending a
+	// header is a parameter mismatch. The config flag tracks which template is
+	// live, so a missing cover image is a refusal rather than a failed send.
+	wantImage := s.kapsoCfg != nil && s.kapsoCfg.MarketingTemplateHasImage
+	if wantImage && imageURL == "" {
+		return fmt.Errorf("template %q expects an image header but the event has no cover image", templateName)
+	}
+
 	// Body takes named params; the URL button takes ONE positional param, which
 	// Meta appends to the template's fixed URL prefix (…/experience/). Sending
 	// the slug is what makes the link open this event rather than the homepage.
-	components := []TemplateComponent{
-		{
-			Type: "body",
+	var components []TemplateComponent
+	if wantImage {
+		components = append(components, TemplateComponent{
+			Type: "header",
 			Parameters: []TemplateParameter{
-				{Type: "text", ParameterName: "name", Text: userName},
-				{Type: "text", ParameterName: "event_name", Text: eventTitle},
+				{Type: "image", Image: &TemplateMedia{Link: imageURL}},
 			},
-		},
+		})
 	}
+	components = append(components, TemplateComponent{
+		Type: "body",
+		Parameters: []TemplateParameter{
+			{Type: "text", ParameterName: "name", Text: userName},
+			{Type: "text", ParameterName: "event_name", Text: eventTitle},
+		},
+	})
 	if eventSlug != "" {
 		components = append(components, TemplateComponent{
 			Type:    "button",

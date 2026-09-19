@@ -106,6 +106,11 @@ type KapsoConfig struct {
 	// approved marketing template can reach them.
 	MarketingTemplateName string
 	MarketingTemplateLang string
+	// MarketingTemplateHasImage must match the approved template exactly: an
+	// IMAGE header requires a header parameter, and a template without one
+	// rejects any header we send. Flipping this is how a v2 with a photo is
+	// switched on.
+	MarketingTemplateHasImage bool
 	// RSVP join requests: one template tells the host someone applied, the
 	// other tells the guest they were approved. Both must exist and be approved
 	// in the WhatsApp Business account before they can deliver outside the
@@ -239,16 +244,17 @@ func Load() (*Config, error) {
 			Environment: getEnv("PINECONE_ENVIRONMENT", "us-east-1"),
 		},
 		Kapso: KapsoConfig{
-			APIKey:                getEnv("KAPSO_API_KEY", ""),
-			PhoneNumberID:         getEnv("KAPSO_PHONE_NUMBER_ID", ""),
-			TicketTemplateName:    getEnv("KAPSO_TICKET_TEMPLATE_NAME", "ticket_confirmation"),
-			TicketTemplateLang:    getEnv("KAPSO_TICKET_TEMPLATE_LANG", "en_US"),
-			ReminderTemplateName:  getEnv("KAPSO_REMINDER_TEMPLATE_NAME", "event_reminder"),
-			ReminderTemplateLang:  getEnv("KAPSO_REMINDER_TEMPLATE_LANG", "en_US"),
-			HostAlertTemplateName: getEnv("KAPSO_HOST_ALERT_TEMPLATE_NAME", "host_application_alert"),
-			HostAlertTemplateLang: getEnv("KAPSO_HOST_ALERT_TEMPLATE_LANG", "en_US"),
-			MarketingTemplateName: getEnv("KAPSO_MARKETING_TEMPLATE_NAME", "event_promo"),
-			MarketingTemplateLang: getEnv("KAPSO_MARKETING_TEMPLATE_LANG", "en_US"),
+			APIKey:                    getEnv("KAPSO_API_KEY", ""),
+			PhoneNumberID:             getEnv("KAPSO_PHONE_NUMBER_ID", ""),
+			TicketTemplateName:        getEnv("KAPSO_TICKET_TEMPLATE_NAME", "ticket_confirmation"),
+			TicketTemplateLang:        getEnv("KAPSO_TICKET_TEMPLATE_LANG", "en_US"),
+			ReminderTemplateName:      getEnv("KAPSO_REMINDER_TEMPLATE_NAME", "event_reminder"),
+			ReminderTemplateLang:      getEnv("KAPSO_REMINDER_TEMPLATE_LANG", "en_US"),
+			HostAlertTemplateName:     getEnv("KAPSO_HOST_ALERT_TEMPLATE_NAME", "host_application_alert"),
+			HostAlertTemplateLang:     getEnv("KAPSO_HOST_ALERT_TEMPLATE_LANG", "en_US"),
+			MarketingTemplateName:     getEnv("KAPSO_MARKETING_TEMPLATE_NAME", "event_promo"),
+			MarketingTemplateLang:     getEnv("KAPSO_MARKETING_TEMPLATE_LANG", "en_US"),
+			MarketingTemplateHasImage: getEnv("KAPSO_MARKETING_TEMPLATE_HAS_IMAGE", "false") == "true",
 
 			JoinRequestTemplateName:  getEnv("KAPSO_JOIN_REQUEST_TEMPLATE_NAME", "join_request_received"),
 			JoinRequestTemplateLang:  getEnv("KAPSO_JOIN_REQUEST_TEMPLATE_LANG", "en_US"),

@@ -904,6 +904,12 @@ func (c *AdminDirectoryController) PromoteEventToAllUsers(w http.ResponseWriter,
 		return
 	}
 
+	// Only used when the live template declares an image header.
+	var coverImage string
+	if event.CoverImageURL != nil {
+		coverImage = *event.CoverImageURL
+	}
+
 	// Dry run: the audience size is the only thing worth checking before a blast,
 	// and an empty City means EVERY user — cheap insurance against a typo.
 	if req.DryRun {
@@ -919,6 +925,7 @@ func (c *AdminDirectoryController) PromoteEventToAllUsers(w http.ResponseWriter,
 			"notified_count": len(recipients),
 			"dry_run":        true,
 			"event_url":      c.frontendURL + "/experience/" + event.Slug,
+			"cover_image":    coverImage,
 			"sample":         sample,
 		})
 		return
@@ -951,7 +958,7 @@ func (c *AdminDirectoryController) PromoteEventToAllUsers(w http.ResponseWriter,
 			if (req.Channel == "both" || req.Channel == "whatsapp") && u.Phone != "" && !sentPhone[phoneKey] {
 				sentPhone[phoneKey] = true
 				sendCtx, cancel := context.WithTimeout(bgCtx, 30*time.Second)
-				if err := c.notifService.SendEventPromoWhatsapp(sendCtx, u.Phone, u.Name, event.Title, event.Slug); err != nil {
+				if err := c.notifService.SendEventPromoWhatsapp(sendCtx, u.Phone, u.Name, event.Title, event.Slug, coverImage); err != nil {
 					waFailed++
 				} else {
 					waSent++

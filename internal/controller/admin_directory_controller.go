@@ -940,6 +940,8 @@ func (c *AdminDirectoryController) PromoteEventToAllUsers(w http.ResponseWriter,
 
 	go func() {
 		defer promoteInFlight.Unlock()
+		log.Printf("[EVENT_PROMO] start event=%s rows=%d channel=%s city=%q\n",
+			eventID, len(recipients), req.Channel, req.City)
 		// No overall deadline: a few thousand sequential sends can outlast any
 		// sane one. Each send gets its own timeout instead.
 		bgCtx := context.Background()
@@ -984,8 +986,10 @@ func (c *AdminDirectoryController) PromoteEventToAllUsers(w http.ResponseWriter,
 `, event.Title, u.Name, req.Message, eventURL)
 				if err := c.notifService.SendCustomEmail(sendCtx, u.Email, subject, body); err != nil {
 					mailFailed++
+					log.Printf("[EVENT_PROMO] Email to %s failed: %v\n", u.Email, err)
 				} else {
 					mailSent++
+					log.Printf("[EVENT_PROMO] Email sent to %s\n", u.Email)
 				}
 				cancel()
 			}

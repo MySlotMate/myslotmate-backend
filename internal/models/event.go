@@ -121,6 +121,14 @@ type Event struct {
 	RecurrenceRule *string        `db:"recurrence_rule" json:"recurrence_rule,omitempty"` // e.g. "FREQ=WEEKLY;BYDAY=MO"
 	CustomDates    pq.StringArray `db:"custom_dates" json:"custom_dates"`                 // ISO timestamps for custom/dynamic date slots
 
+	// ── Monthly pass ────────────────────────────────────────────────────────
+	// Opt-in, recurring events only. MonthlyPassPriceCents nil = the event has
+	// no pass and behaves exactly as before. One payment covers every session
+	// (or MonthlyPassSessionLimit of them) for models.PassValidityDays.
+	MonthlyPassPriceCents   *int64 `db:"monthly_pass_price_cents" json:"monthly_pass_price_cents,omitempty"`
+	MonthlyPassSessionLimit *int   `db:"monthly_pass_session_limit" json:"monthly_pass_session_limit,omitempty"` // nil = every session
+	MonthlyPassCapacity     *int   `db:"monthly_pass_capacity" json:"monthly_pass_capacity,omitempty"`           // nil = unlimited passes
+
 	// ── One-on-one sessions ─────────────────────────────────────────────────
 	// SessionType == one_on_one means Capacity is 1 and the sessions come from
 	// SessionWindows, DurationMinutes apart with BreakMinutes between them.

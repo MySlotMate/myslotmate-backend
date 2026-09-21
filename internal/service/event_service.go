@@ -103,6 +103,50 @@ type EventCreateRequest struct {
 	AccessPasskey     *string                   `json:"access_passkey,omitempty"`
 	PrivateAccessMode *models.PrivateAccessMode `json:"private_access_mode,omitempty"`
 	PasskeyGrantsFree bool                      `json:"passkey_grants_free"`
+
+	MonthlyPass *MonthlyPassInput `json:"monthly_pass,omitempty"`
+}
+
+// MonthlyPassInput is the host's pass configuration. Omitted (nil) leaves the
+// event's pass untouched; a PriceCents of 0 switches the pass off.
+type MonthlyPassInput struct {
+	PriceCents   int64 `json:"price_cents"`             // 0 = no monthly pass on this event
+	SessionLimit *int  `json:"session_limit,omitempty"` // nil = every session in the window
+	Capacity     *int  `json:"capacity,omitempty"`      // nil = unlimited passes
+}
+
+// applyMonthlyPass validates the host's pass settings against the event they
+// belong to and writes them onto it. A pass only makes sense on a repeating,
+// paid event — there is nothing to repeat on a one-time event, and nothing to
+// save on a free one. Enforced here rather than only in the UI, because the
+// API is reachable without it.
+func applyMonthlyPass(evt *models.Event, in *MonthlyPassInput) error {
+	if in == nil {
+		return nil
+	}
+	if in.PriceCents <= 0 {
+		evt.MonthlyPassPriceCents = nil
+		evt.MonthlyPassSessionLimit = nil
+		evt.MonthlyPassCapacity = nil
+		return nil
+	}
+	if evt.ScheduleType == models.ScheduleTypeOneTime {
+		return errors.New("a monthly pass needs a repeating experience")
+	}
+	if evt.IsFree {
+		return errors.New("a free experience cannot have a monthly pass")
+	}
+	if in.SessionLimit != nil && *in.SessionLimit <= 0 {
+		return errors.New("sessions included must be at least 1")
+	}
+	if in.Capacity != nil && *in.Capacity <= 0 {
+		return errors.New("passes available must be at least 1")
+	}
+	price := in.PriceCents
+	evt.MonthlyPassPriceCents = &price
+	evt.MonthlyPassSessionLimit = in.SessionLimit
+	evt.MonthlyPassCapacity = in.Capacity
+	return nil
 }
 
 type EventUpdateRequest struct {
@@ -147,6 +191,8 @@ type EventUpdateRequest struct {
 	AccessPasskey     *string                   `json:"access_passkey,omitempty"`
 	PrivateAccessMode *models.PrivateAccessMode `json:"private_access_mode,omitempty"`
 	PasskeyGrantsFree *bool                     `json:"passkey_grants_free,omitempty"`
+
+	MonthlyPass *MonthlyPassInput `json:"monthly_pass,omitempty"`
 }
 
 type eventService struct {
@@ -321,6 +367,9 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		return nil, err
 	}
 
+	if err := applyMonthlyPass(newEvent, req.MonthlyPass); err != nil {
+		return nil, err
+	}
 	applyPrivacyInvariants(newEvent)
 	if err := validatePrivacyConfig(newEvent); err != nil {
 		return nil, err
@@ -580,6 +629,9 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 		evt.PasskeyGrantsFree = *req.PasskeyGrantsFree
 	}
 
+	if err := applyMonthlyPass(evt, req.MonthlyPass); err != nil {
+		return nil, err
+	}
 	applyPrivacyInvariants(evt)
 	if err := validatePrivacyConfig(evt); err != nil {
 		return nil, err

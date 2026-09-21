@@ -53,6 +53,7 @@ type Booking struct {
 	CouponID                         *uuid.UUID    `db:"coupon_id" json:"coupon_id,omitempty"`                   // comp coupon used to waive this booking (nil = none)
 	Source                           string        `db:"source" json:"source"`                                   // online | walk_in | bulk_import — see BookingSource* above
 	ImportJobID                      *uuid.UUID    `db:"import_job_id" json:"import_job_id,omitempty"`           // the bulk upload that created this booking (nil otherwise)
+	PassID                           *uuid.UUID    `db:"pass_id" json:"pass_id,omitempty"`                       // monthly pass that covered this seat (nil = ordinary booking)
 	CheckedInCount                   int           `db:"checked_in_count" json:"checked_in_count"`               // guests admitted so far; a group may arrive in waves, capped at Quantity
 	LastCheckedInAt                  *time.Time    `db:"last_checked_in_at" json:"last_checked_in_at,omitempty"` // most recent door scan
 	CreatedAt                        time.Time     `db:"created_at" json:"created_at"`

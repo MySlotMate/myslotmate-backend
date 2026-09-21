@@ -45,6 +45,7 @@ func NewRouter(
 	hostCtrl *controller.HostController,
 	eventCtrl *controller.EventController,
 	bookingCtrl *controller.BookingController,
+	passCtrl *controller.PassController,
 	couponCtrl *controller.CouponController,
 	joinRequestCtrl *controller.JoinRequestController,
 	walkInCtrl *controller.WalkInController,
@@ -124,6 +125,10 @@ func NewRouter(
 
 	if bookingCtrl != nil {
 		bookingCtrl.RegisterRoutes(r)
+	}
+
+	if passCtrl != nil {
+		passCtrl.RegisterRoutes(r)
 	}
 
 	if walkInCtrl != nil {

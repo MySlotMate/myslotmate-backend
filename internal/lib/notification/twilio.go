@@ -9,6 +9,7 @@ import (
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 	"strings"
+	"time"
 
 	"github.com/twilio/twilio-go"
 	twilioapiv2010 "github.com/twilio/twilio-go/rest/api/v2010"
@@ -70,6 +71,10 @@ type NotificationService interface {
 	// booked anything — template only, no plain-text fallback (see the comment
 	// on the implementation).
 	SendEventPromoWhatsapp(ctx context.Context, phone, userName, eventTitle, eventSlug, imageURL string) error
+	// SendPassConfirmationWhatsapp tells a guest their monthly pass is live.
+	// One message for the whole pass — the sessions it booked are deliberately
+	// NOT confirmed one by one, which would be a burst of messages.
+	SendPassConfirmationWhatsapp(ctx context.Context, phone, userName, eventTitle string, sessionsBooked int, validUntil time.Time) error
 }
 
 // NewTwilioNotificationService creates a new Twilio notification service
@@ -143,6 +148,49 @@ func (s *TwilioNotificationService) SendBookingConfirmationWhatsapp(ctx context.
 		return fmt.Errorf("failed to mark WhatsApp notification as sent: %w", err)
 	}
 
+	return nil
+}
+
+// SendPassConfirmationWhatsapp confirms a monthly pass in a single message,
+// listing how many sessions it just booked and when it runs out.
+func (s *TwilioNotificationService) SendPassConfirmationWhatsapp(ctx context.Context, phone, userName, eventTitle string, sessionsBooked int, validUntil time.Time) error {
+	if phone == "" {
+		return fmt.Errorf("user phone not available")
+	}
+
+	sessions := fmt.Sprintf("%d sessions", sessionsBooked)
+	if sessionsBooked == 1 {
+		sessions = "1 session"
+	}
+	greeting := "Hi"
+	if userName != "" {
+		greeting = "Hi " + userName
+	}
+	message := fmt.Sprintf(
+		"%s! 🎟️ Your Monthly Pass for %s is active.\n\nWe've booked %s for you — your tickets are in My Bookings, nothing else to do.\n\nValid until: %s\n\nSee you there!",
+		greeting,
+		eventTitle,
+		sessions,
+		timeutil.FormatEventTime(validUntil),
+	)
+
+	if s.kapsoClient != nil {
+		if err := s.kapsoClient.SendTextMessage(ctx, phone, message); err != nil {
+			return fmt.Errorf("failed to send WhatsApp message via Kapso: %w", err)
+		}
+		return nil
+	}
+
+	if s.cfg.WhatsappNumber == "" {
+		return fmt.Errorf("WhatsApp number not configured")
+	}
+	params := &twilioapiv2010.CreateMessageParams{}
+	params.SetFrom("whatsapp:" + formatPhoneNumber(s.cfg.WhatsappNumber))
+	params.SetTo("whatsapp:" + formatPhoneNumber(phone))
+	params.SetBody(message)
+	if _, err := s.client.Api.CreateMessage(params); err != nil {
+		return fmt.Errorf("failed to send WhatsApp message via Twilio: %w", err)
+	}
 	return nil
 }
 

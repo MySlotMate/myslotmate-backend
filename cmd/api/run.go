@@ -131,6 +131,7 @@ func main() {
 	bookingImportRepo := repository.NewBookingImportRepository(dbConn)
 	couponRepo := repository.NewCouponRepository(dbConn)
 	joinRequestRepo := repository.NewJoinRequestRepository(dbConn)
+	passRepo := repository.NewPassRepository(dbConn)
 
 	// Ensure platform account exists for fee tracking
 	if err := ensurePlatformAccount(ctx, accountRepo); err != nil {
@@ -199,12 +200,13 @@ func main() {
 
 	userService := service.NewUserService(userRepo, hostRepo, savedExpRepo, accountRepo, paymentRepo, ledgerRepo, attendeeProfileRepo, workerPool, dispatcher, aadharProvider, paymentProvider, notifService, otpClient, cfg.AdminAuth.JWTSecret, fbApp.Auth)
 	hostService := service.NewHostService(hostRepo, userRepo, eventRepo, bookingRepo, reviewRepo, payoutRepo, accountRepo, uploadService, dispatcher, notifService)
-	bookingService := service.NewBookingService(dbConn, bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, couponRepo, joinRequestRepo, userService, dispatcher, notifService)
+	bookingService := service.NewBookingService(dbConn, bookingRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, userRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, couponRepo, joinRequestRepo, passRepo, userService, dispatcher, notifService)
 	eventService := service.NewEventService(eventRepo, bookingRepo, accountRepo, ledgerRepo, eventPriceTierRepo, attendeeProfileRepo, dispatcher, bookingService)
 	joinRequestService := service.NewJoinRequestService(joinRequestRepo, eventRepo, attendeeProfileRepo, hostRepo, service.NewJoinRequestNotifier(notifService))
 	reviewService := service.NewReviewService(reviewRepo, eventRepo, hostRepo, dispatcher)
 	inboxService := service.NewInboxService(inboxRepo, eventRepo, socketService)
 	supportService := service.NewSupportService(supportRepo)
+	passService := service.NewPassService(dbConn, passRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, ledgerRepo, bookingRepo, userRepo, bookingService, eventService, notifService)
 	payoutService := service.NewPayoutService(payoutRepo, accountRepo, paymentRepo, bookingRepo, hostRepo, ledgerRepo, payoutProvider, dispatcher)
 
 	// Initialize reminder scheduler
@@ -218,6 +220,7 @@ func main() {
 	hostController := controller.NewHostController(hostService)
 	eventController := controller.NewEventController(eventService)
 	bookingController := controller.NewBookingController(bookingService)
+	passController := controller.NewPassController(passService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	couponController := controller.NewCouponController(couponRepo, bookingService, eventRepo)
 	joinRequestController := controller.NewJoinRequestController(joinRequestService, userRepo, hostRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	walkInService := service.NewWalkInService(userRepo, bookingRepo, eventRepo, eventPriceTierRepo, attendeeProfileRepo, userService, bookingService)
@@ -280,6 +283,7 @@ func main() {
 		hostController,
 		eventController,
 		bookingController,
+		passController,
 		couponController,
 		joinRequestController,
 		walkInController,

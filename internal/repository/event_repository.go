@@ -105,7 +105,8 @@ var eventColumns = `id, host_id,
 	is_private, access_passkey, passkey_grants_free,
 	schedule_type, custom_dates,
 	session_type, break_minutes, session_windows,
-	private_access_mode`
+	private_access_mode,
+	monthly_pass_price_cents, monthly_pass_session_limit, monthly_pass_capacity`
 
 func scanEvent(row interface {
 	Scan(dest ...interface{}) error
@@ -127,6 +128,7 @@ func scanEvent(row interface {
 		&e.ScheduleType, &e.CustomDates,
 		&e.SessionType, &e.BreakMinutes, &e.SessionWindows,
 		&e.PrivateAccessMode,
+		&e.MonthlyPassPriceCents, &e.MonthlyPassSessionLimit, &e.MonthlyPassCapacity,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -160,7 +162,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			is_private, access_passkey, passkey_grants_free,
 			schedule_type, custom_dates,
 			session_type, break_minutes, session_windows,
-			private_access_mode
+			private_access_mode,
+			monthly_pass_price_cents, monthly_pass_session_limit, monthly_pass_capacity
 		) VALUES (
 			$1, $2,
 			$3, $4, $5, $6,
@@ -176,7 +179,8 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 			$39, $40, $41,
 			$42, $43,
 			$44, $45, $46,
-			$47
+			$47,
+			$48, $49, $50
 		)
 	`
 	if event.ID == uuid.Nil {
@@ -207,6 +211,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 		event.ScheduleType, pq.Array(event.CustomDates),
 		event.SessionType, event.BreakMinutes, event.SessionWindows,
 		event.PrivateAccessMode,
+		event.MonthlyPassPriceCents, event.MonthlyPassSessionLimit, event.MonthlyPassCapacity,
 	)
 	return err
 }
@@ -226,8 +231,9 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 			is_private = $38, access_passkey = $39, passkey_grants_free = $40,
 			schedule_type = $41, custom_dates = $42,
 			session_type = $43, break_minutes = $44, session_windows = $45,
-			private_access_mode = $46
-		WHERE id = $47
+			private_access_mode = $46,
+			monthly_pass_price_cents = $47, monthly_pass_session_limit = $48, monthly_pass_capacity = $49
+		WHERE id = $50
 	`
 	if event.ScheduleType == "" {
 		event.ScheduleType = models.ScheduleTypeOneTime
@@ -252,6 +258,7 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 		event.ScheduleType, pq.Array(event.CustomDates),
 		event.SessionType, event.BreakMinutes, event.SessionWindows,
 		event.PrivateAccessMode,
+		event.MonthlyPassPriceCents, event.MonthlyPassSessionLimit, event.MonthlyPassCapacity,
 		event.ID,
 	)
 	return err
@@ -383,36 +390,20 @@ func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, 
 
 	events := []*models.Event{}
 	for rows.Next() {
-		e := &models.Event{}
-		if err := rows.Scan(
-			&e.ID, &e.HostID,
-			&e.Title, &e.HookLine, &e.Mood, &e.Description,
-			&e.CoverImageURL, &e.GalleryURLs,
-			&e.IsOnline, &e.MeetingLink, &e.Location, &e.LocationLat, &e.LocationLng, &e.GoogleMapsURL, &e.DurationMinutes, &e.MinGroupSize, &e.MaxGroupSize, &e.Capacity,
-			&e.Languages, &e.Level,
-			&e.PriceCents, &e.IsFree, &e.Time, &e.EndTime, &e.IsRecurring, &e.RecurrenceRule,
-			&e.CancellationPolicy, &e.Status, &e.PublishedAt, &e.PausedAt, &e.PausedFrom, &e.PausedDates,
-			&e.AISuggestion, &e.AvgRating, &e.TotalBookings, &e.TotalReviews,
-			&e.CreatedAt, &e.UpdatedAt,
-			&e.RequiresAttendeeDetails, &e.AttendeeFields,
-			&e.TermsAndConditions, &e.Slug,
-			&e.IsPrivate, &e.AccessPasskey, &e.PasskeyGrantsFree,
-			&e.ScheduleType, &e.CustomDates,
-			&e.SessionType, &e.BreakMinutes, &e.SessionWindows,
-			&e.PrivateAccessMode,
-		); err != nil {
+		// Scan through scanEvent so the column list has exactly one reader —
+		// this function used to keep its own copy of the field order, which
+		// silently broke every list endpoint whenever a column was added.
+		e, err := scanEvent(rows)
+		if err != nil {
 			fmt.Printf("[EVENT_REPO] scanEvents Scan ERROR: %v\n", err)
 			return nil, err
 		}
 		fmt.Printf("[EVENT_REPO] scanEvents: Found event - id=%s, title=%s, hostID=%s, status=%v\n",
 			e.ID, e.Title, e.HostID, e.Status)
-		normalizedMood, err := models.NormalizeEventMood(e.Mood)
-		if err != nil {
-			return nil, err
-		}
-		e.Mood = normalizedMood
-		applyRecurrence(e)
 		events = append(events, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	fmt.Printf("[EVENT_REPO] scanEvents: Total events found: %d\n", len(events))
 	return events, nil

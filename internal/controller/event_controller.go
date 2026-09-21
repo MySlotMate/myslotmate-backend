@@ -146,6 +146,9 @@ type EventCreateRequestBody struct {
 	IsPrivate         bool    `json:"is_private"`
 	AccessPasskey     *string `json:"access_passkey,omitempty"`
 	PasskeyGrantsFree bool    `json:"passkey_grants_free"`
+
+	// Monthly pass config. Omitted leaves it alone; price_cents 0 switches it off.
+	MonthlyPass *service.MonthlyPassInput `json:"monthly_pass,omitempty"`
 }
 
 type EventUpdateRequestBody struct {
@@ -192,6 +195,9 @@ type EventUpdateRequestBody struct {
 	IsPrivate         *bool   `json:"is_private,omitempty"`
 	AccessPasskey     *string `json:"access_passkey,omitempty"`
 	PasskeyGrantsFree *bool   `json:"passkey_grants_free,omitempty"`
+
+	// Monthly pass config. Omitted leaves it alone; price_cents 0 switches it off.
+	MonthlyPass *service.MonthlyPassInput `json:"monthly_pass,omitempty"`
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -272,6 +278,7 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		IsPrivate:         req.IsPrivate,
 		AccessPasskey:     req.AccessPasskey,
 		PasskeyGrantsFree: req.PasskeyGrantsFree,
+		MonthlyPass:       req.MonthlyPass,
 	}
 
 	evt, err := c.eventService.CreateEvent(r.Context(), req.HostID, svcReq)
@@ -345,6 +352,7 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		IsPrivate:         body.IsPrivate,
 		AccessPasskey:     body.AccessPasskey,
 		PasskeyGrantsFree: body.PasskeyGrantsFree,
+		MonthlyPass:       body.MonthlyPass,
 	}
 
 	evt, err := c.eventService.UpdateEvent(r.Context(), eventID, body.HostID, svcReq)

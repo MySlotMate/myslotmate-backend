@@ -549,7 +549,7 @@ func (s *passService) ListHolders(ctx context.Context, hostID, eventID uuid.UUID
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if evt.HostID != hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, hostID) {
 		return nil, errors.New("not your experience")
 	}
 	return s.passRepo.ListHolders(ctx, eventID)

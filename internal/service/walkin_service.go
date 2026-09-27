@@ -136,13 +136,14 @@ type WalkInCompleteRequest struct {
 // isn't theirs.
 var ErrWalkInNotOwner = errors.New("not authorized for this event")
 
-// verifyHostOwnership enforces that a host-scoped request targets the host's own
-// event. A nil hostID (admin flow) always passes.
-func verifyHostOwnership(evt *models.Event, hostID *uuid.UUID) error {
+// verifyHostOwnership enforces that a host-scoped request targets an event the
+// host may manage — their own, or one shared with them as an accepted co-host.
+// A nil hostID (admin flow) always passes.
+func (s *walkInService) verifyHostOwnership(ctx context.Context, evt *models.Event, hostID *uuid.UUID) error {
 	if hostID == nil {
 		return nil
 	}
-	if evt.HostID != *hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, *hostID) {
 		return ErrWalkInNotOwner
 	}
 	return nil
@@ -219,7 +220,7 @@ func (s *walkInService) InitiateWalkIn(ctx context.Context, req WalkInInitiateRe
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if err := verifyHostOwnership(evt, req.HostID); err != nil {
+	if err := s.verifyHostOwnership(ctx, evt, req.HostID); err != nil {
 		return nil, err
 	}
 	if err := s.rejectIfTiered(ctx, req.EventID); err != nil {
@@ -369,7 +370,7 @@ func (s *walkInService) CompleteWalkIn(ctx context.Context, req WalkInCompleteRe
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if err := verifyHostOwnership(evt, req.HostID); err != nil {
+	if err := s.verifyHostOwnership(ctx, evt, req.HostID); err != nil {
 		return nil, err
 	}
 	if err := s.rejectIfTiered(ctx, req.EventID); err != nil {
@@ -464,7 +465,7 @@ func (s *walkInService) LookupByPhoneForHost(ctx context.Context, hostID, eventI
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if err := verifyHostOwnership(evt, &hostID); err != nil {
+	if err := s.verifyHostOwnership(ctx, evt, &hostID); err != nil {
 		return nil, err
 	}
 	return s.LookupByPhone(ctx, phone)

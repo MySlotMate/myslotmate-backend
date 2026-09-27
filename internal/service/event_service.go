@@ -473,7 +473,7 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if evt.HostID != hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, hostID) {
 		return nil, errors.New("unauthorized: you do not own this event")
 	}
 
@@ -713,7 +713,7 @@ func (s *eventService) CancelEvent(ctx context.Context, eventID uuid.UUID, hostI
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if evt.HostID != hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, hostID) {
 		return nil, errors.New("unauthorized: you do not own this event")
 	}
 
@@ -847,7 +847,7 @@ func (s *eventService) enrichEvent(ctx context.Context, evt *models.Event) (*mod
 }
 
 func (s *eventService) GetHostEvents(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error) {
-	events, err := s.eventRepo.ListByHostID(ctx, hostID)
+	events, err := s.eventRepo.ListManageableByHostID(ctx, hostID)
 	if err != nil {
 		return nil, err
 	}
@@ -992,7 +992,7 @@ func (s *eventService) PublishEvent(ctx context.Context, eventID uuid.UUID, host
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if evt.HostID != hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, hostID) {
 		return nil, errors.New("unauthorized")
 	}
 	// Only a draft is promoted to live. Publishing an already-live, paused, or
@@ -1020,7 +1020,7 @@ func (s *eventService) PauseEvent(ctx context.Context, eventID uuid.UUID, hostID
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if evt.HostID != hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, hostID) {
 		return nil, errors.New("unauthorized")
 	}
 
@@ -1092,7 +1092,7 @@ func (s *eventService) ResumeEvent(ctx context.Context, eventID uuid.UUID, hostI
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if evt.HostID != hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, hostID) {
 		return nil, errors.New("unauthorized")
 	}
 
@@ -1278,7 +1278,7 @@ func (s *eventService) GetEventOccurrencesForHost(ctx context.Context, eventID u
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if evt.HostID != hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, hostID) {
 		return nil, errors.New("unauthorized")
 	}
 

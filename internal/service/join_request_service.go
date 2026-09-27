@@ -316,7 +316,7 @@ func (s *joinRequestService) assertHostOwnsEvent(ctx context.Context, eventID, h
 	if evt == nil {
 		return ErrJoinRequestNotFound
 	}
-	if evt.HostID != hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, hostID) {
 		return ErrJoinRequestForbidden
 	}
 	return nil

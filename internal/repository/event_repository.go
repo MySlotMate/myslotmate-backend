@@ -72,11 +72,19 @@ type EventRepository interface {
 	// than excludeID — used when updating an event's own slug.
 	SlugExistsExcluding(ctx context.Context, slug string, excludeID uuid.UUID) (bool, error)
 	ListByHostID(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error)
+	// ListManageableByHostID adds the experiences this host co-hosts. Use it for
+	// management screens only — never for stats, ratings or earnings.
+	ListManageableByHostID(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error)
 	ListByHostIDFiltered(ctx context.Context, hostID uuid.UUID, status *models.EventStatus, search string, sortBy string, limit, offset int) ([]*models.Event, error)
 	ListByDateRange(ctx context.Context, hostID uuid.UUID, start, end time.Time) ([]*models.Event, error)
 	ListTodayByHostID(ctx context.Context, hostID uuid.UUID, dayStart, dayEnd time.Time) ([]*models.Event, error)
 	ListByHostIDForIDs(ctx context.Context, hostID uuid.UUID) ([]uuid.UUID, error)
 	ListPublished(ctx context.Context, limit, offset int) ([]*models.Event, error)
+	// HostCanManage reports whether this host may act on the event: they own it,
+	// or they are an accepted co-host of it. Every host-side ownership check
+	// routes through here, so co-hosting does not have to be re-implemented in
+	// each service.
+	HostCanManage(ctx context.Context, eventID, hostID uuid.UUID) (bool, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status models.EventStatus) error
 	IncrementBookingCount(ctx context.Context, eventID uuid.UUID, quantity int) error
 	IncrementReviewCount(ctx context.Context, eventID uuid.UUID) error
@@ -295,15 +303,42 @@ func (r *postgresEventRepository) GetByID(ctx context.Context, id uuid.UUID) (*m
 	return scanEvent(r.db.QueryRowContext(ctx, query, id))
 }
 
+// hostManagesEvent is the SQL half of HostCanManage: the host owns the event, or
+// holds an accepted co-host invitation for it. $1 is the host id. Used by the
+// host-side list queries so a shared event shows up in the co-host's dashboard.
+//
+// Deliberately NOT used by any earnings query — money stays with the owner.
+const hostManagesEvent = `(events.host_id = $1 OR EXISTS (
+	SELECT 1 FROM event_co_hosts ch
+	WHERE ch.event_id = events.id AND ch.host_id = $1 AND ch.status = 'accepted'))`
+
+func (r *postgresEventRepository) HostCanManage(ctx context.Context, eventID, hostID uuid.UUID) (bool, error) {
+	const query = `SELECT EXISTS (
+		SELECT 1 FROM events
+		WHERE events.id = $2 AND ` + hostManagesEvent + `)`
+	var ok bool
+	err := r.db.QueryRowContext(ctx, query, hostID, eventID).Scan(&ok)
+	return ok, err
+}
+
 func (r *postgresEventRepository) ListByHostID(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error) {
 	query := `SELECT ` + eventColumns + ` FROM events WHERE host_id = $1 ORDER BY created_at DESC`
 	fmt.Printf("[EVENT_REPO] ListByHostID: hostID=%s\n", hostID)
 	return r.scanEvents(ctx, query, hostID)
 }
 
+// ListManageableByHostID is ListByHostID widened to the experiences a host may
+// MANAGE — their own plus any they co-host. Kept separate on purpose: every
+// stats, ratings and earnings caller must stay owner-only, or a co-host's
+// figures would count money and reviews that are not theirs.
+func (r *postgresEventRepository) ListManageableByHostID(ctx context.Context, hostID uuid.UUID) ([]*models.Event, error) {
+	query := `SELECT ` + eventColumns + ` FROM events WHERE ` + hostManagesEvent + ` ORDER BY created_at DESC`
+	return r.scanEvents(ctx, query, hostID)
+}
+
 func (r *postgresEventRepository) ListByHostIDFiltered(ctx context.Context, hostID uuid.UUID, status *models.EventStatus, search string, sortBy string, limit, offset int) ([]*models.Event, error) {
 	args := []interface{}{hostID}
-	conditions := []string{"host_id = $1"}
+	conditions := []string{hostManagesEvent}
 	idx := 2
 
 	if status != nil {
@@ -330,12 +365,12 @@ func (r *postgresEventRepository) ListByHostIDFiltered(ctx context.Context, host
 }
 
 func (r *postgresEventRepository) ListByDateRange(ctx context.Context, hostID uuid.UUID, start, end time.Time) ([]*models.Event, error) {
-	query := `SELECT ` + eventColumns + ` FROM events WHERE host_id = $1 AND time >= $2 AND time < $3 ORDER BY time ASC`
+	query := `SELECT ` + eventColumns + ` FROM events WHERE ` + hostManagesEvent + ` AND time >= $2 AND time < $3 ORDER BY time ASC`
 	return r.scanEvents(ctx, query, hostID, start, end)
 }
 
 func (r *postgresEventRepository) ListTodayByHostID(ctx context.Context, hostID uuid.UUID, dayStart, dayEnd time.Time) ([]*models.Event, error) {
-	query := `SELECT ` + eventColumns + ` FROM events WHERE host_id = $1 AND time >= $2 AND time < $3 AND status = 'live' ORDER BY time ASC`
+	query := `SELECT ` + eventColumns + ` FROM events WHERE ` + hostManagesEvent + ` AND time >= $2 AND time < $3 AND status = 'live' ORDER BY time ASC`
 	return r.scanEvents(ctx, query, hostID, dayStart, dayEnd)
 }
 

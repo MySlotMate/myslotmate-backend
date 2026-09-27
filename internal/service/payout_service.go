@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"myslotmate-backend/internal/lib/event"
+	"myslotmate-backend/internal/lib/notification"
 	"myslotmate-backend/internal/lib/payout"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
@@ -26,6 +27,17 @@ type PayoutService interface {
 
 	// Withdrawals (Host)
 	RequestWithdrawal(ctx context.Context, hostID uuid.UUID, req WithdrawalRequest) (*models.Payment, error)
+
+	// Co-hosting (withdrawal-only sharing of one event) — see cohost.go
+	ResendCoHostInvite(ctx context.Context, ownerHostID, cohostID uuid.UUID) error
+	CoHostSummary(ctx context.Context, hostID uuid.UUID) (*CoHostSummary, error)
+	InviteCoHost(ctx context.Context, ownerHostID, eventID uuid.UUID, email string, canWithdraw bool) (*models.EventCoHost, error)
+	ListEventCoHosts(ctx context.Context, ownerHostID, eventID uuid.UUID) ([]*repository.CoHostRow, error)
+	SetCoHostCanWithdraw(ctx context.Context, ownerHostID, cohostID uuid.UUID, canWithdraw bool) error
+	RevokeCoHost(ctx context.Context, ownerHostID, cohostID uuid.UUID) error
+	RespondToCoHostInvite(ctx context.Context, hostID, cohostID uuid.UUID, accept bool) error
+	ListSharedEvents(ctx context.Context, hostID uuid.UUID) ([]*repository.SharedEventRow, error)
+	RequestCoHostWithdrawal(ctx context.Context, cohostHostID, cohostID uuid.UUID, req WithdrawalRequest) (*models.Payment, error)
 
 	// Earnings Dashboard (Host)
 	GetEarningsSummary(ctx context.Context, hostID uuid.UUID) (*EarningsSummary, error)
@@ -81,6 +93,24 @@ type WithdrawalRequest struct {
 	AmountCents    int64
 	PayoutMethodID *uuid.UUID // if nil, use primary
 	IdempotencyKey string
+
+	// Co-host withdrawal (event-scoped). Set only by RequestCoHostWithdrawal.
+	//
+	// EventID caps the withdrawal at that one event's passed earnings.
+	// PayoutHostID is the co-host whose verified payout method RECEIVES the
+	// money — while the payment row, the ledger debit and the availability gate
+	// all stay on the event OWNER's account, so the owner's own
+	// available-balance check sees this payout as in-flight and cannot pay the
+	// same earnings out twice.
+	EventID      *uuid.UUID
+	PayoutHostID *uuid.UUID
+}
+
+// CoHostSummary says whether co-hosting touches this host at all: invitations
+// they received, and co-hosts they granted on their own experiences.
+type CoHostSummary struct {
+	Received int `json:"received"`
+	Granted  int `json:"granted"`
 }
 
 // EarningsSummary is the host-facing earnings + balance view, computed live
@@ -128,8 +158,16 @@ type payoutService struct {
 	bookingRepo repository.BookingRepository
 	hostRepo    repository.HostRepository
 	ledgerRepo  repository.TransactionLedgerRepository
+	cohostRepo  repository.CoHostRepository
+	eventRepo   repository.EventRepository
+	userRepo    repository.UserRepository
 	provider    payout.Provider
 	dispatcher  *event.Dispatcher
+	// notif and frontendBaseURL are used only to tell an invited co-host that
+	// they were invited. Both may be zero — co-hosting works without them, the
+	// invitee just has to find the invitation in their dashboard.
+	notif           notification.NotificationService
+	frontendBaseURL string
 }
 
 func NewPayoutService(
@@ -139,18 +177,28 @@ func NewPayoutService(
 	br repository.BookingRepository,
 	hr repository.HostRepository,
 	lr repository.TransactionLedgerRepository,
+	chr repository.CoHostRepository,
+	er repository.EventRepository,
+	ur repository.UserRepository,
 	provider payout.Provider,
 	d *event.Dispatcher,
+	notif notification.NotificationService,
+	frontendBaseURL string,
 ) PayoutService {
 	return &payoutService{
-		payoutRepo:  pr,
-		accountRepo: ar,
-		paymentRepo: pmr,
-		bookingRepo: br,
-		hostRepo:    hr,
-		ledgerRepo:  lr,
-		provider:    provider,
-		dispatcher:  d,
+		payoutRepo:      pr,
+		accountRepo:     ar,
+		paymentRepo:     pmr,
+		bookingRepo:     br,
+		hostRepo:        hr,
+		ledgerRepo:      lr,
+		cohostRepo:      chr,
+		eventRepo:       er,
+		userRepo:        ur,
+		provider:        provider,
+		dispatcher:      d,
+		notif:           notif,
+		frontendBaseURL: frontendBaseURL,
 	}
 }
 
@@ -418,8 +466,46 @@ func (s *payoutService) RequestWithdrawal(ctx context.Context, hostID uuid.UUID,
 			req.AmountCents, available, breakdown.EventUpcomingCents)
 	}
 
-	// 4. Determine payout method
-	fmt.Printf("[PAYOUT] Selecting payout method\n")
+	// 3c. Event cap — a co-host may only withdraw the shared event's own
+	// passed earnings, never the owner's wider pool.
+	if req.EventID != nil {
+		eventAvailable, err := s.cohostRepo.EventPassedEarnings(ctx, *req.EventID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute event earnings: %w", err)
+		}
+		fmt.Printf("[PAYOUT] Event cap: eventID=%s, event_passed=%d, requested=%d\n", *req.EventID, eventAvailable, req.AmountCents)
+		if req.AmountCents > eventAvailable {
+			return nil, fmt.Errorf("insufficient event earnings: requested %d, available %d", req.AmountCents, eventAvailable)
+		}
+	}
+
+	// 4. Determine payout method. For a co-host withdrawal the money leaves the
+	// owner's balance but lands in the co-host's account. Re-authorize that
+	// redirection HERE, where every caller routes through: paying someone other
+	// than the balance's owner is only ever allowed for an accepted co-host of
+	// the named event, with withdrawal permission granted by the owner.
+	payoutHostID := hostID
+	if req.PayoutHostID != nil && *req.PayoutHostID != hostID {
+		if req.EventID == nil {
+			return nil, errors.New("payout redirection requires an event")
+		}
+		ch, err := s.cohostRepo.GetByEventAndHost(ctx, *req.EventID, *req.PayoutHostID)
+		if err != nil {
+			return nil, err
+		}
+		if ch == nil || ch.Status != models.CoHostAccepted || !ch.CanWithdraw {
+			return nil, errors.New("payout destination is not an authorized co-host of this event")
+		}
+		evt, err := s.eventRepo.GetByID(ctx, *req.EventID)
+		if err != nil {
+			return nil, err
+		}
+		if evt == nil || evt.HostID != hostID {
+			return nil, errors.New("event does not belong to the withdrawing host")
+		}
+		payoutHostID = *req.PayoutHostID
+	}
+	fmt.Printf("[PAYOUT] Selecting payout method for host %s\n", payoutHostID)
 	var payoutMethod *models.PayoutMethod
 	if req.PayoutMethodID != nil {
 		fmt.Printf("[PAYOUT] Using specified method: %s\n", *req.PayoutMethodID)
@@ -430,7 +516,7 @@ func (s *payoutService) RequestWithdrawal(ctx context.Context, hostID uuid.UUID,
 		}
 	} else {
 		fmt.Printf("[PAYOUT] Using primary payout method\n")
-		payoutMethod, err = s.payoutRepo.GetPrimaryPayoutMethod(ctx, hostID)
+		payoutMethod, err = s.payoutRepo.GetPrimaryPayoutMethod(ctx, payoutHostID)
 		if err != nil {
 			fmt.Printf("[PAYOUT] Primary payout method fetch error: %v\n", err)
 			return nil, err
@@ -440,7 +526,7 @@ func (s *payoutService) RequestWithdrawal(ctx context.Context, hostID uuid.UUID,
 		fmt.Printf("[PAYOUT] No payout method available\n")
 		return nil, errors.New("no payout method found; please add a bank account or UPI")
 	}
-	if payoutMethod.HostID == nil || *payoutMethod.HostID != hostID {
+	if payoutMethod.HostID == nil || *payoutMethod.HostID != payoutHostID {
 		fmt.Printf("[PAYOUT] Payout method does not belong to host\n")
 		return nil, errors.New("payout method does not belong to this host")
 	}
@@ -776,6 +862,8 @@ func (s *payoutService) HandlePayoutWebhook(ctx context.Context, paymentID uuid.
 		if err := s.paymentRepo.UpdateStatus(ctx, paymentID, models.PaymentStatusCompleted, nil); err != nil {
 			return err
 		}
+		// Mirror onto the co-host event claim, if this payout was one.
+		_ = s.cohostRepo.SetClaimStatusByPayment(ctx, paymentID, "completed")
 		// Record webhook execution after successful processing
 		_ = s.ledgerRepo.RecordWebhookExecution(ctx, &models.WebhookExecution{
 			ID:              uuid.New(),
@@ -816,6 +904,9 @@ func (s *payoutService) HandlePayoutWebhook(ctx context.Context, paymentID uuid.
 		if err := s.paymentRepo.IncrementRetry(ctx, paymentID, providerError); err != nil {
 			return err
 		}
+		// A failed payout releases the co-host event claim, so the event's
+		// earnings can be withdrawn again.
+		_ = s.cohostRepo.SetClaimStatusByPayment(ctx, paymentID, "failed")
 
 		// Record webhook execution
 		_ = s.ledgerRepo.RecordWebhookExecution(ctx, &models.WebhookExecution{
@@ -857,6 +948,7 @@ func (s *payoutService) HandlePayoutWebhook(ctx context.Context, paymentID uuid.
 		if err := s.paymentRepo.UpdateStatus(ctx, paymentID, models.PaymentStatusReversed, &providerError); err != nil {
 			return err
 		}
+		_ = s.cohostRepo.SetClaimStatusByPayment(ctx, paymentID, "failed")
 
 		// Record webhook execution
 		_ = s.ledgerRepo.RecordWebhookExecution(ctx, &models.WebhookExecution{

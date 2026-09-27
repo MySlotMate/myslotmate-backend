@@ -121,6 +121,7 @@ func main() {
 	accountRepo := repository.NewAccountRepository(dbConn)
 	paymentRepo := repository.NewPaymentRepository(dbConn)
 	payoutRepo := repository.NewPayoutRepository(dbConn)
+	cohostRepo := repository.NewCoHostRepository(dbConn)
 	supportRepo := repository.NewSupportRepository(dbConn)
 	savedExpRepo := repository.NewSavedExperienceRepository(dbConn)
 	ledgerRepo := repository.NewTransactionLedgerRepository(dbConn)
@@ -207,7 +208,7 @@ func main() {
 	inboxService := service.NewInboxService(inboxRepo, eventRepo, socketService)
 	supportService := service.NewSupportService(supportRepo)
 	passService := service.NewPassService(dbConn, passRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, ledgerRepo, bookingRepo, userRepo, bookingService, eventService, notifService)
-	payoutService := service.NewPayoutService(payoutRepo, accountRepo, paymentRepo, bookingRepo, hostRepo, ledgerRepo, payoutProvider, dispatcher)
+	payoutService := service.NewPayoutService(payoutRepo, accountRepo, paymentRepo, bookingRepo, hostRepo, ledgerRepo, cohostRepo, eventRepo, userRepo, payoutProvider, dispatcher, notifService, cfg.FrontendBaseURL)
 
 	// Initialize reminder scheduler
 	var reminderScheduler *notification.ReminderScheduler

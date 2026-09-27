@@ -234,7 +234,9 @@ func (r *postgresBookingRepository) CheckInGuests(ctx context.Context, p CheckIn
 		FROM events e
 		WHERE b.id              = $1
 		  AND e.id              = b.event_id
-		  AND e.host_id         = $2
+		  AND (e.host_id = $2 OR EXISTS (
+		        SELECT 1 FROM event_co_hosts ch
+		        WHERE ch.event_id = e.id AND ch.host_id = $2 AND ch.status = 'accepted'))
 		  AND b.event_id        = $3
 		  AND b.occurrence_date = $4
 		  AND b.status          = 'confirmed'

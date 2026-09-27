@@ -1114,8 +1114,15 @@ func (s *bookingService) evaluateScan(ctx context.Context, req ScanVerifyRequest
 		Remaining:      target.Quantity - target.CheckedInCount,
 	}
 
+	// A co-host works the same door as the owner, so the scan is judged on
+	// "may this host manage the event", not on raw ownership.
+	canManage, err := s.eventRepo.HostCanManage(ctx, target.EventID, req.HostID)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	switch {
-	case target.HostID != req.HostID:
+	case !canManage:
 		res.Verdict = ScanForeignHost
 		res.Message = "This ticket is for another host's experience."
 	case target.EventID != req.EventID:

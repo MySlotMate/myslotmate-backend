@@ -83,7 +83,7 @@ func (c *CouponController) resolveEventID(ctx context.Context, hostID uuid.UUID,
 	if evt == nil {
 		return nil, errEventNotFound
 	}
-	if evt.HostID != hostID {
+	if !service.HostCanManageEvent(ctx, c.eventRepo, evt, hostID) {
 		return nil, errEventNotOwned
 	}
 	return &evt.ID, nil

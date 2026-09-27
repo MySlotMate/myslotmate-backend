@@ -97,7 +97,7 @@ func (s *inboxService) BroadcastMessage(ctx context.Context, hostID uuid.UUID, r
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if evt.HostID != hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, hostID) {
 		return nil, errors.New("unauthorized: you do not own this event")
 	}
 

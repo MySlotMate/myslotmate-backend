@@ -70,6 +70,24 @@ func (c *PayoutController) RegisterRoutes(r chi.Router) {
 		// Payout History
 		r.Get("/history/{hostID}", c.GetPayoutHistory)
 	})
+
+	// Co-hosting — sharing ONE event's earnings with another host.
+	r.Route("/cohosts", func(r chi.Router) {
+		r.Use(auth.RequireUser(c.firebaseAuth, c.jwtSecret))
+
+		// Owner side
+		r.Post("/invite", c.InviteCoHost)
+		r.Get("/event/{eventID}", c.ListEventCoHosts)
+		r.Patch("/{cohostID}/withdraw-permission", c.SetCoHostCanWithdraw)
+		r.Delete("/{cohostID}", c.RevokeCoHost)
+		r.Post("/{cohostID}/resend", c.ResendCoHostInvite)
+
+		// Co-host side
+		r.Get("/shared", c.ListSharedEvents)
+		r.Get("/summary", c.GetCoHostSummary)
+		r.Post("/{cohostID}/respond", c.RespondToCoHostInvite)
+		r.Post("/{cohostID}/withdraw", c.RequestCoHostWithdrawal)
+	})
 }
 
 // resolveHostID derives the caller's host UUID from the auth context. Returns
@@ -317,4 +335,210 @@ func (c *PayoutController) GetPayoutHistory(w http.ResponseWriter, r *http.Reque
 	}
 
 	RespondSuccess(w, http.StatusOK, payments)
+}
+
+// ── Co-hosting ──────────────────────────────────────────────────────────────
+
+type InviteCoHostReq struct {
+	EventID uuid.UUID `json:"event_id"`
+	Email   string    `json:"email"`
+	// CanWithdraw grants earnings access up front, so the owner does not have to
+	// come back and flip the toggle after the invite is accepted.
+	CanWithdraw bool `json:"can_withdraw"`
+}
+
+func (c *PayoutController) InviteCoHost(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	var req InviteCoHostReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	ch, err := c.payoutService.InviteCoHost(r.Context(), hostID, req.EventID, req.Email, req.CanWithdraw)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusCreated, ch)
+}
+
+func (c *PayoutController) ListEventCoHosts(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	eventID, err := uuid.Parse(chi.URLParam(r, "eventID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid event id")
+		return
+	}
+	rows, err := c.payoutService.ListEventCoHosts(r.Context(), hostID, eventID)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if rows == nil {
+		rows = []*repository.CoHostRow{}
+	}
+	RespondSuccess(w, http.StatusOK, rows)
+}
+
+type SetCoHostCanWithdrawReq struct {
+	CanWithdraw bool `json:"can_withdraw"`
+}
+
+func (c *PayoutController) SetCoHostCanWithdraw(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	cohostID, err := uuid.Parse(chi.URLParam(r, "cohostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid co-host id")
+		return
+	}
+	var req SetCoHostCanWithdrawReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := c.payoutService.SetCoHostCanWithdraw(r.Context(), hostID, cohostID, req.CanWithdraw); err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, map[string]bool{"can_withdraw": req.CanWithdraw})
+}
+
+func (c *PayoutController) RevokeCoHost(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	cohostID, err := uuid.Parse(chi.URLParam(r, "cohostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid co-host id")
+		return
+	}
+	if err := c.payoutService.RevokeCoHost(r.Context(), hostID, cohostID); err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+func (c *PayoutController) ResendCoHostInvite(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	cohostID, err := uuid.Parse(chi.URLParam(r, "cohostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid co-host id")
+		return
+	}
+	if err := c.payoutService.ResendCoHostInvite(r.Context(), hostID, cohostID); err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, map[string]string{"status": "sent"})
+}
+
+func (c *PayoutController) GetCoHostSummary(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	summary, err := c.payoutService.CoHostSummary(r.Context(), hostID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, summary)
+}
+
+func (c *PayoutController) ListSharedEvents(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	rows, err := c.payoutService.ListSharedEvents(r.Context(), hostID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if rows == nil {
+		rows = []*repository.SharedEventRow{}
+	}
+	RespondSuccess(w, http.StatusOK, rows)
+}
+
+type RespondCoHostReq struct {
+	Accept bool `json:"accept"`
+}
+
+func (c *PayoutController) RespondToCoHostInvite(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	cohostID, err := uuid.Parse(chi.URLParam(r, "cohostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid co-host id")
+		return
+	}
+	var req RespondCoHostReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := c.payoutService.RespondToCoHostInvite(r.Context(), hostID, cohostID, req.Accept); err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, map[string]bool{"accepted": req.Accept})
+}
+
+type CoHostWithdrawReq struct {
+	AmountCents    int64      `json:"amount_cents"` // 0 = whole available pool
+	PayoutMethodID *uuid.UUID `json:"payout_method_id,omitempty"`
+	IdempotencyKey string     `json:"idempotency_key,omitempty"`
+}
+
+func (c *PayoutController) RequestCoHostWithdrawal(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	cohostID, err := uuid.Parse(chi.URLParam(r, "cohostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid co-host id")
+		return
+	}
+	var req CoHostWithdrawReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	payment, err := c.payoutService.RequestCoHostWithdrawal(r.Context(), hostID, cohostID, service.WithdrawalRequest{
+		AmountCents:    req.AmountCents,
+		PayoutMethodID: req.PayoutMethodID,
+		IdempotencyKey: req.IdempotencyKey,
+	})
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, payment)
 }

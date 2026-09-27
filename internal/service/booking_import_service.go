@@ -154,7 +154,7 @@ func (s *bookingImportService) ValidateEventForImport(ctx context.Context, hostI
 	if evt == nil {
 		return nil, errors.New("event not found")
 	}
-	if evt.HostID != hostID {
+	if !HostCanManageEvent(ctx, s.eventRepo, evt, hostID) {
 		return nil, ErrImportNotOwner
 	}
 

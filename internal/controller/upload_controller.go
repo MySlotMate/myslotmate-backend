@@ -5,8 +5,10 @@ import (
 	"log"
 	"net/http"
 
+	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/lib/storage"
 
+	fbauth "firebase.google.com/go/v4/auth"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -15,14 +17,28 @@ import (
 // in the JSON body when creating/updating events, reviews, support tickets, etc.
 type UploadController struct {
 	uploadService *storage.UploadService
+	firebaseAuth  *fbauth.Client
+	jwtSecret     string
 }
 
 func NewUploadController(us *storage.UploadService) *UploadController {
 	return &UploadController{uploadService: us}
 }
 
+// WithAuth turns the endpoint from "anyone may fill our bucket" into
+// "signed-in users may". Separate from the constructor so existing callers
+// keep working.
+func (c *UploadController) WithAuth(fa *fbauth.Client, jwtSecret string) *UploadController {
+	c.firebaseAuth = fa
+	c.jwtSecret = jwtSecret
+	return c
+}
+
 func (c *UploadController) RegisterRoutes(r chi.Router) {
 	r.Route("/upload", func(r chi.Router) {
+		// Uploads cost storage and are attached to a host's own content, so the
+		// caller has to be someone.
+		r.Use(auth.RequireUser(c.firebaseAuth, c.jwtSecret))
 		r.Post("/", c.Upload) // generic: POST /upload?folder=events/covers
 	})
 }

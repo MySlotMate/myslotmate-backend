@@ -9,20 +9,73 @@ import (
 	"strings"
 	"time"
 
+	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/lib/ratelimit"
 	"myslotmate-backend/internal/models"
+	"myslotmate-backend/internal/repository"
 	"myslotmate-backend/internal/service"
 
+	fbauth "firebase.google.com/go/v4/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
 type EventController struct {
 	eventService service.EventService
+	// Used to turn an authenticated caller into the host they are, so a request
+	// cannot simply claim someone else's host_id. All three may be nil, in which
+	// case the controller keeps the legacy body-supplied behaviour.
+	userRepo     repository.UserRepository
+	hostRepo     repository.HostRepository
+	firebaseAuth *fbauth.Client
+	jwtSecret    string
 }
 
 func NewEventController(s service.EventService) *EventController {
 	return &EventController{eventService: s}
+}
+
+// WithAuth attaches the identity lookups. Separate from the constructor so the
+// many existing NewEventController callers (tests included) keep working.
+func (c *EventController) WithAuth(ur repository.UserRepository, hr repository.HostRepository, fa *fbauth.Client, jwtSecret string) *EventController {
+	c.userRepo = ur
+	c.hostRepo = hr
+	c.firebaseAuth = fa
+	c.jwtSecret = jwtSecret
+	return c
+}
+
+// hostIDFor decides which host a mutating request acts as.
+//
+// The token decides, never the body: a body host_id that disagrees with the
+// signed-in host is refused rather than honoured, which is what stops one host
+// editing another's experiences. The mutating routes sit behind
+// auth.RequireUser, so an empty UID here means the controller was wired without
+// its identity lookups — fail closed rather than trust the body.
+func (c *EventController) hostIDFor(r *http.Request, bodyHostID uuid.UUID) (uuid.UUID, error) {
+	uid, _ := r.Context().Value(auth.ContextKeyUID).(string)
+	if uid == "" || c.userRepo == nil || c.hostRepo == nil {
+		return uuid.Nil, errors.New("sign in as a host to do that")
+	}
+
+	user, err := c.userRepo.GetByAuthUID(r.Context(), uid)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if user == nil {
+		return uuid.Nil, errors.New("user not found")
+	}
+	host, err := c.hostRepo.GetByUserID(r.Context(), user.ID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if host == nil {
+		return uuid.Nil, errors.New("you are not a host")
+	}
+	if bodyHostID != uuid.Nil && bodyHostID != host.ID {
+		return uuid.Nil, errors.New("host_id does not belong to the signed-in user")
+	}
+	return host.ID, nil
 }
 
 func resolveCalendarRange(r *http.Request) (time.Time, time.Time, int, string) {
@@ -72,24 +125,34 @@ func resolveCalendarRange(r *http.Request) (time.Time, time.Time, int, string) {
 
 func (c *EventController) RegisterRoutes(r chi.Router) {
 	r.Route("/events", func(r chi.Router) {
+		// Reads are public — discovery, event pages and the booking flow all
+		// depend on them.
 		r.Get("/", c.ListPublishedEvents)
 		r.Get("/slug-available", c.CheckSlugAvailability)
-		r.Post("/", c.CreateEvent)
-		r.Put("/{eventID}", c.UpdateEvent)
-		r.Delete("/{eventID}", c.DeleteEvent)
 		r.Get("/{eventID}", c.GetEvent)
 		r.Post("/{eventID}/unlock", c.UnlockEvent)
 		r.Get("/host/{hostID}", c.GetHostEvents)
 		r.Get("/host/{hostID}/filtered", c.GetHostEventsFiltered)
 		r.Get("/calendar/{hostID}", c.GetCalendarEvents)
 		r.Get("/today/{hostID}", c.GetTodaySchedule)
-		r.Post("/{eventID}/publish", c.PublishEvent)
-		r.Post("/{eventID}/pause", c.PauseEvent)
-		r.Post("/{eventID}/resume", c.ResumeEvent)
-		r.Post("/{eventID}/cancel", c.CancelEvent)
 		r.Get("/{eventID}/attendees", c.GetEventAttendees)
 		r.Get("/{eventID}/availability", c.GetEventAvailability)
 		r.Get("/{eventID}/occurrences", c.GetEventOccurrencesForHost)
+
+		// Everything that changes an experience needs a signed-in host. The
+		// acting host comes from the token (see hostIDFor) — a body host_id is
+		// only honoured when it matches, so no one can act as another host.
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireUser(c.firebaseAuth, c.jwtSecret))
+
+			r.Post("/", c.CreateEvent)
+			r.Put("/{eventID}", c.UpdateEvent)
+			r.Delete("/{eventID}", c.DeleteEvent)
+			r.Post("/{eventID}/publish", c.PublishEvent)
+			r.Post("/{eventID}/pause", c.PauseEvent)
+			r.Post("/{eventID}/resume", c.ResumeEvent)
+			r.Post("/{eventID}/cancel", c.CancelEvent)
+		})
 	})
 }
 
@@ -281,7 +344,13 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		MonthlyPass:       req.MonthlyPass,
 	}
 
-	evt, err := c.eventService.CreateEvent(r.Context(), req.HostID, svcReq)
+	hostID, err := c.hostIDFor(r, req.HostID)
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	evt, err := c.eventService.CreateEvent(r.Context(), hostID, svcReq)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidEventMood) {
 			RespondError(w, http.StatusBadRequest, err.Error())
@@ -355,7 +424,13 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		MonthlyPass:       body.MonthlyPass,
 	}
 
-	evt, err := c.eventService.UpdateEvent(r.Context(), eventID, body.HostID, svcReq)
+	hostID, err := c.hostIDFor(r, body.HostID)
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	evt, err := c.eventService.UpdateEvent(r.Context(), eventID, hostID, svcReq)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidEventMood) {
 			RespondError(w, http.StatusBadRequest, err.Error())
@@ -391,7 +466,13 @@ func (c *EventController) DeleteEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := c.eventService.DeleteEvent(r.Context(), eventID, body.HostID); err != nil {
+	hostID, err := c.hostIDFor(r, body.HostID)
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	if err := c.eventService.DeleteEvent(r.Context(), eventID, hostID); err != nil {
 		if err.Error() == "event not found" {
 			RespondError(w, http.StatusNotFound, err.Error())
 			return
@@ -653,7 +734,13 @@ func (c *EventController) PublishEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	evt, err := c.eventService.PublishEvent(r.Context(), eventID, body.HostID)
+	hostID, err := c.hostIDFor(r, body.HostID)
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	evt, err := c.eventService.PublishEvent(r.Context(), eventID, hostID)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -676,7 +763,13 @@ func (c *EventController) PauseEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	evt, err := c.eventService.PauseEvent(r.Context(), eventID, body.HostID, body.PausedFrom, body.PausedDate)
+	hostID, err := c.hostIDFor(r, body.HostID)
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	evt, err := c.eventService.PauseEvent(r.Context(), eventID, hostID, body.PausedFrom, body.PausedDate)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -701,7 +794,13 @@ func (c *EventController) CancelEvent(w http.ResponseWriter, r *http.Request) {
 		RespondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-	evt, err := c.eventService.CancelEvent(r.Context(), eventID, body.HostID)
+	hostID, err := c.hostIDFor(r, body.HostID)
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	evt, err := c.eventService.CancelEvent(r.Context(), eventID, hostID)
 	if err != nil {
 		if err.Error() == "event not found" {
 			RespondError(w, http.StatusNotFound, err.Error())
@@ -725,7 +824,13 @@ func (c *EventController) ResumeEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	evt, err := c.eventService.ResumeEvent(r.Context(), eventID, body.HostID)
+	hostID, err := c.hostIDFor(r, body.HostID)
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	evt, err := c.eventService.ResumeEvent(r.Context(), eventID, hostID)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return

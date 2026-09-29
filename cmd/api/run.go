@@ -219,7 +219,8 @@ func main() {
 
 	userController := controller.NewUserController(userService, fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	hostController := controller.NewHostController(hostService)
-	eventController := controller.NewEventController(eventService)
+	eventController := controller.NewEventController(eventService).
+		WithAuth(userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	bookingController := controller.NewBookingController(bookingService)
 	passController := controller.NewPassController(passService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	couponController := controller.NewCouponController(couponRepo, bookingService, eventRepo)
@@ -237,7 +238,8 @@ func main() {
 	payoutController := controller.NewPayoutController(payoutService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider)
 	supportController := controller.NewSupportController(supportService, uploadService)
-	uploadController := controller.NewUploadController(uploadService)
+	uploadController := controller.NewUploadController(uploadService).
+		WithAuth(fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	adminDirectoryRepo := repository.NewAdminDirectoryRepository(dbConn)
 	adminController := controller.NewAdminController(hostService, payoutService, userService, adminDirectoryRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	adminAuthController := controller.NewAdminAuthController(

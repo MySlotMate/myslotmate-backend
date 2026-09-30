@@ -2,27 +2,118 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"time"
 
+	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/lib/ratelimit"
+	"myslotmate-backend/internal/repository"
 	"myslotmate-backend/internal/service"
 
+	fbauth "firebase.google.com/go/v4/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
 type BookingController struct {
 	bookingService service.BookingService
+	// Identity lookups. These routes move money, so the caller is resolved from
+	// their token and never from the request body.
+	userRepo     repository.UserRepository
+	hostRepo     repository.HostRepository
+	eventRepo    repository.EventRepository
+	firebaseAuth *fbauth.Client
+	jwtSecret    string
+	adminEmail   string
 }
 
 func NewBookingController(s service.BookingService) *BookingController {
 	return &BookingController{bookingService: s}
 }
 
+// WithAuth attaches the identity lookups. Separate from the constructor so the
+// existing NewBookingController callers keep compiling.
+func (c *BookingController) WithAuth(
+	ur repository.UserRepository,
+	hr repository.HostRepository,
+	er repository.EventRepository,
+	fa *fbauth.Client,
+	jwtSecret, adminEmail string,
+) *BookingController {
+	c.userRepo = ur
+	c.hostRepo = hr
+	c.eventRepo = er
+	c.firebaseAuth = fa
+	c.jwtSecret = jwtSecret
+	c.adminEmail = adminEmail
+	return c
+}
+
+// callerUserID resolves the signed-in user. Fails closed: these routes debit
+// wallets, so an unresolvable caller is refused rather than guessed at.
+func (c *BookingController) callerUserID(r *http.Request) (uuid.UUID, error) {
+	uid, _ := r.Context().Value(auth.ContextKeyUID).(string)
+	if uid == "" || c.userRepo == nil {
+		return uuid.Nil, errors.New("sign in to do that")
+	}
+	user, err := c.userRepo.GetByAuthUID(r.Context(), uid)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if user == nil {
+		return uuid.Nil, errors.New("user not found")
+	}
+	return user.ID, nil
+}
+
+// assertBookingAccess allows the guest who holds the booking, the host running
+// the event, and an admin. Anyone else gets 404: whether a booking id exists is
+// not something a stranger needs to learn.
+func (c *BookingController) assertBookingAccess(r *http.Request, bookingID uuid.UUID) (uuid.UUID, error) {
+	if auth.IsAdminCaller(r) {
+		return uuid.Nil, nil
+	}
+	userID, err := c.callerUserID(r)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	booking, err := c.bookingService.GetBooking(r.Context(), bookingID)
+	if err != nil || booking == nil {
+		return uuid.Nil, errNotYours
+	}
+	if booking.UserID == userID {
+		return userID, nil
+	}
+
+	// The host running the event may act on its bookings — that is how a door
+	// resend and a host-side cancellation work.
+	if c.hostRepo != nil && c.eventRepo != nil {
+		if host, herr := c.hostRepo.GetByUserID(r.Context(), userID); herr == nil && host != nil {
+			if okManage, merr := c.eventRepo.HostCanManage(r.Context(), booking.EventID, host.ID); merr == nil && okManage {
+				return userID, nil
+			}
+		}
+	}
+	return uuid.Nil, errNotYours
+}
+
+// errNotYours is answered as 404 on purpose — see assertBookingAccess.
+var errNotYours = errors.New("booking not found")
+
 func (c *BookingController) RegisterRoutes(r chi.Router) {
+	// Every booking route is authenticated. These were public, and
+	// CreateBooking took the buyer's id from the request body — so anyone could
+	// book as anyone else and spend that person's wallet. Cancel had the same
+	// shape, and the reads exposed guests' tickets and booking history.
+	//
+	// RequireUserOrAdmin, not RequireUser: the admin dashboard resends tickets,
+	// and its session token carries a different issuer that RequireUser rejects.
 	r.Route("/bookings", func(r chi.Router) {
+		r.Use(auth.RequireUserOrAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
+
 		r.Post("/", c.CreateBooking)
 		r.Post("/{bookingID}/confirm", c.ConfirmBooking)
 		r.Post("/{bookingID}/cancel", c.CancelBooking)
@@ -167,7 +258,20 @@ func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request
 		svcReq.OccurrenceDate = &t
 	}
 
-	booking, err := c.bookingService.CreateBooking(r.Context(), req.UserID, svcReq)
+	// The buyer is the signed-in user. A body user_id that disagrees is refused
+	// rather than honoured — that field is what let one account spend another's
+	// wallet, and clients still send it.
+	buyerID, err := c.callerUserID(r)
+	if err != nil {
+		RespondError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if req.UserID != uuid.Nil && req.UserID != buyerID {
+		RespondError(w, http.StatusForbidden, "user_id does not belong to the signed-in user")
+		return
+	}
+
+	booking, err := c.bookingService.CreateBooking(r.Context(), buyerID, svcReq)
 	if err != nil {
 		switch err.Error() {
 		case "insufficient wallet balance; please top up first":
@@ -210,6 +314,19 @@ func (c *BookingController) GetUserBookings(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Own history only. An admin may read anyone's.
+	if !auth.IsAdminCaller(r) {
+		callerID, cerr := c.callerUserID(r)
+		if cerr != nil {
+			RespondError(w, http.StatusUnauthorized, cerr.Error())
+			return
+		}
+		if callerID != userID {
+			RespondError(w, http.StatusForbidden, "you can only read your own bookings")
+			return
+		}
+	}
+
 	bookings, err := c.bookingService.GetUserBookings(r.Context(), userID)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
@@ -223,6 +340,11 @@ func (c *BookingController) ConfirmBooking(w http.ResponseWriter, r *http.Reques
 	bookingID, err := uuid.Parse(chi.URLParam(r, "bookingID"))
 	if err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid booking ID")
+		return
+	}
+
+	if _, aerr := c.assertBookingAccess(r, bookingID); aerr != nil {
+		RespondError(w, http.StatusNotFound, "Booking not found")
 		return
 	}
 
@@ -256,7 +378,24 @@ func (c *BookingController) CancelBooking(w http.ResponseWriter, r *http.Request
 		dest = service.RefundDestinationSource
 	}
 
-	booking, err := c.bookingService.CancelBooking(r.Context(), bookingID, body.UserID, dest)
+	// The service checks the booking belongs to this user; passing the body's
+	// user_id made that check meaningless. Resolve it here instead.
+	ownerID, aerr := c.assertBookingAccess(r, bookingID)
+	if aerr != nil {
+		RespondError(w, http.StatusNotFound, "Booking not found")
+		return
+	}
+	if ownerID == uuid.Nil {
+		// Admin caller: cancel as the booking's own owner.
+		existing, gerr := c.bookingService.GetBooking(r.Context(), bookingID)
+		if gerr != nil || existing == nil {
+			RespondError(w, http.StatusNotFound, "Booking not found")
+			return
+		}
+		ownerID = existing.UserID
+	}
+
+	booking, err := c.bookingService.CancelBooking(r.Context(), bookingID, ownerID, dest)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -269,6 +408,11 @@ func (c *BookingController) GetBooking(w http.ResponseWriter, r *http.Request) {
 	bookingID, err := uuid.Parse(chi.URLParam(r, "bookingID"))
 	if err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid booking ID")
+		return
+	}
+
+	if _, aerr := c.assertBookingAccess(r, bookingID); aerr != nil {
+		RespondError(w, http.StatusNotFound, "Booking not found")
 		return
 	}
 
@@ -285,6 +429,11 @@ func (c *BookingController) SendTicketNotification(w http.ResponseWriter, r *htt
 	bookingID, err := uuid.Parse(chi.URLParam(r, "bookingID"))
 	if err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid booking ID")
+		return
+	}
+
+	if _, aerr := c.assertBookingAccess(r, bookingID); aerr != nil {
+		RespondError(w, http.StatusNotFound, "Booking not found")
 		return
 	}
 

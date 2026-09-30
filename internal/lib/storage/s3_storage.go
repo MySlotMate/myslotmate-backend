@@ -19,9 +19,13 @@ import (
 // Allowed MIME types and max file size for uploads.
 var (
 	AllowedMIMETypes = map[string]bool{
-		"image/svg+xml":   true,
-		"image/png":       true,
-		"image/jpeg":      true,
+		"image/svg+xml": true,
+		"image/png":     true,
+		"image/jpeg":    true,
+		// The Android picker hands back webp, so the mobile app would otherwise
+		// fail on perfectly good photos. Kept in step with the Node backend's
+		// allowlist — both write to the same bucket.
+		"image/webp":      true,
 		"application/pdf": true,
 	}
 	MaxFileSize int64 = 10 * 1024 * 1024 // 10 MB
@@ -64,10 +68,12 @@ func (s *UploadService) UploadFile(ctx context.Context, folder string, fh *multi
 			contentType = "image/png"
 		case ".jpg", ".jpeg":
 			contentType = "image/jpeg"
+		case ".webp":
+			contentType = "image/webp"
 		case ".pdf":
 			contentType = "application/pdf"
 		default:
-			return nil, fmt.Errorf("file type %q is not allowed; accepted: SVG, PNG, JPG, PDF", ext)
+			return nil, fmt.Errorf("file type %q is not allowed; accepted: SVG, PNG, JPG, WEBP, PDF", ext)
 		}
 	}
 

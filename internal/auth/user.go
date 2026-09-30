@@ -103,3 +103,89 @@ func OptionalUser(firebaseAuth *auth.Client, jwtSecret string) func(http.Handler
 		})
 	}
 }
+
+// OptionalAdmin records that the caller holds a valid admin session, without
+// requiring one. A valid admin token puts the admin's username in the context
+// (ContextKeyAdminUser); anything else passes straight through untouched.
+//
+// It exists so a route can be host-scoped for hosts and still serve the admin
+// dashboard, which reads other people's hosts by design. Pair it with
+// RequireUser or OptionalUser — on its own it gates nothing.
+func OptionalAdmin(firebaseAuth *auth.Client, adminEmail, jwtSecret string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := r.Header.Get("Authorization")
+			token := strings.TrimPrefix(header, "Bearer ")
+			if token == "" || token == header {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if jwtSecret != "" {
+				if claims, err := ParseAdminToken(jwtSecret, token); err == nil {
+					ctx := context.WithValue(r.Context(), ContextKeyAdminUser, claims.Username)
+					ctx = context.WithValue(ctx, ContextKeyAdminRole, claims.Role)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+
+			// A Firebase admin is identified by their email being on the
+			// allow-list, the same test IsAdmin applies.
+			if firebaseAuth != nil && adminEmail != "" {
+				if verified, err := firebaseAuth.VerifyIDToken(r.Context(), token); err == nil {
+					if email, _ := verified.Claims["email"].(string); email != "" && isAllowedAdminEmail(email, adminEmail) {
+						ctx := context.WithValue(r.Context(), ContextKeyAdminUser, email)
+						next.ServeHTTP(w, r.WithContext(ctx))
+						return
+					}
+				}
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RequireUserOrAdmin gates a route that both hosts and admins use.
+//
+// Order matters: the admin session token carries a different issuer to a user
+// token, so RequireUser rejects it outright. Trying admin first means an admin
+// is recognised rather than turned away at the door; anything that is not an
+// admin session falls through to the normal user check.
+func RequireUserOrAdmin(firebaseAuth *auth.Client, adminEmail, jwtSecret string) func(http.Handler) http.Handler {
+	optionalAdmin := OptionalAdmin(firebaseAuth, adminEmail, jwtSecret)
+	requireUser := RequireUser(firebaseAuth, jwtSecret)
+
+	return func(next http.Handler) http.Handler {
+		// Admins reach the handler directly; everyone else goes through the
+		// user gate first.
+		gated := requireUser(next)
+
+		return optionalAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if IsAdminCaller(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			gated.ServeHTTP(w, r)
+		}))
+	}
+}
+
+// IsAdminCaller reports whether OptionalAdmin (or RequireAdmin) authenticated
+// this request as an admin.
+func IsAdminCaller(r *http.Request) bool {
+	name, _ := r.Context().Value(ContextKeyAdminUser).(string)
+	return name != ""
+}
+
+// isAllowedAdminEmail matches IsAdmin's test: a case-insensitive hit in the
+// comma-separated allow-list.
+func isAllowedAdminEmail(email, adminEmail string) bool {
+	for _, a := range strings.Split(adminEmail, ",") {
+		if strings.EqualFold(email, strings.TrimSpace(a)) {
+			return true
+		}
+	}
+	return false
+}

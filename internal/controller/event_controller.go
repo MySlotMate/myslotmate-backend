@@ -29,6 +29,9 @@ type EventController struct {
 	hostRepo     repository.HostRepository
 	firebaseAuth *fbauth.Client
 	jwtSecret    string
+	// Comma-separated admin allow-list, for the host-scoped reads the admin
+	// dashboard legitimately makes against other people's hosts.
+	adminEmail string
 }
 
 func NewEventController(s service.EventService) *EventController {
@@ -43,6 +46,33 @@ func (c *EventController) WithAuth(ur repository.UserRepository, hr repository.H
 	c.firebaseAuth = fa
 	c.jwtSecret = jwtSecret
 	return c
+}
+
+// WithAdminEmail supplies the admin allow-list. Optional: without it, admin
+// Firebase sessions simply do not get the cross-host read, and the static admin
+// JWT still does.
+func (c *EventController) WithAdminEmail(adminEmail string) *EventController {
+	c.adminEmail = adminEmail
+	return c
+}
+
+// assertHostScope authorises a /host/{hostID}-shaped read: the signed-in host
+// may read their own, and an admin may read anyone's.
+//
+// Fails closed. These routes used to be public, and the data behind them —
+// drafts, schedules, guest lists — was never meant to be.
+func (c *EventController) assertHostScope(r *http.Request, hostID uuid.UUID) error {
+	if auth.IsAdminCaller(r) {
+		return nil
+	}
+	actingHostID, err := c.hostIDFor(r, uuid.Nil)
+	if err != nil {
+		return err
+	}
+	if actingHostID != hostID {
+		return errors.New("you can only read your own host data")
+	}
+	return nil
 }
 
 // hostIDFor decides which host a mutating request acts as.
@@ -131,13 +161,28 @@ func (c *EventController) RegisterRoutes(r chi.Router) {
 		r.Get("/slug-available", c.CheckSlugAvailability)
 		r.Get("/{eventID}", c.GetEvent)
 		r.Post("/{eventID}/unlock", c.UnlockEvent)
-		r.Get("/host/{hostID}", c.GetHostEvents)
-		r.Get("/host/{hostID}/filtered", c.GetHostEventsFiltered)
-		r.Get("/calendar/{hostID}", c.GetCalendarEvents)
-		r.Get("/today/{hostID}", c.GetTodaySchedule)
-		r.Get("/{eventID}/attendees", c.GetEventAttendees)
 		r.Get("/{eventID}/availability", c.GetEventAvailability)
 		r.Get("/{eventID}/occurrences", c.GetEventOccurrencesForHost)
+
+		// Host-scoped reads. These were public, which meant anyone holding an
+		// event or host id could read a host's drafts and schedule — and, from
+		// the roster, every guest's phone number, WhatsApp number, age and
+		// government-ID link. Each handler now checks that the caller is that
+		// host, or an admin.
+		//
+		// RequireUserOrAdmin, not RequireUser: the admin dashboard reads other
+		// people's hosts by design, and its session token carries a different
+		// issuer, which a plain RequireUser would reject before the handler's
+		// own scope check ever ran.
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireUserOrAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
+
+			r.Get("/host/{hostID}", c.GetHostEvents)
+			r.Get("/host/{hostID}/filtered", c.GetHostEventsFiltered)
+			r.Get("/calendar/{hostID}", c.GetCalendarEvents)
+			r.Get("/today/{hostID}", c.GetTodaySchedule)
+			r.Get("/{eventID}/attendees", c.GetEventAttendees)
+		})
 
 		// Everything that changes an experience needs a signed-in host. The
 		// acting host comes from the token (see hostIDFor) — a body host_id is
@@ -605,6 +650,12 @@ func (c *EventController) GetHostEvents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Host-scoped: the signed-in host may read their own, an admin anyone's.
+	if err := c.assertHostScope(r, hostID); err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	events, err := c.eventService.GetHostEvents(r.Context(), hostID)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
@@ -641,6 +692,12 @@ func (c *EventController) GetHostEventsFiltered(w http.ResponseWriter, r *http.R
 	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
 	if err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		return
+	}
+
+	// Host-scoped: the signed-in host may read their own, an admin anyone's.
+	if err := c.assertHostScope(r, hostID); err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -687,6 +744,12 @@ func (c *EventController) GetCalendarEvents(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Host-scoped: the signed-in host may read their own, an admin anyone's.
+	if err := c.assertHostScope(r, hostID); err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	start, end, statusCode, message := resolveCalendarRange(r)
 	if statusCode != 0 {
 		RespondError(w, statusCode, message)
@@ -708,6 +771,12 @@ func (c *EventController) GetTodaySchedule(w http.ResponseWriter, r *http.Reques
 	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
 	if err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		return
+	}
+
+	// Host-scoped: the signed-in host may read their own, an admin anyone's.
+	if err := c.assertHostScope(r, hostID); err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -852,6 +921,26 @@ func (c *EventController) GetEventAttendees(w http.ResponseWriter, r *http.Reque
 		t, err := time.Parse(time.RFC3339, dateStr)
 		if err == nil {
 			occurrenceDate = &t
+		}
+	}
+
+	// The roster carries guests' contact details and government-ID links. Only
+	// the host running the event (or an accepted co-host) may read it; a 404
+	// rather than a 403 so the endpoint does not confirm which ids exist.
+	if !auth.IsAdminCaller(r) {
+		actingHostID, herr := c.hostIDFor(r, uuid.Nil)
+		if herr != nil {
+			RespondError(w, http.StatusUnauthorized, herr.Error())
+			return
+		}
+		canManage, cerr := c.eventService.HostCanManageEvent(r.Context(), eventID, actingHostID)
+		if cerr != nil {
+			RespondError(w, http.StatusInternalServerError, cerr.Error())
+			return
+		}
+		if !canManage {
+			RespondError(w, http.StatusNotFound, "Event not found")
+			return
 		}
 	}
 

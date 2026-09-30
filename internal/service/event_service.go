@@ -42,6 +42,10 @@ type EventService interface {
 	PauseEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID, pausedFrom *time.Time, pausedDate *time.Time) (*models.Event, error)
 	ResumeEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) (*models.Event, error)
 	GetEventAttendees(ctx context.Context, eventID uuid.UUID, occurrenceDate *time.Time) ([]*models.Attendee, error)
+	// HostCanManageEvent reports whether this host owns the event or holds an
+	// accepted co-host invitation for it — the check the roster and every
+	// mutating action share.
+	HostCanManageEvent(ctx context.Context, eventID, hostID uuid.UUID) (bool, error)
 	ListPublishedEvents(ctx context.Context, limit, offset int) ([]*models.Event, error)
 	GetEventAvailability(ctx context.Context, eventID uuid.UUID) ([]models.OccurrenceAvailability, error)
 	GetEventOccurrencesForHost(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) ([]models.OccurrenceAvailability, error)
@@ -1106,6 +1110,10 @@ func (s *eventService) ResumeEvent(ctx context.Context, eventID uuid.UUID, hostI
 		return nil, err
 	}
 	return evt, nil
+}
+
+func (s *eventService) HostCanManageEvent(ctx context.Context, eventID, hostID uuid.UUID) (bool, error) {
+	return s.eventRepo.HostCanManage(ctx, eventID, hostID)
 }
 
 func (s *eventService) GetEventAttendees(ctx context.Context, eventID uuid.UUID, occurrenceDate *time.Time) ([]*models.Attendee, error) {

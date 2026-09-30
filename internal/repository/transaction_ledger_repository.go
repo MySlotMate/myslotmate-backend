@@ -4,13 +4,41 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"myslotmate-backend/internal/models"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 )
+
+// isUniqueViolation reports a 23505 unique-constraint violation.
+//
+// The driver is pgx (internal/db: sql.Open("pgx", …)), which returns
+// *pgconn.PgError — NOT lib/pq's *pq.Error. A type assertion on *pq.Error never
+// matched, so ErrDuplicateKey was never returned and every caller relying on it
+// to mean "someone else already did this" saw a hard error instead.
+//
+// For the top-up reservation that meant Razorpay's webhook returned an error
+// whenever the client's verify had already credited: the wallet was correct,
+// but the webhook kept failing, Razorpay kept retrying, and the payment row
+// stayed `pending` forever. Found by cmd/e2e-node-topup.
+//
+// errors.As, not a type assertion: the error may be wrapped.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	// Kept so the repository still behaves if it is ever pointed at lib/pq.
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return pqErr.Code == "23505"
+	}
+	return false
+}
 
 // TransactionLedgerRepository handles all transaction journal operations
 type TransactionLedgerRepository interface {
@@ -110,7 +138,7 @@ func (r *postgresTransactionLedgerRepository) Create(ctx context.Context, entry 
 		// Unique-constraint violation on idempotency_key: another path raced
 		// us to insert this entry. Return a sentinel so callers can detect
 		// "already credited" and skip the side effect.
-		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+		if isUniqueViolation(err) {
 			return nil, ErrDuplicateKey
 		}
 		return nil, err
@@ -250,7 +278,7 @@ func (r *postgresTransactionLedgerRepository) RecordWebhookExecution(ctx context
 		// this webhook (or its concurrent re-delivery) was already recorded.
 		// Caller treats this as "replay" and responds 200 OK without re-running
 		// side effects — see bug C5.
-		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+		if isUniqueViolation(err) {
 			return ErrDuplicateWebhook
 		}
 		return err

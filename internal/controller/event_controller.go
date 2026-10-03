@@ -77,12 +77,24 @@ func (c *EventController) assertHostScope(r *http.Request, hostID uuid.UUID) err
 
 // hostIDFor decides which host a mutating request acts as.
 //
-// The token decides, never the body: a body host_id that disagrees with the
-// signed-in host is refused rather than honoured, which is what stops one host
-// editing another's experiences. The mutating routes sit behind
-// auth.RequireUser, so an empty UID here means the controller was wired without
-// its identity lookups — fail closed rather than trust the body.
+// For a host the token decides, never the body: a body host_id that disagrees
+// with the signed-in host is refused rather than honoured, which is what stops
+// one host editing another's experiences. An empty UID means the controller was
+// wired without its identity lookups — fail closed rather than trust the body.
+//
+// An admin is the one caller that acts on someone else's behalf, so for an
+// admin session the body host_id is the acting host.
 func (c *EventController) hostIDFor(r *http.Request, bodyHostID uuid.UUID) (uuid.UUID, error) {
+	// An admin acts on a host's behalf from the dashboard, so for them the body
+	// host_id is the acting host — there is no host record behind an admin
+	// session token to look up.
+	if auth.IsAdminCaller(r) {
+		if bodyHostID == uuid.Nil {
+			return uuid.Nil, errors.New("host_id is required")
+		}
+		return bodyHostID, nil
+	}
+
 	uid, _ := r.Context().Value(auth.ContextKeyUID).(string)
 	if uid == "" || c.userRepo == nil || c.hostRepo == nil {
 		return uuid.Nil, errors.New("sign in as a host to do that")
@@ -184,11 +196,12 @@ func (c *EventController) RegisterRoutes(r chi.Router) {
 			r.Get("/{eventID}/attendees", c.GetEventAttendees)
 		})
 
-		// Everything that changes an experience needs a signed-in host. The
-		// acting host comes from the token (see hostIDFor) — a body host_id is
-		// only honoured when it matches, so no one can act as another host.
+		// Everything that changes an experience needs a signed-in host, or an
+		// admin acting for one from the dashboard. The acting host comes from
+		// the token (see hostIDFor) — a host's body host_id is only honoured
+		// when it matches, so no host can act as another.
 		r.Group(func(r chi.Router) {
-			r.Use(auth.RequireUser(c.firebaseAuth, c.jwtSecret))
+			r.Use(auth.RequireUserOrAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 
 			r.Post("/", c.CreateEvent)
 			r.Put("/{eventID}", c.UpdateEvent)

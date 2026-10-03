@@ -19,6 +19,7 @@ type UploadController struct {
 	uploadService *storage.UploadService
 	firebaseAuth  *fbauth.Client
 	jwtSecret     string
+	adminEmail    string
 }
 
 func NewUploadController(us *storage.UploadService) *UploadController {
@@ -28,17 +29,20 @@ func NewUploadController(us *storage.UploadService) *UploadController {
 // WithAuth turns the endpoint from "anyone may fill our bucket" into
 // "signed-in users may". Separate from the constructor so existing callers
 // keep working.
-func (c *UploadController) WithAuth(fa *fbauth.Client, jwtSecret string) *UploadController {
+func (c *UploadController) WithAuth(fa *fbauth.Client, jwtSecret, adminEmail string) *UploadController {
 	c.firebaseAuth = fa
 	c.jwtSecret = jwtSecret
+	c.adminEmail = adminEmail
 	return c
 }
 
 func (c *UploadController) RegisterRoutes(r chi.Router) {
 	r.Route("/upload", func(r chi.Router) {
 		// Uploads cost storage and are attached to a host's own content, so the
-		// caller has to be someone.
-		r.Use(auth.RequireUser(c.firebaseAuth, c.jwtSecret))
+		// caller has to be someone. RequireUserOrAdmin, not RequireUser: the
+		// admin dashboard uploads host avatars and blog covers here, and its
+		// session token carries a different issuer that RequireUser rejects.
+		r.Use(auth.RequireUserOrAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 		r.Post("/", c.Upload) // generic: POST /upload?folder=events/covers
 	})
 }

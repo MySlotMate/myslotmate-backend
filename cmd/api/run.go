@@ -241,7 +241,7 @@ func main() {
 	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider)
 	supportController := controller.NewSupportController(supportService, uploadService)
 	uploadController := controller.NewUploadController(uploadService).
-		WithAuth(fbApp.Auth, cfg.AdminAuth.JWTSecret)
+		WithAuth(fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
 	adminDirectoryRepo := repository.NewAdminDirectoryRepository(dbConn)
 	adminController := controller.NewAdminController(hostService, payoutService, userService, adminDirectoryRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	adminAuthController := controller.NewAdminAuthController(

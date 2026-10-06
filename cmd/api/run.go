@@ -225,7 +225,7 @@ func main() {
 	bookingController := controller.NewBookingController(bookingService).
 		WithAuth(userRepo, hostRepo, eventRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
 	passController := controller.NewPassController(passService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
-	couponController := controller.NewCouponController(couponRepo, bookingService, eventRepo)
+	couponController := controller.NewCouponController(couponRepo, bookingService, eventRepo, userRepo, hostRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	joinRequestController := controller.NewJoinRequestController(joinRequestService, userRepo, hostRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	walkInService := service.NewWalkInService(userRepo, bookingRepo, eventRepo, eventPriceTierRepo, attendeeProfileRepo, userService, bookingService)
 	walkInController := controller.NewWalkInController(walkInService, userRepo, hostRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)

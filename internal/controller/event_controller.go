@@ -85,6 +85,10 @@ func (c *EventController) assertHostScope(r *http.Request, hostID uuid.UUID) err
 // An admin is the one caller that acts on someone else's behalf, so for an
 // admin session the body host_id is the acting host.
 func (c *EventController) hostIDFor(r *http.Request, bodyHostID uuid.UUID) (uuid.UUID, error) {
+	return actingHostID(r, c.userRepo, c.hostRepo, bodyHostID)
+}
+
+func actingHostID(r *http.Request, userRepo repository.UserRepository, hostRepo repository.HostRepository, bodyHostID uuid.UUID) (uuid.UUID, error) {
 	// An admin acts on a host's behalf from the dashboard, so for them the body
 	// host_id is the acting host — there is no host record behind an admin
 	// session token to look up.
@@ -96,18 +100,18 @@ func (c *EventController) hostIDFor(r *http.Request, bodyHostID uuid.UUID) (uuid
 	}
 
 	uid, _ := r.Context().Value(auth.ContextKeyUID).(string)
-	if uid == "" || c.userRepo == nil || c.hostRepo == nil {
+	if uid == "" || userRepo == nil || hostRepo == nil {
 		return uuid.Nil, errors.New("sign in as a host to do that")
 	}
 
-	user, err := c.userRepo.GetByAuthUID(r.Context(), uid)
+	user, err := userRepo.GetByAuthUID(r.Context(), uid)
 	if err != nil {
 		return uuid.Nil, err
 	}
 	if user == nil {
 		return uuid.Nil, errors.New("user not found")
 	}
-	host, err := c.hostRepo.GetByUserID(r.Context(), user.ID)
+	host, err := hostRepo.GetByUserID(r.Context(), user.ID)
 	if err != nil {
 		return uuid.Nil, err
 	}

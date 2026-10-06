@@ -9,10 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 	"myslotmate-backend/internal/service"
 
+	fbauth "firebase.google.com/go/v4/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -61,10 +63,24 @@ type CouponController struct {
 	couponRepo     repository.CouponRepository
 	bookingService service.BookingService
 	eventRepo      repository.EventRepository
+	userRepo       repository.UserRepository
+	hostRepo       repository.HostRepository
+	firebaseAuth   *fbauth.Client
+	adminEmail     string
+	jwtSecret      string
 }
 
-func NewCouponController(couponRepo repository.CouponRepository, bookingService service.BookingService, eventRepo repository.EventRepository) *CouponController {
-	return &CouponController{couponRepo: couponRepo, bookingService: bookingService, eventRepo: eventRepo}
+func NewCouponController(couponRepo repository.CouponRepository, bookingService service.BookingService, eventRepo repository.EventRepository, userRepo repository.UserRepository, hostRepo repository.HostRepository, fa *fbauth.Client, adminEmail, jwtSecret string) *CouponController {
+	return &CouponController{
+		couponRepo: couponRepo, bookingService: bookingService, eventRepo: eventRepo,
+		userRepo: userRepo, hostRepo: hostRepo, firebaseAuth: fa, adminEmail: adminEmail, jwtSecret: jwtSecret,
+	}
+}
+
+// hostIDFor is the host the caller may act as: the signed-in host (a different
+// host_id in the request is refused), or for an admin the host_id they name.
+func (c *CouponController) hostIDFor(r *http.Request, requested uuid.UUID) (uuid.UUID, error) {
+	return actingHostID(r, c.userRepo, c.hostRepo, requested)
 }
 
 // resolveEventID validates that an event-scoped coupon targets a real event
@@ -108,19 +124,26 @@ func (c *CouponController) respondEventError(w http.ResponseWriter, err error) {
 
 func (c *CouponController) RegisterRoutes(r chi.Router) {
 	r.Route("/coupons", func(r chi.Router) {
-		r.Post("/", c.CreateCoupon)
-		r.Post("/batch", c.BatchCreateCoupons)
+		// Guest checkout dry-run; the booking re-checks the code itself.
 		r.Post("/validate", c.ValidateCoupon)
-		r.Get("/host/{hostID}", c.ListHostCoupons)
-		r.Put("/{couponID}", c.UpdateCoupon)
-		r.Delete("/{couponID}", c.DeleteCoupon)
+
+		// Coupons can make bookings free, so creating, reading and changing
+		// them is limited to the owning host (or an admin acting for one).
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireUserOrAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
+			r.Post("/", c.CreateCoupon)
+			r.Post("/batch", c.BatchCreateCoupons)
+			r.Get("/host/{hostID}", c.ListHostCoupons)
+			r.Put("/{couponID}", c.UpdateCoupon)
+			r.Delete("/{couponID}", c.DeleteCoupon)
+		})
 	})
 }
 
 type couponRequestBody struct {
-	HostID         uuid.UUID  `json:"host_id"`
-	EventID        *uuid.UUID `json:"event_id,omitempty"`
-	Code           string     `json:"code"`
+	HostID  uuid.UUID  `json:"host_id"`
+	EventID *uuid.UUID `json:"event_id,omitempty"`
+	Code    string     `json:"code"`
 	// GrantsFree: true = free-booking code (comp); false = access code (a
 	// per-guest passkey — unlocks but the guest pays). Defaults to true.
 	GrantsFree     *bool      `json:"grants_free,omitempty"`
@@ -149,6 +172,12 @@ func (c *CouponController) CreateCoupon(w http.ResponseWriter, r *http.Request) 
 		RespondError(w, http.StatusBadRequest, "host_id is required")
 		return
 	}
+	hostID, err := c.hostIDFor(r, body.HostID)
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	body.HostID = hostID
 	code := strings.TrimSpace(body.Code)
 	if code == "" {
 		RespondError(w, http.StatusBadRequest, "code is required")
@@ -209,6 +238,12 @@ func (c *CouponController) BatchCreateCoupons(w http.ResponseWriter, r *http.Req
 		RespondError(w, http.StatusBadRequest, "host_id is required")
 		return
 	}
+	hostID, err := c.hostIDFor(r, body.HostID)
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	body.HostID = hostID
 	if body.Count < 1 || body.Count > 500 {
 		RespondError(w, http.StatusBadRequest, "count must be between 1 and 500")
 		return
@@ -275,6 +310,10 @@ func (c *CouponController) ListHostCoupons(w http.ResponseWriter, r *http.Reques
 		RespondError(w, http.StatusBadRequest, "Invalid host ID")
 		return
 	}
+	if hostID, err = c.hostIDFor(r, hostID); err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	coupons, err := c.couponRepo.ListByHost(r.Context(), hostID)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
@@ -298,6 +337,12 @@ func (c *CouponController) UpdateCoupon(w http.ResponseWriter, r *http.Request) 
 		RespondError(w, http.StatusBadRequest, "host_id is required")
 		return
 	}
+	hostID, err := c.hostIDFor(r, body.HostID)
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	body.HostID = hostID
 	// Verify ownership before mutating.
 	existing, err := c.couponRepo.GetByID(r.Context(), couponID)
 	if err != nil {
@@ -370,6 +415,10 @@ func (c *CouponController) DeleteCoupon(w http.ResponseWriter, r *http.Request) 
 	hostID, err := uuid.Parse(r.URL.Query().Get("host_id"))
 	if err != nil {
 		RespondError(w, http.StatusBadRequest, "host_id is required")
+		return
+	}
+	if hostID, err = c.hostIDFor(r, hostID); err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	if err := c.couponRepo.Delete(r.Context(), couponID, hostID); err != nil {

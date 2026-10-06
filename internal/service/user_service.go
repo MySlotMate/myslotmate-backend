@@ -390,9 +390,12 @@ func (s *userService) UpdateProfile(ctx context.Context, userID uuid.UUID, req U
 		user.Name = *req.Name
 	}
 	if req.AvatarURL != nil {
-		// Validate avatar URL: reject blob URLs and localhost URLs
-		if err := validation.ValidateImageURL(*req.AvatarURL); err != nil {
-			return nil, err
+		// Validate avatar URL: reject blob URLs and localhost URLs. Empty
+		// string means "clear the photo" and skips validation.
+		if *req.AvatarURL != "" {
+			if err := validation.ValidateImageURL(*req.AvatarURL); err != nil {
+				return nil, err
+			}
 		}
 		user.AvatarURL = req.AvatarURL
 	}

@@ -638,9 +638,12 @@ func applyProfileUpdate(host *models.Host, req HostProfileUpdateRequest) error {
 		host.LastName = *req.LastName
 	}
 	if req.AvatarURL != nil {
-		// Validate avatar URL: reject blob URLs and localhost URLs
-		if err := validation.ValidateImageURL(*req.AvatarURL); err != nil {
-			return err
+		// Validate avatar URL: reject blob URLs and localhost URLs. Empty
+		// string means "clear the photo" and skips validation.
+		if *req.AvatarURL != "" {
+			if err := validation.ValidateImageURL(*req.AvatarURL); err != nil {
+				return err
+			}
 		}
 		host.AvatarURL = req.AvatarURL
 		// A supplied photo is no longer sourced from Instagram.

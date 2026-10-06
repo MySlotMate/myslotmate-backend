@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"myslotmate-backend/internal/models"
 	"strings"
 	"time"
 
@@ -193,6 +194,9 @@ type AdminEventRow struct {
 	AvgRating     sql.NullFloat64
 	Status        string
 	IsExpired     bool
+	// Date is the event's next date: the upcoming occurrence for a recurring
+	// event, the next future custom date, else its stored (first) date.
+	Date          *time.Time
 	HostFirstName sql.NullString
 	HostLastName  sql.NullString
 	HostCity      sql.NullString
@@ -281,6 +285,20 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 			e.avg_rating,
 			e.status,
 			%s AS is_expired,
+			e.time,
+			e.end_time,
+			e.recurrence_rule,
+			e.session_type,
+			e.break_minutes,
+			e.session_windows,
+			e.duration_minutes,
+			(
+				SELECT MIN(ts)
+				FROM unnest(COALESCE(e.custom_dates, '{}'::text[])) AS d,
+					LATERAL (SELECT CASE WHEN d ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+						THEN d::timestamptz ELSE NULL END AS ts) c
+				WHERE ts > now()
+			) AS next_custom_date,
 			h.first_name,
 			h.last_name,
 			h.city
@@ -299,12 +317,25 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 	out := make([]AdminEventRow, 0)
 	for rows.Next() {
 		var e AdminEventRow
+		var t, nextCustom sql.NullTime
+		ev := models.Event{}
 		if err := rows.Scan(
 			&e.ID, &e.HostID, &e.IsRecurring, &e.Title, &e.Mood, &e.PriceCents, &e.IsFree,
 			&e.TotalBookings, &e.AvgRating, &e.Status, &e.IsExpired,
+			&t, &ev.EndTime, &ev.RecurrenceRule, &ev.SessionType, &ev.BreakMinutes,
+			&ev.SessionWindows, &ev.DurationMinutes, &nextCustom,
 			&e.HostFirstName, &e.HostLastName, &e.HostCity,
 		); err != nil {
 			return nil, 0, err
+		}
+		switch {
+		case nextCustom.Valid && !e.IsRecurring:
+			e.Date = &nextCustom.Time
+		case t.Valid:
+			// Same roll-forward the public event endpoints use.
+			ev.Time, ev.IsRecurring = t.Time, e.IsRecurring
+			applyRecurrence(&ev)
+			e.Date = &ev.Time
 		}
 		out = append(out, e)
 	}

@@ -204,8 +204,27 @@ type ListEventsParams struct {
 	Limit  int
 	Offset int
 	Search string // matches title / host name / city / mood
-	Status string // exact event status: draft | live | paused | cancelled
+	Status string // draft | live | paused | cancelled | expired (virtual)
 }
+
+// eventExpiredSQL is true when nothing of event e is still ahead.
+//
+// e.time is the FIRST date and is never rolled forward for a custom_dates
+// event, so "time < now()" alone marks a three-date event expired the moment
+// its first date passes — while the other two are still bookable. Any future
+// entry in custom_dates keeps it live. The CASE guards the cast: a malformed
+// entry yields NULL rather than erroring the whole listing query.
+const eventExpiredSQL = `(
+	NOT e.is_recurring
+	AND e.time IS NOT NULL
+	AND e.time < now()
+	AND NOT EXISTS (
+		SELECT 1
+		FROM unnest(COALESCE(e.custom_dates, '{}'::text[])) AS d
+		WHERE (CASE WHEN d ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+			THEN d::timestamptz ELSE NULL END) > now()
+	)
+)`
 
 // ListEvents returns a page of all events (any status) joined with their host,
 // newest first, plus the total count matching the filters.
@@ -220,7 +239,17 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 			"(e.title ILIKE $%d OR (COALESCE(h.first_name,'') || ' ' || COALESCE(h.last_name,'')) ILIKE $%d OR COALESCE(h.city,'') ILIKE $%d OR COALESCE(e.mood::text,'') ILIKE $%d)",
 			i, i, i, i))
 	}
-	if st := strings.TrimSpace(p.Status); st != "" {
+	// The list displays a past live/paused event as "expired", so the filter
+	// must agree: "live"/"paused" exclude expired rows, and "expired" is a
+	// virtual status selecting exactly those rows.
+	switch st := strings.TrimSpace(p.Status); st {
+	case "":
+	case "expired":
+		conds = append(conds, "e.status IN ('live','paused') AND "+eventExpiredSQL)
+	case "live", "paused":
+		args = append(args, st)
+		conds = append(conds, fmt.Sprintf("e.status = $%d AND NOT %s", len(args), eventExpiredSQL))
+	default:
 		args = append(args, st)
 		conds = append(conds, fmt.Sprintf("e.status = $%d", len(args)))
 	}
@@ -251,25 +280,7 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 			e.total_bookings,
 			e.avg_rating,
 			e.status,
-			-- An event is expired only when nothing of it is still ahead.
-			--
-			-- e.time is the FIRST date and is never rolled forward for a
-			-- custom_dates event, so "time < now()" alone marks a three-date
-			-- event expired the moment its first date passes — while the other
-			-- two are still bookable. Any future entry in custom_dates keeps it
-			-- live. The CASE guards the cast: a malformed entry yields NULL
-			-- rather than erroring the whole listing query.
-			(
-				NOT e.is_recurring
-				AND e.time IS NOT NULL
-				AND e.time < now()
-				AND NOT EXISTS (
-					SELECT 1
-					FROM unnest(COALESCE(e.custom_dates, '{}'::text[])) AS d
-					WHERE (CASE WHEN d ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
-						THEN d::timestamptz ELSE NULL END) > now()
-				)
-			) AS is_expired,
+			%s AS is_expired,
 			h.first_name,
 			h.last_name,
 			h.city
@@ -277,7 +288,7 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 		LEFT JOIN hosts h ON h.id = e.host_id
 		%s
 		ORDER BY e.created_at DESC
-		LIMIT $%d OFFSET $%d`, whereSQL, limitIdx, offsetIdx)
+		LIMIT $%d OFFSET $%d`, eventExpiredSQL, whereSQL, limitIdx, offsetIdx)
 
 	rows, err := r.db.QueryContext(ctx, pageSQL, pageArgs...)
 	if err != nil {

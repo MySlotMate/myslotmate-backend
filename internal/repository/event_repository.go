@@ -408,9 +408,13 @@ func (r *postgresEventRepository) UpdateStatus(ctx context.Context, id uuid.UUID
 }
 
 func (r *postgresEventRepository) ListPublished(ctx context.Context, limit, offset int) ([]*models.Event, error) {
-	query := `SELECT ` + eventColumns + ` FROM events
+	// Drop finished one-off events here, before LIMIT: otherwise a page fills
+	// with past events and pushes older-created but still-bookable ones (e.g.
+	// weekly trips) off the default 20-row page.
+	query := `SELECT ` + eventColumns + ` FROM events e
 		WHERE status IN ('live', 'paused')
 		  AND host_id IN (SELECT id FROM hosts WHERE is_active = TRUE)
+		  AND NOT ` + eventExpiredSQL + `
 		ORDER BY created_at DESC LIMIT $1 OFFSET $2`
 	return r.scanEvents(ctx, query, limit, offset)
 }

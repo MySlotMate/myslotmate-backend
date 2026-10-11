@@ -775,8 +775,11 @@ func (s *hostService) GetDashboardOverview(ctx context.Context, hostID uuid.UUID
 	}
 	fmt.Printf("[DASHBOARD] GetDashboardOverview: total bookings aggregated = %d\n", totalBookings)
 
-	// Earnings
-	earnings, err := s.payoutRepo.GetHostEarnings(ctx, hostID)
+	// Earnings — live from confirmed bookings, the same source as the earnings
+	// page (GetEarningsSummary). The host_earnings aggregate drifts from it
+	// (one host showed ₹3.40 there against ₹50.90 of confirmed bookings), so the
+	// dashboard card and the earnings page disagreed.
+	earnings, err := s.bookingRepo.GetHostEarningsBreakdown(ctx, hostID)
 	if err != nil {
 		fmt.Printf("[DASHBOARD] GetDashboardOverview: earnings fetch error: %v\n", err)
 		return nil, err
@@ -791,7 +794,7 @@ func (s *hostService) GetDashboardOverview(ctx context.Context, hostID uuid.UUID
 		overview.AvgRating = *host.AvgRating
 	}
 	if earnings != nil {
-		overview.TotalEarnings = earnings.TotalEarningsCents
+		overview.TotalEarnings = earnings.TotalCents
 	}
 
 	fmt.Printf("[DASHBOARD] GetDashboardOverview: returning overview - events=%d, bookings=%d\n",

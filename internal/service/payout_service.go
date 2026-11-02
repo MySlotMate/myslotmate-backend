@@ -1323,8 +1323,8 @@ func (s *payoutService) GetPlatformFeeConfig(ctx context.Context) (*models.Platf
 	return s.payoutRepo.GetPlatformFeeConfig(ctx)
 }
 
-// ErrInvalidBookingFee rejects a booking_fee setting outside ₹0–₹1,000.
-var ErrInvalidBookingFee = errors.New(`booking_fee must be {"amount_cents": 0-100000}`)
+// ErrInvalidBookingFee rejects a malformed or out-of-bounds booking_fee setting.
+var ErrInvalidBookingFee = errors.New(`booking_fee must be {"type": "flat"|"percentage", "amount_cents": 0-100000, "percentage": 0-100}`)
 
 func (s *payoutService) SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error {
 	// The booking fee is charged to guests' wallets, so its shape is enforced
@@ -1334,8 +1334,15 @@ func (s *payoutService) SavePlatformSetting(ctx context.Context, key string, val
 		if err := json.Unmarshal(value, &cfg); err != nil {
 			return ErrInvalidBookingFee
 		}
-		if cfg.AmountCents < 0 || cfg.AmountCents > models.MaxBookingFeeCents {
+		if !cfg.Valid() {
 			return ErrInvalidBookingFee
+		}
+		// Store only the active field, so no client can read a stale value.
+		if cfg.Type == models.BookingFeePercentage {
+			cfg.AmountCents = 0
+		} else {
+			cfg.Type = models.BookingFeeFlat
+			cfg.Percentage = 0
 		}
 		normalized, _ := json.Marshal(cfg)
 		value = normalized

@@ -25,24 +25,54 @@ type PlatformFeeConfig struct {
 // BookingFeeKey is the platform_settings key for the guest-paid booking fee.
 const BookingFeeKey = "booking_fee"
 
-// BookingFeeConfig is the "booking_fee" key: a flat amount the guest pays on
-// top of the ticket total, once per paid booking, kept whole by the platform.
-// Unlike PlatformFeeConfig (the host's commission, invisible to the guest)
-// this raises what the buyer pays. 0 — the default when unseeded — turns it off.
+// Booking fee types. An empty type means flat — the setting predates the field.
+const (
+	BookingFeeFlat       = "flat"
+	BookingFeePercentage = "percentage"
+)
+
+// BookingFeeConfig is the "booking_fee" key: what the guest pays on top of the
+// ticket total, once per paid booking, kept whole by the platform. Either a
+// flat amount or a percentage of the tickets, as the admin chooses. Unlike
+// PlatformFeeConfig (the host's commission, invisible to the guest) this raises
+// what the buyer pays. 0 — the default when unseeded — turns it off.
 type BookingFeeConfig struct {
-	AmountCents int64 `json:"amount_cents"`
+	Type        string `json:"type"`
+	AmountCents int64  `json:"amount_cents"`
+	Percentage  int    `json:"percentage"`
 }
 
-// MaxBookingFeeCents caps the admin-set fee (₹1,000) so a typo can't drain wallets.
+// MaxBookingFeeCents caps the flat fee (₹1,000) so a typo can't drain wallets.
 const MaxBookingFeeCents = 100000
 
-// BookingFeeCents is the guest fee for a booking: the flat amount on any paid
-// booking, nothing on a free one. The Node backend and both clients mirror it.
-func BookingFeeCents(ticketTotalCents int64, feeCents int64) int64 {
-	if ticketTotalCents <= 0 || feeCents <= 0 {
+// FeeCents is the guest fee for a booking with this ticket total. Free
+// bookings pay nothing; a percentage floors (integer division). The Node
+// backend and both clients mirror this exactly.
+func (c BookingFeeConfig) FeeCents(ticketTotalCents int64) int64 {
+	if ticketTotalCents <= 0 {
 		return 0
 	}
-	return feeCents
+	if c.Type == BookingFeePercentage {
+		if c.Percentage <= 0 {
+			return 0
+		}
+		return ticketTotalCents * int64(c.Percentage) / 100
+	}
+	if c.AmountCents <= 0 {
+		return 0
+	}
+	return c.AmountCents
+}
+
+// Valid reports whether an admin-submitted config is in bounds.
+func (c BookingFeeConfig) Valid() bool {
+	switch c.Type {
+	case "", BookingFeeFlat, BookingFeePercentage:
+	default:
+		return false
+	}
+	return c.AmountCents >= 0 && c.AmountCents <= MaxBookingFeeCents &&
+		c.Percentage >= 0 && c.Percentage <= 100
 }
 
 // EffectiveFeeConfig applies a host's commission override (Host.PlatformFeePercentage)

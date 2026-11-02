@@ -498,7 +498,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 			if err != nil {
 				return nil, err
 			}
-			bookingFee := models.BookingFeeCents(totalAmount, bookingFeeConfig.AmountCents)
+			bookingFee := bookingFeeConfig.FeeCents(totalAmount)
 			totalAmount += bookingFee
 			platformFee += bookingFee
 		}

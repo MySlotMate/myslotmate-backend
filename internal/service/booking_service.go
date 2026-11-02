@@ -487,6 +487,21 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		appliedPlatformPercentage = feeConfig.PlatformPercentage
 		platformFee = totalAmount * int64(feeConfig.PlatformPercentage) / 100
 		hostEarning = totalAmount - platformFee
+
+		// Guest-paid booking fee, on top of the ticket total. Commission above is
+		// taken on the tickets only; the fee goes to the platform whole, so
+		// amount = service_fee + net_earning still holds for the cancel reversal.
+		// Guest self-serve bookings only: walk-ins and imports are host-driven,
+		// the guest never sees a total, and walk-in sizes its own top-up.
+		if bookingSource(req.Source) == models.BookingSourceOnline {
+			bookingFeeConfig, err := s.payoutRepo.GetBookingFeeConfig(ctx)
+			if err != nil {
+				return nil, err
+			}
+			bookingFee := models.BookingFeeCents(totalAmount, bookingFeeConfig.AmountCents)
+			totalAmount += bookingFee
+			platformFee += bookingFee
+		}
 	}
 
 	// ── Transaction — every write below commits all-or-nothing ───────────

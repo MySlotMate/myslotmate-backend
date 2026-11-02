@@ -598,6 +598,10 @@ func (c *AdminController) SavePlatformSetting(w http.ResponseWriter, r *http.Req
 	}
 
 	err := c.payoutService.SavePlatformSetting(r.Context(), key, value)
+	if err == service.ErrInvalidBookingFee {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return

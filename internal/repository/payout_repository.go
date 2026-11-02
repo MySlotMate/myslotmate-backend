@@ -34,6 +34,7 @@ type PayoutRepository interface {
 
 	// Platform Settings
 	GetPlatformFeeConfig(ctx context.Context) (*models.PlatformFeeConfig, error)
+	GetBookingFeeConfig(ctx context.Context) (*models.BookingFeeConfig, error)
 	GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error)
 	SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error
 
@@ -310,6 +311,19 @@ func (r *postgresPayoutRepository) GetPlatformFeeConfig(ctx context.Context) (*m
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// GetBookingFeeConfig returns the guest-paid booking fee; 0% when unseeded.
+func (r *postgresPayoutRepository) GetBookingFeeConfig(ctx context.Context) (*models.BookingFeeConfig, error) {
+	cfg := &models.BookingFeeConfig{}
+	raw, err := r.GetPlatformSetting(ctx, models.BookingFeeKey)
+	if err != nil || raw == nil {
+		return cfg, err
+	}
+	if err := json.Unmarshal(raw, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func (r *postgresPayoutRepository) GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error) {

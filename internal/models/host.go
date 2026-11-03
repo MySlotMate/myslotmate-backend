@@ -76,6 +76,10 @@ type Host struct {
 	// "use the global platform_settings default" (see GetPlatformFeeConfig).
 	PlatformFeePercentage *int `db:"platform_fee_percentage" json:"platform_fee_percentage,omitempty"`
 
+	// AutoPayoutEnabled: admin opted this host into the weekly Tuesday payout
+	// of their full withdrawable balance (verified bank account required).
+	AutoPayoutEnabled bool `db:"auto_payout_enabled" json:"auto_payout_enabled"`
+
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }

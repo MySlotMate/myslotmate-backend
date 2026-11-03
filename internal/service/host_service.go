@@ -70,6 +70,9 @@ type HostService interface {
 	// platform's cut of each of their bookings (host keeps the remainder).
 	// Pass nil to clear the override and fall back to the global default.
 	SetPlatformFeePercentage(ctx context.Context, hostID uuid.UUID, platformPercentage *int) (*models.Host, error)
+
+	// SetAutoPayout opts this host in or out of the weekly Tuesday auto payout.
+	SetAutoPayout(ctx context.Context, hostID uuid.UUID, enabled bool) (*models.Host, error)
 }
 
 // HostApplicationRequest maps to the "Become a Host" form (Steps 1 & 2).
@@ -821,6 +824,22 @@ func (s *hostService) SetPlatformFeePercentage(ctx context.Context, hostID uuid.
 		return nil, err
 	}
 	host.PlatformFeePercentage = platformPercentage
+	return host, nil
+}
+
+func (s *hostService) SetAutoPayout(ctx context.Context, hostID uuid.UUID, enabled bool) (*models.Host, error) {
+	host, err := s.hostRepo.GetByID(ctx, hostID)
+	if err != nil {
+		return nil, err
+	}
+	if host == nil {
+		return nil, errors.New("host not found")
+	}
+
+	if err := s.hostRepo.SetAutoPayout(ctx, hostID, enabled); err != nil {
+		return nil, err
+	}
+	host.AutoPayoutEnabled = enabled
 	return host, nil
 }
 

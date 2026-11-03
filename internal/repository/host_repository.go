@@ -24,6 +24,10 @@ type HostRepository interface {
 	// platform's cut). Pass nil to clear the override and fall back to the
 	// global platform_settings default.
 	SetPlatformFeePercentage(ctx context.Context, hostID uuid.UUID, platformPercentage *int) error
+	// SetAutoPayout turns the weekly (Tuesday) automatic payout on or off.
+	SetAutoPayout(ctx context.Context, hostID uuid.UUID, enabled bool) error
+	// ListAutoPayoutHostIDs returns every host with auto payout turned on.
+	ListAutoPayoutHostIDs(ctx context.Context) ([]uuid.UUID, error)
 	// SaveInstagramMedia stores the result of the one-time Instagram scrape.
 	// avatarURL only overwrites an empty avatar_url; instagram_scraped_at is
 	// always stamped so the scrape never runs twice.
@@ -52,7 +56,7 @@ var hostColumns = `id, user_id, account_id,
 	is_identity_verified, is_super_host, is_community_champ, is_professional,
 	expertise_tags, social_instagram, social_linkedin, social_website,
 	gallery_urls, instagram_scraped_at, avatar_from_instagram,
-	avg_rating, total_reviews, platform_fee_percentage,
+	avg_rating, total_reviews, platform_fee_percentage, auto_payout_enabled,
 	created_at, updated_at,
 	is_active,
 	events_hosted_override, people_met_override, avg_rating_override,
@@ -70,7 +74,7 @@ func scanHost(row interface {
 		&h.IsIdentityVerified, &h.IsSuperHost, &h.IsCommunityChamp, &h.IsProfessional,
 		&h.ExpertiseTags, &h.SocialInstagram, &h.SocialLinkedin, &h.SocialWebsite,
 		&h.GalleryURLs, &h.InstagramScrapedAt, &h.AvatarFromInstagram,
-		&h.AvgRating, &h.TotalReviews, &h.PlatformFeePercentage,
+		&h.AvgRating, &h.TotalReviews, &h.PlatformFeePercentage, &h.AutoPayoutEnabled,
 		&h.CreatedAt, &h.UpdatedAt,
 		&h.IsActive,
 		&h.EventsHostedOverride, &h.PeopleMetOverride, &h.AvgRatingOverride,
@@ -279,4 +283,28 @@ func (r *postgresHostRepository) SetPlatformFeePercentage(ctx context.Context, h
 	query := `UPDATE hosts SET platform_fee_percentage = $1, updated_at = now() WHERE id = $2`
 	_, err := r.db.ExecContext(ctx, query, platformPercentage, hostID)
 	return err
+}
+
+func (r *postgresHostRepository) SetAutoPayout(ctx context.Context, hostID uuid.UUID, enabled bool) error {
+	query := `UPDATE hosts SET auto_payout_enabled = $1, updated_at = now() WHERE id = $2`
+	_, err := r.db.ExecContext(ctx, query, enabled, hostID)
+	return err
+}
+
+func (r *postgresHostRepository) ListAutoPayoutHostIDs(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id FROM hosts WHERE auto_payout_enabled = true`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

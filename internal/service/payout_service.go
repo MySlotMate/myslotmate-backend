@@ -66,6 +66,11 @@ type PayoutService interface {
 	// safety net for missed payout webhooks. Safe to call repeatedly.
 	ReconcilePendingPayouts(ctx context.Context) (ReconcileResult, error)
 
+	// RunAutoPayouts pays every auto-payout host's withdrawable balance to a
+	// verified bank account, at most once per ISO week — see auto_payout.go.
+	RunAutoPayouts(ctx context.Context, now time.Time) error
+	RunAutoPayoutForHost(ctx context.Context, hostID uuid.UUID, now time.Time) (*models.Payment, error)
+
 	// Platform Settings Settings
 	GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error)
 	SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error

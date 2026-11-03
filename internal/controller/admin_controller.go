@@ -51,6 +51,8 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Post("/{hostID}/reject", c.RejectApplication)
 		r.Put("/{hostID}/application-status", c.UpdateApplicationStatus)
 		r.Put("/{hostID}/platform-fee", c.SetHostPlatformFee)
+		r.Put("/{hostID}/auto-payout", c.SetHostAutoPayout)
+		r.Post("/{hostID}/auto-payout/run", c.RunHostAutoPayout)
 		r.Put("/{hostID}/profile", c.UpdateHostProfile)
 		r.Put("/{hostID}/active", c.SetHostActive)
 		r.Get("/{hostID}/earnings", c.GetHostEarnings)
@@ -295,6 +297,50 @@ func (c *AdminController) SetHostPlatformFee(w http.ResponseWriter, r *http.Requ
 	}
 
 	RespondSuccess(w, http.StatusOK, host)
+}
+
+// SetHostAutoPayout opts a host in or out of the weekly Tuesday auto payout.
+func (c *AdminController) SetHostAutoPayout(w http.ResponseWriter, r *http.Request) {
+	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		return
+	}
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	host, err := c.hostService.SetAutoPayout(r.Context(), hostID, req.Enabled)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, host)
+}
+
+// RunHostAutoPayout runs the weekly auto payout for one host right now (for
+// testing a host before Tuesday). It shares the week's idempotency key, so it
+// replaces — not adds to — that host's payout for the week.
+func (c *AdminController) RunHostAutoPayout(w http.ResponseWriter, r *http.Request) {
+	hostID, err := uuid.Parse(chi.URLParam(r, "hostID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid host ID")
+		return
+	}
+
+	payment, err := c.payoutService.RunAutoPayoutForHost(r.Context(), hostID, time.Now())
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	RespondSuccess(w, http.StatusOK, payment)
 }
 
 // UpdateHostProfile lets an admin edit a host's profile data (image, bio,

@@ -330,6 +330,8 @@ func main() {
 		go keepAlive(ctx, cfg.RenderExternalURL+"/health")
 	}
 
+	go runAutoPayouts(ctx, payoutService)
+
 	// Graceful shutdown on SIGINT/SIGTERM.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -372,6 +374,27 @@ func keepAlive(ctx context.Context, url string) {
 			}
 			resp.Body.Close()
 			log.Printf("keep-alive ping: %s", resp.Status)
+		}
+	}
+}
+
+// runAutoPayouts ticks hourly and fires the weekly host auto payout during the
+// Tuesday IST window. Repeat ticks are no-ops (per-week idempotency key).
+func runAutoPayouts(ctx context.Context, payoutService service.PayoutService) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if !service.AutoPayoutDue(now) {
+				continue
+			}
+			if err := payoutService.RunAutoPayouts(ctx, now); err != nil {
+				log.Printf("auto payout run failed: %v", err)
+			}
 		}
 	}
 }

@@ -294,7 +294,7 @@ func (s *walkInService) InitiateWalkIn(ctx context.Context, req WalkInInitiateRe
 			return nil, err
 		}
 		if !coupon.GrantsFree {
-			return nil, errors.New("that code only grants access, not a free booking")
+			return nil, errors.New("that code doesn't make the booking free — only free-booking codes work here")
 		}
 	}
 

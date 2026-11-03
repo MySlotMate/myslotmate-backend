@@ -206,7 +206,7 @@ func (s *bookingImportService) ValidateEventForImport(ctx context.Context, hostI
 		return nil, err
 	}
 	if !coupon.GrantsFree {
-		return nil, errors.New("that code only grants access, not a free booking — use a code that makes the booking free, or clear it and confirm you collected payment yourself")
+		return nil, errors.New("that code doesn't make the booking free — use a code that makes the booking free, or clear it and confirm you collected payment yourself")
 	}
 	out.PaymentMode = models.ImportPaymentCoupon
 	return out, nil

@@ -387,7 +387,8 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	// Access and payment are decoupled: a code that unlocked a private event
 	// (gateCoupon) or an explicit code (req.CouponCode) is recorded and redeemed —
 	// single-use — regardless. It waives the price ONLY when it's a free-booking
-	// code (GrantsFree); an access code (a per-guest passkey) just unlocks and the
+	// code (GrantsFree), or partly when it's a percentage-discount code
+	// (DiscountPercent); an access code (a per-guest passkey) just unlocks and the
 	// guest pays. The shared passkey never comps — "free for everyone" is instead
 	// the event being priced free (which already makes totalAmount 0 above).
 	var couponID *uuid.UUID
@@ -404,6 +405,10 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		if totalAmount > 0 && comp.GrantsFree {
 			totalAmount = 0
 		}
+		// A percentage-discount code lowers the ticket total. It runs before the
+		// fee split below, so commission and the guest booking fee are both taken
+		// on what the guest actually pays — the host absorbs the discount.
+		totalAmount -= comp.DiscountCents(totalAmount)
 	}
 
 	// 6c. Paid-offline (bulk import): the host already collected this money

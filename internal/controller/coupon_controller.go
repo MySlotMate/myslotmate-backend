@@ -146,12 +146,28 @@ type couponRequestBody struct {
 	Code    string     `json:"code"`
 	// GrantsFree: true = free-booking code (comp); false = access code (a
 	// per-guest passkey — unlocks but the guest pays). Defaults to true.
-	GrantsFree     *bool      `json:"grants_free,omitempty"`
-	MaxRedemptions *int       `json:"max_redemptions,omitempty"`
-	PerUserLimit   *int       `json:"per_user_limit,omitempty"`
-	ValidFrom      *time.Time `json:"valid_from,omitempty"`
-	ValidUntil     *time.Time `json:"valid_until,omitempty"`
-	IsActive       *bool      `json:"is_active,omitempty"`
+	GrantsFree *bool `json:"grants_free,omitempty"`
+	// DiscountPercent (1–99) makes a percentage-discount code instead; it
+	// overrides GrantsFree to false.
+	DiscountPercent *int       `json:"discount_percent,omitempty"`
+	MaxRedemptions  *int       `json:"max_redemptions,omitempty"`
+	PerUserLimit    *int       `json:"per_user_limit,omitempty"`
+	ValidFrom       *time.Time `json:"valid_from,omitempty"`
+	ValidUntil      *time.Time `json:"valid_until,omitempty"`
+	IsActive        *bool      `json:"is_active,omitempty"`
+}
+
+// couponKind resolves the code kind from the request. grants_free defaults to
+// true for older clients, so a discount_percent must force it off — otherwise a
+// client sending only discount_percent would mint a FREE code.
+func couponKind(grantsFree *bool, discountPercent *int) (bool, *int, error) {
+	if discountPercent == nil {
+		return boolOr(grantsFree, true), nil, nil
+	}
+	if *discountPercent < 1 || *discountPercent > 99 {
+		return false, nil, errors.New("discount_percent must be between 1 and 99")
+	}
+	return false, discountPercent, nil
 }
 
 // boolOr returns *p when set, else def — for optional booleans that default true.
@@ -188,20 +204,26 @@ func (c *CouponController) CreateCoupon(w http.ResponseWriter, r *http.Request) 
 		c.respondEventError(w, err)
 		return
 	}
+	grantsFree, discountPercent, err := couponKind(body.GrantsFree, body.DiscountPercent)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	isActive := true
 	if body.IsActive != nil {
 		isActive = *body.IsActive
 	}
 	coupon := &models.Coupon{
-		HostID:         body.HostID,
-		EventID:        eventID,
-		Code:           code,
-		GrantsFree:     boolOr(body.GrantsFree, true),
-		MaxRedemptions: body.MaxRedemptions,
-		PerUserLimit:   body.PerUserLimit,
-		ValidFrom:      body.ValidFrom,
-		ValidUntil:     body.ValidUntil,
-		IsActive:       isActive,
+		HostID:          body.HostID,
+		EventID:         eventID,
+		Code:            code,
+		GrantsFree:      grantsFree,
+		DiscountPercent: discountPercent,
+		MaxRedemptions:  body.MaxRedemptions,
+		PerUserLimit:    body.PerUserLimit,
+		ValidFrom:       body.ValidFrom,
+		ValidUntil:      body.ValidUntil,
+		IsActive:        isActive,
 	}
 	if err := c.couponRepo.Create(r.Context(), coupon); err != nil {
 		// A duplicate code for the host trips the unique index.
@@ -221,14 +243,15 @@ func (c *CouponController) CreateCoupon(w http.ResponseWriter, r *http.Request) 
 // server-side to guarantee uniqueness (retried on the unique-index violation).
 func (c *CouponController) BatchCreateCoupons(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		HostID         uuid.UUID  `json:"host_id"`
-		EventID        *uuid.UUID `json:"event_id,omitempty"`
-		Count          int        `json:"count"`
-		Prefix         string     `json:"prefix,omitempty"`
-		GrantsFree     *bool      `json:"grants_free,omitempty"`
-		MaxRedemptions *int       `json:"max_redemptions,omitempty"`
-		PerUserLimit   *int       `json:"per_user_limit,omitempty"`
-		ValidUntil     *time.Time `json:"valid_until,omitempty"`
+		HostID          uuid.UUID  `json:"host_id"`
+		EventID         *uuid.UUID `json:"event_id,omitempty"`
+		Count           int        `json:"count"`
+		Prefix          string     `json:"prefix,omitempty"`
+		GrantsFree      *bool      `json:"grants_free,omitempty"`
+		DiscountPercent *int       `json:"discount_percent,omitempty"`
+		MaxRedemptions  *int       `json:"max_redemptions,omitempty"`
+		PerUserLimit    *int       `json:"per_user_limit,omitempty"`
+		ValidUntil      *time.Time `json:"valid_until,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		RespondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -255,7 +278,11 @@ func (c *CouponController) BatchCreateCoupons(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	grantsFree := boolOr(body.GrantsFree, true)
+	grantsFree, discountPercent, err := couponKind(body.GrantsFree, body.DiscountPercent)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Default to single-use (one code per guest).
 	maxRedemptions := body.MaxRedemptions
@@ -274,14 +301,15 @@ func (c *CouponController) BatchCreateCoupons(w http.ResponseWriter, r *http.Req
 		var made *models.Coupon
 		for attempt := 0; attempt < 8; attempt++ {
 			coupon := &models.Coupon{
-				HostID:         body.HostID,
-				EventID:        eventID,
-				Code:           generateCouponCode(body.Prefix),
-				GrantsFree:     grantsFree,
-				MaxRedemptions: maxRedemptions,
-				PerUserLimit:   perUserLimit,
-				ValidUntil:     body.ValidUntil,
-				IsActive:       true,
+				HostID:          body.HostID,
+				EventID:         eventID,
+				Code:            generateCouponCode(body.Prefix),
+				GrantsFree:      grantsFree,
+				DiscountPercent: discountPercent,
+				MaxRedemptions:  maxRedemptions,
+				PerUserLimit:    perUserLimit,
+				ValidUntil:      body.ValidUntil,
+				IsActive:        true,
 			}
 			err := c.couponRepo.Create(r.Context(), coupon)
 			if err == nil {
@@ -451,6 +479,8 @@ func (c *CouponController) ValidateCoupon(w http.ResponseWriter, r *http.Request
 		"valid": true,
 		// A free-booking code waives payment; an access code just unlocks.
 		"comps_booking": coupon.GrantsFree,
-		"code":          coupon.Code,
+		// Set for a percentage-discount code: the share taken off the tickets.
+		"discount_percent": coupon.DiscountPercent,
+		"code":             coupon.Code,
 	})
 }

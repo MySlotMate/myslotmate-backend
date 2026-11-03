@@ -95,6 +95,14 @@ func (s *payoutService) RunAutoPayoutForHost(ctx context.Context, hostID uuid.UU
 		return nil, errors.New("auto payout is off for this host")
 	}
 
+	// Co-host withdrawals draw on the owner's balance, so sweeping it would
+	// pay the co-host's share into the owner's bank. Leave these to manual.
+	if _, granted, err := s.cohostRepo.CountsForHost(ctx, hostID); err != nil {
+		return nil, fmt.Errorf("count co-hosts: %w", err)
+	} else if granted > 0 {
+		return nil, errors.New("host has co-hosts on their events; pay out manually")
+	}
+
 	methods, err := s.payoutRepo.ListPayoutMethodsByHostID(ctx, hostID)
 	if err != nil {
 		return nil, fmt.Errorf("list payout methods: %w", err)

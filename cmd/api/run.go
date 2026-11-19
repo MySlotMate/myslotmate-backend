@@ -222,7 +222,8 @@ func main() {
 	hostController := controller.NewHostController(hostService).WithProfile(profileController)
 	eventController := controller.NewEventController(eventService).
 		WithAuth(userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret).
-		WithAdminEmail(cfg.AdminEmail)
+		WithAdminEmail(cfg.AdminEmail).
+		WithGalleryNotifier(controller.NewGalleryNotifier(dbConn, notifService, cfg.FrontendBaseURL))
 	bookingController := controller.NewBookingController(bookingService).
 		WithAuth(userRepo, hostRepo, eventRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
 	passController := controller.NewPassController(passService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)

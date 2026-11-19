@@ -32,6 +32,14 @@ type EventController struct {
 	// Comma-separated admin allow-list, for the host-scoped reads the admin
 	// dashboard legitimately makes against other people's hosts.
 	adminEmail string
+	// Optional: emails past guests when the host adds photos to a past event.
+	galleryNotifier *GalleryNotifier
+}
+
+// WithGalleryNotifier enables the "host shared photos" message to past guests.
+func (c *EventController) WithGalleryNotifier(g *GalleryNotifier) *EventController {
+	c.galleryNotifier = g
+	return c
 }
 
 func NewEventController(s service.EventService) *EventController {
@@ -492,7 +500,26 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Photos on an experience that has already happened reach its guests'
+	// journeys, so only the event's own host may change them (not co-hosts).
+	var galleryBefore int
+	var started bool
+	if body.GalleryURLs != nil {
+		before, gerr := c.eventService.GetEvent(r.Context(), eventID)
+		if gerr == nil && before != nil {
+			galleryBefore = len(before.GalleryURLs)
+			started = before.Time.Before(time.Now())
+			if started && before.HostID != hostID && !sameStrings(before.GalleryURLs, body.GalleryURLs) {
+				RespondError(w, http.StatusForbidden, "Only the event's host can share photos from a past experience")
+				return
+			}
+		}
+	}
+
 	evt, err := c.eventService.UpdateEvent(r.Context(), eventID, hostID, svcReq)
+	if err == nil && started && len(evt.GalleryURLs) > galleryBefore {
+		c.galleryNotifier.PhotosAdded(eventID, len(evt.GalleryURLs)-galleryBefore)
+	}
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidEventMood) {
 			RespondError(w, http.StatusBadRequest, err.Error())
@@ -1017,4 +1044,16 @@ func (c *EventController) GetEventOccurrencesForHost(w http.ResponseWriter, r *h
 	}
 
 	RespondSuccess(w, http.StatusOK, occurrences)
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

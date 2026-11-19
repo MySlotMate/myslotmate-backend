@@ -13,6 +13,13 @@ import (
 
 type HostController struct {
 	hostService service.HostService
+	profile     *ProfileController // optional: public events + albums under /hosts
+}
+
+// WithProfile mounts the public profile routes (events, albums) under /hosts.
+func (c *HostController) WithProfile(p *ProfileController) *HostController {
+	c.profile = p
+	return c
 }
 
 func NewHostController(s service.HostService) *HostController {
@@ -63,6 +70,9 @@ func (c *HostController) RegisterRoutes(r chi.Router) {
 		r.Get("/dashboard", c.GetDashboardOverview)
 		r.Get("/attention-items", c.GetAttentionItems)
 		r.Get("/earnings/breakdown", c.GetEarningsBreakdown)
+		if c.profile != nil {
+			c.profile.RegisterHostRoutes(r)
+		}
 	})
 }
 

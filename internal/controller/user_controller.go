@@ -19,6 +19,13 @@ type UserController struct {
 	userService  service.UserService
 	firebaseAuth *fbauth.Client
 	jwtSecret    string
+	profile      *ProfileController // optional: album routes under /users
+}
+
+// WithProfile mounts the profile (albums) routes under /users.
+func (c *UserController) WithProfile(p *ProfileController) *UserController {
+	c.profile = p
+	return c
 }
 
 // NewUserController Factory for UserController
@@ -63,6 +70,9 @@ func (c *UserController) RegisterRoutes(r chi.Router) {
 		r.Delete("/saved-experiences/{eventID}", c.UnsaveExperience)
 		r.Get("/saved-experiences", c.GetSavedExperiences)
 		r.Get("/saved-experiences/{eventID}/check", c.IsExperienceSaved)
+		if c.profile != nil {
+			c.profile.RegisterUserRoutes(r)
+		}
 	})
 }
 

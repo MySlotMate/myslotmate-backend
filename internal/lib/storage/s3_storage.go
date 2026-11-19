@@ -201,3 +201,17 @@ func sanitizeFilename(name string) string {
 	}, name)
 	return name
 }
+
+// DeleteOwnedObject deletes the object behind publicURL, but only when that URL
+// points into this bucket under folder/ — anything else (other folders, other
+// hosts) is left alone, since callers pass URLs that users supplied.
+// Returns (false, nil) when the URL was not ours to delete.
+func (s *UploadService) DeleteOwnedObject(ctx context.Context, folder, publicURL string) (bool, error) {
+	prefix := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/", s.bucket, s.region)
+	key, ok := strings.CutPrefix(publicURL, prefix)
+	if !ok || !strings.HasPrefix(key, folder+"/") || strings.Contains(key, "..") {
+		return false, nil
+	}
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	return err == nil, err
+}

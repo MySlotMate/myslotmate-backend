@@ -80,6 +80,10 @@ type EventRepository interface {
 	ListTodayByHostID(ctx context.Context, hostID uuid.UUID, dayStart, dayEnd time.Time) ([]*models.Event, error)
 	ListByHostIDForIDs(ctx context.Context, hostID uuid.UUID) ([]uuid.UUID, error)
 	ListPublished(ctx context.Context, limit, offset int) ([]*models.Event, error)
+	// ListPublicByHost is a host's public profile list: live/paused, non-private
+	// events they own (not co-host), past included, newest start first. A
+	// non-nil before keeps only events starting strictly earlier (paging).
+	ListPublicByHost(ctx context.Context, hostID uuid.UUID, before *time.Time, limit int) ([]*models.Event, error)
 	// HostCanManage reports whether this host may act on the event: they own it,
 	// or they are an accepted co-host of it. Every host-side ownership check
 	// routes through here, so co-hosting does not have to be re-implemented in
@@ -417,6 +421,17 @@ func (r *postgresEventRepository) ListPublished(ctx context.Context, limit, offs
 		  AND NOT ` + eventExpiredSQL + `
 		ORDER BY created_at DESC LIMIT $1 OFFSET $2`
 	return r.scanEvents(ctx, query, limit, offset)
+}
+
+func (r *postgresEventRepository) ListPublicByHost(ctx context.Context, hostID uuid.UUID, before *time.Time, limit int) ([]*models.Event, error) {
+	query := `SELECT ` + eventColumns + ` FROM events
+		WHERE host_id = $1
+		  AND status IN ('live', 'paused')
+		  AND is_private = FALSE
+		  AND ($2::timestamptz IS NULL OR time < $2)
+		ORDER BY time DESC NULLS LAST, created_at DESC
+		LIMIT $3`
+	return r.scanEvents(ctx, query, hostID, before, limit)
 }
 
 func (r *postgresEventRepository) scanEvents(ctx context.Context, query string, args ...interface{}) ([]*models.Event, error) {

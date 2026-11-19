@@ -217,8 +217,9 @@ func main() {
 		reminderScheduler.Start(5 * time.Minute)
 	}
 
-	userController := controller.NewUserController(userService, fbApp.Auth, cfg.AdminAuth.JWTSecret)
-	hostController := controller.NewHostController(hostService)
+	profileController := controller.NewProfileController(hostService, eventRepo, repository.NewAlbumRepository(dbConn), userRepo, uploadService, fbApp.Auth, cfg.AdminAuth.JWTSecret)
+	userController := controller.NewUserController(userService, fbApp.Auth, cfg.AdminAuth.JWTSecret).WithProfile(profileController)
+	hostController := controller.NewHostController(hostService).WithProfile(profileController)
 	eventController := controller.NewEventController(eventService).
 		WithAuth(userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret).
 		WithAdminEmail(cfg.AdminEmail)

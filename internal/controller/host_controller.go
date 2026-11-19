@@ -54,6 +54,9 @@ type PublicHostProfile struct {
 	EventsHostedOverride *int     `json:"events_hosted_override,omitempty"`
 	PeopleMetOverride    *int     `json:"people_met_override,omitempty"`
 	AvgRatingOverride    *float64 `json:"avg_rating_override,omitempty"`
+
+	// People connected with this host (one-way Connect). Single-profile only.
+	ConnectionsCount int `json:"connections_count"`
 }
 
 func (c *HostController) RegisterRoutes(r chi.Router) {
@@ -234,6 +237,11 @@ func (c *HostController) GetPublicHostProfile(w http.ResponseWriter, r *http.Req
 		EventsHostedOverride: host.EventsHostedOverride,
 		PeopleMetOverride:    host.PeopleMetOverride,
 		AvgRatingOverride:    host.AvgRatingOverride,
+	}
+	if c.profile != nil {
+		if n, err := c.profile.connRepo.CountForHost(r.Context(), host.ID); err == nil {
+			profile.ConnectionsCount = n
+		}
 	}
 
 	RespondSuccess(w, http.StatusOK, profile)

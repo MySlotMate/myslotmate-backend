@@ -13,6 +13,7 @@ import (
 
 	"myslotmate-backend/internal/auth"
 	"myslotmate-backend/internal/lib/moderation"
+	"myslotmate-backend/internal/lib/ratelimit"
 	"myslotmate-backend/internal/lib/storage"
 	"myslotmate-backend/internal/lib/validation"
 	"myslotmate-backend/internal/models"
@@ -38,6 +39,8 @@ type ProfileController struct {
 	hostService  service.HostService
 	eventRepo    repository.EventRepository
 	albumRepo    repository.AlbumRepository
+	connRepo     repository.ConnectionRepository
+	connLimiter  *ratelimit.KeyedLimiter
 	userRepo     repository.UserRepository
 	uploads      *storage.UploadService // nil when S3 is not configured
 	firebaseAuth *fbauth.Client
@@ -45,14 +48,18 @@ type ProfileController struct {
 }
 
 func NewProfileController(hs service.HostService, er repository.EventRepository, ar repository.AlbumRepository,
-	ur repository.UserRepository, uploads *storage.UploadService, fa *fbauth.Client, jwtSecret string) *ProfileController {
-	return &ProfileController{hostService: hs, eventRepo: er, albumRepo: ar, userRepo: ur, uploads: uploads, firebaseAuth: fa, jwtSecret: jwtSecret}
+	cr repository.ConnectionRepository, ur repository.UserRepository, uploads *storage.UploadService, fa *fbauth.Client, jwtSecret string) *ProfileController {
+	return &ProfileController{hostService: hs, eventRepo: er, albumRepo: ar, connRepo: cr, userRepo: ur, uploads: uploads,
+		firebaseAuth: fa, jwtSecret: jwtSecret,
+		// ~60 connects an hour per user: 1/min sustained, burst of 60.
+		connLimiter: ratelimit.NewKeyedLimiter(1, 60)}
 }
 
 // RegisterHostRoutes is called inside the /hosts route.
 func (c *ProfileController) RegisterHostRoutes(r chi.Router) {
 	r.Get("/{hostID}/events", c.ListPublicHostEvents)
 	r.With(auth.OptionalUser(c.firebaseAuth, c.jwtSecret)).Get("/{hostID}/albums", c.ListHostAlbums)
+	r.With(auth.RequireUser(c.firebaseAuth, c.jwtSecret)).Get("/me/connections", c.ListHostConnectors)
 }
 
 // RegisterUserRoutes is called inside the /users route.
@@ -65,6 +72,9 @@ func (c *ProfileController) RegisterUserRoutes(r chi.Router) {
 		r.Delete("/me/albums/{albumID}", c.DeleteAlbum)
 		r.Post("/me/albums/{albumID}/photos", c.AddAlbumPhotos)
 		r.Delete("/me/albums/{albumID}/photos/{photoID}", c.DeleteAlbumPhoto)
+		r.Get("/me/connections", c.ListMyConnections)
+		r.Put("/me/connections/{hostID}", c.Connect)
+		r.Delete("/me/connections/{hostID}", c.Disconnect)
 	})
 }
 

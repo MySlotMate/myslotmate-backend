@@ -96,6 +96,27 @@ func (c *EventController) hostIDFor(r *http.Request, bodyHostID uuid.UUID) (uuid
 	return actingHostID(r, c.userRepo, c.hostRepo, bodyHostID)
 }
 
+// errOneOnOneProOnly: 1:1 sessions are for professional hosts only. Admins set
+// hosts.is_professional; community hosts run group events.
+var errOneOnOneProOnly = errors.New("1:1 sessions are only for professional hosts")
+
+// checkSessionType rejects a 1:1 session from a host who is not professional.
+// wasOneOnOne lets a host keep editing a 1:1 they made before being changed to
+// community, rather than locking them out of it.
+func (c *EventController) checkSessionType(r *http.Request, hostID uuid.UUID, st *models.SessionType, wasOneOnOne bool) error {
+	if st == nil || *st != models.SessionTypeOneOnOne || wasOneOnOne || c.hostRepo == nil {
+		return nil
+	}
+	host, err := c.hostRepo.GetByID(r.Context(), hostID)
+	if err != nil {
+		return err
+	}
+	if host == nil || !host.IsProfessional {
+		return errOneOnOneProOnly
+	}
+	return nil
+}
+
 func actingHostID(r *http.Request, userRepo repository.UserRepository, hostRepo repository.HostRepository, bodyHostID uuid.UUID) (uuid.UUID, error) {
 	// An admin acts on a host's behalf from the dashboard, so for them the body
 	// host_id is the acting host — there is no host record behind an admin
@@ -420,6 +441,11 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := c.checkSessionType(r, hostID, req.SessionType, false); err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	evt, err := c.eventService.CreateEvent(r.Context(), hostID, svcReq)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidEventMood) {
@@ -498,6 +524,15 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		RespondError(w, http.StatusForbidden, err.Error())
 		return
+	}
+
+	if body.SessionType != nil && *body.SessionType == models.SessionTypeOneOnOne {
+		before, gerr := c.eventService.GetEvent(r.Context(), eventID)
+		was := gerr == nil && before != nil && before.SessionType == models.SessionTypeOneOnOne
+		if err := c.checkSessionType(r, hostID, body.SessionType, was); err != nil {
+			RespondError(w, http.StatusForbidden, err.Error())
+			return
+		}
 	}
 
 	// Photos on an experience that has already happened reach its guests'

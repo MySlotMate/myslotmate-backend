@@ -269,9 +269,8 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		existing.SocialInstagram = req.SocialInstagram
 		existing.SocialLinkedin = req.SocialLinkedin
 		existing.SocialWebsite = req.SocialWebsite
-		if req.IsProfessional != nil {
-			existing.IsProfessional = *req.IsProfessional
-		}
+		// is_professional is not taken from the application: only an admin sets
+		// it (it decides who may run 1:1 sessions).
 		existing.ApplicationStatus = status
 		if status == models.HostApplicationPending {
 			existing.SubmittedAt = &now
@@ -307,7 +306,7 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		SocialInstagram:   req.SocialInstagram,
 		SocialLinkedin:    req.SocialLinkedin,
 		SocialWebsite:     req.SocialWebsite,
-		IsProfessional:    req.IsProfessional != nil && *req.IsProfessional,
+		IsProfessional:    false, // admin-only, see saveHostApplication
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}

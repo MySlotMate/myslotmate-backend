@@ -333,6 +333,7 @@ func main() {
 	}
 
 	go runAutoPayouts(ctx, payoutService)
+	go runPayoutReconcile(ctx, payoutService)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	stop := make(chan os.Signal, 1)
@@ -397,6 +398,39 @@ func runAutoPayouts(ctx context.Context, payoutService service.PayoutService) {
 			if err := payoutService.RunAutoPayouts(ctx, now); err != nil {
 				log.Printf("auto payout run failed: %v", err)
 			}
+		}
+	}
+}
+
+// payoutReconcileInterval: how often payouts stuck at 'processing' are checked
+// against Cashfree. The payout webhook has never delivered (PAYOUT_RECONCILIATION_PLAN.md),
+// so this poll is what actually moves payouts to completed/failed.
+const payoutReconcileInterval = 15 * time.Minute
+
+// runPayoutReconcile polls Cashfree for every stuck payout on a fixed interval
+// and finalizes the terminal ones through the same path as the webhook. Safe
+// alongside the webhook, the admin button and Node's read-time settle: the
+// failed-payout reversal is keyed by a UNIQUE ledger idempotency key.
+// ponytail: single-instance assumption (PM2 on Render); add pg_try_advisory_lock
+// around a tick if the API ever runs more than one replica.
+func runPayoutReconcile(ctx context.Context, payoutService service.PayoutService) {
+	if os.Getenv("PAYOUT_RECONCILE_ENABLED") == "false" {
+		log.Println("payout reconcile disabled (PAYOUT_RECONCILE_ENABLED=false)")
+		return
+	}
+	ticker := time.NewTicker(payoutReconcileInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			tickCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			if _, err := payoutService.ReconcilePendingPayouts(tickCtx); err != nil {
+				log.Printf("payout reconcile failed: %v", err)
+			}
+			cancel()
 		}
 	}
 }

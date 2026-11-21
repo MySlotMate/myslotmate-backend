@@ -72,6 +72,7 @@ type EventCreateRequest struct {
 	LocationLat        *float64                   `json:"location_lat,omitempty"`
 	LocationLng        *float64                   `json:"location_lng,omitempty"`
 	GoogleMapsURL      *string                    `json:"google_maps_url,omitempty"` // for location-based events
+	StateCode          *string                    `json:"state_code,omitempty"`      // venue GST state code (TCS CGST/SGST vs IGST)
 	DurationMinutes    *int                       `json:"duration_minutes,omitempty"`
 	MinGroupSize       *int                       `json:"min_group_size,omitempty"`
 	MaxGroupSize       *int                       `json:"max_group_size,omitempty"`
@@ -167,6 +168,7 @@ type EventUpdateRequest struct {
 	LocationLat        *float64                   `json:"location_lat,omitempty"`
 	LocationLng        *float64                   `json:"location_lng,omitempty"`
 	GoogleMapsURL      *string                    `json:"google_maps_url,omitempty"` // for location-based events
+	StateCode          *string                    `json:"state_code,omitempty"`      // venue GST state code (TCS CGST/SGST vs IGST)
 	DurationMinutes    *int                       `json:"duration_minutes,omitempty"`
 	MinGroupSize       *int                       `json:"min_group_size,omitempty"`
 	MaxGroupSize       *int                       `json:"max_group_size,omitempty"`
@@ -247,6 +249,9 @@ func normalizeEventMood(mood *models.EventMood) (*models.EventMood, error) {
 }
 
 func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req EventCreateRequest) (*models.Event, error) {
+	if err := validateStateCode(req.StateCode); err != nil {
+		return nil, err
+	}
 	normalizedMood, err := normalizeEventMood(req.Mood)
 	if err != nil {
 		return nil, err
@@ -382,6 +387,11 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 	if err := s.eventRepo.Create(ctx, newEvent); err != nil {
 		return nil, err
 	}
+	if req.StateCode != nil {
+		if err := s.eventRepo.SetStateCode(ctx, newEvent.ID, *req.StateCode); err != nil {
+			return nil, fmt.Errorf("save venue state: %w", err)
+		}
+	}
 
 	if len(req.PriceTiers) > 0 {
 		if err := s.tierRepo.ReplaceForEvent(ctx, newEvent.ID, tierInputsToModels(req.PriceTiers)); err != nil {
@@ -470,6 +480,9 @@ func tierInputsToModels(inputs []PriceTierInput) []models.EventPriceTier {
 }
 
 func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID, req EventUpdateRequest) (*models.Event, error) {
+	if err := validateStateCode(req.StateCode); err != nil {
+		return nil, err
+	}
 	evt, err := s.eventRepo.GetByID(ctx, eventID)
 	if err != nil {
 		return nil, err
@@ -643,6 +656,11 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 
 	if err := s.eventRepo.Update(ctx, evt); err != nil {
 		return nil, err
+	}
+	if req.StateCode != nil {
+		if err := s.eventRepo.SetStateCode(ctx, evt.ID, *req.StateCode); err != nil {
+			return nil, fmt.Errorf("save venue state: %w", err)
+		}
 	}
 
 	// When PriceTiers is supplied, replace the event's tier set. A non-nil empty
@@ -1469,4 +1487,17 @@ func (s *eventService) calculateAvailabilityInternal(evt *models.Event, occupanc
 	}
 
 	return availability
+}
+
+// validateStateCode accepts a two-digit GST state code ("27") or "" (clear).
+// It is written separately from the event row (eventRepo.SetStateCode) and
+// only read by the booking transaction to split TCS into CGST/SGST or IGST.
+func validateStateCode(code *string) error {
+	if code == nil || *code == "" {
+		return nil
+	}
+	if len(*code) != 2 || (*code)[0] < '0' || (*code)[0] > '9' || (*code)[1] < '0' || (*code)[1] > '9' {
+		return errors.New("state_code must be a two-digit GST state code, like 27")
+	}
+	return nil
 }

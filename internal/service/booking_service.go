@@ -544,9 +544,10 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	// Capacity is re-read from the locked row rather than reused from the copy
 	// fetched at step 4, so a host shrinking capacity mid-flight is respected.
 	var lockedCapacity int
+	var venueStateCode *string // GST state of the venue, for the TCS split
 	if err := tx.QueryRowContext(ctx,
-		`SELECT capacity FROM events WHERE id = $1 FOR UPDATE`, evt.ID,
-	).Scan(&lockedCapacity); err != nil {
+		`SELECT capacity, state_code FROM events WHERE id = $1 FOR UPDATE`, evt.ID,
+	).Scan(&lockedCapacity, &venueStateCode); err != nil {
 		return nil, fmt.Errorf("booking: lock event: %w", err)
 	}
 	bookedNow, err := bookingTx.GetTotalBookedQuantityForOccurrence(ctx, req.EventID, occurrenceDate)
@@ -565,7 +566,8 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	// busy host's bookings ever contend.
 	var tax TaxLines
 	if totalAmount > 0 {
-		in := TaxInput{TicketCents: ticketCents, NetEarningCents: hostEarning, ServiceFeeCents: platformFee, Settings: *taxSettings}
+		in := TaxInput{TicketCents: ticketCents, NetEarningCents: hostEarning, ServiceFeeCents: platformFee,
+			EventStateCode: venueStateCode, Settings: *taxSettings}
 		if taxSettings.Enabled {
 			if err := payoutTx.LockHost(ctx, host.ID); err != nil {
 				return nil, fmt.Errorf("booking: lock host: %w", err)

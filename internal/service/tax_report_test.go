@@ -35,3 +35,17 @@ func TestPlatformWithdrawable(t *testing.T) {
 		t.Errorf("withdrawable = %d, want 1000", got)
 	}
 }
+
+func TestValidateStateCode(t *testing.T) {
+	s := func(v string) *string { return &v }
+	for _, ok := range []*string{nil, s(""), s("27"), s("07")} {
+		if err := validateStateCode(ok); err != nil {
+			t.Errorf("%v: unexpected error %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"7", "MH", "270", "2a"} {
+		if err := validateStateCode(s(bad)); err == nil {
+			t.Errorf("%q: want error", bad)
+		}
+	}
+}

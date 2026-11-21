@@ -90,6 +90,8 @@ type EventRepository interface {
 	// each service.
 	HostCanManage(ctx context.Context, eventID, hostID uuid.UUID) (bool, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status models.EventStatus) error
+	// SetStateCode stores the venue's GST state code; "" clears it.
+	SetStateCode(ctx context.Context, id uuid.UUID, code string) error
 	IncrementBookingCount(ctx context.Context, eventID uuid.UUID, quantity int) error
 	IncrementReviewCount(ctx context.Context, eventID uuid.UUID) error
 	UpdateAverageRating(ctx context.Context, eventID uuid.UUID, avgRating float64) error
@@ -481,5 +483,10 @@ func (r *postgresEventRepository) IncrementReviewCount(ctx context.Context, even
 func (r *postgresEventRepository) UpdateAverageRating(ctx context.Context, eventID uuid.UUID, avgRating float64) error {
 	query := `UPDATE events SET avg_rating = $1, updated_at = now() WHERE id = $2`
 	_, err := r.db.ExecContext(ctx, query, avgRating, eventID)
+	return err
+}
+
+func (r *postgresEventRepository) SetStateCode(ctx context.Context, id uuid.UUID, code string) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE events SET state_code = NULLIF($1, '') WHERE id = $2`, code, id)
 	return err
 }

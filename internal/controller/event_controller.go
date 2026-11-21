@@ -265,6 +265,7 @@ type EventCreateRequestBody struct {
 	LocationLat        *float64                   `json:"location_lat,omitempty"`
 	LocationLng        *float64                   `json:"location_lng,omitempty"`
 	GoogleMapsURL      *string                    `json:"google_maps_url,omitempty"` // direct link to Google Maps location
+	StateCode          *string                    `json:"state_code,omitempty"`      // venue GST state code, e.g. "27"
 	DurationMinutes    *int                       `json:"duration_minutes,omitempty"`
 	Capacity           int                        `json:"capacity"`
 	MinGroupSize       *int                       `json:"min_group_size,omitempty"`
@@ -321,6 +322,7 @@ type EventUpdateRequestBody struct {
 	LocationLat        *float64                   `json:"location_lat,omitempty"`
 	LocationLng        *float64                   `json:"location_lng,omitempty"`
 	GoogleMapsURL      *string                    `json:"google_maps_url,omitempty"` // direct link to Google Maps location
+	StateCode          *string                    `json:"state_code,omitempty"`      // venue GST state code, e.g. "27"
 	DurationMinutes    *int                       `json:"duration_minutes,omitempty"`
 	Capacity           *int                       `json:"capacity,omitempty"`
 	MinGroupSize       *int                       `json:"min_group_size,omitempty"`
@@ -404,6 +406,7 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		LocationLat:        req.LocationLat,
 		LocationLng:        req.LocationLng,
 		GoogleMapsURL:      req.GoogleMapsURL,
+		StateCode:          req.StateCode,
 		DurationMinutes:    req.DurationMinutes,
 		Capacity:           req.Capacity,
 		MinGroupSize:       req.MinGroupSize,
@@ -491,6 +494,7 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 		LocationLat:        body.LocationLat,
 		LocationLng:        body.LocationLng,
 		GoogleMapsURL:      body.GoogleMapsURL,
+		StateCode:          body.StateCode,
 		DurationMinutes:    body.DurationMinutes,
 		Capacity:           body.Capacity,
 		MinGroupSize:       body.MinGroupSize,

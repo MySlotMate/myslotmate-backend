@@ -49,3 +49,19 @@ func TestValidateStateCode(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveStateCode(t *testing.T) {
+	s := func(v string) *string { return &v }
+	if got := resolveStateCode(s("29"), s("Guwahati, Assam")); *got != "29" {
+		t.Errorf("explicit wins: got %q", *got)
+	}
+	if got := resolveStateCode(nil, s("Guwahati, Assam")); *got != "18" {
+		t.Errorf("from address: got %q", *got)
+	}
+	if got := resolveStateCode(nil, s("London")); *got != "" {
+		t.Errorf("unknown address clears: got %q", *got)
+	}
+	if got := resolveStateCode(nil, nil); got != nil {
+		t.Errorf("no location leaves it alone: got %q", *got)
+	}
+}

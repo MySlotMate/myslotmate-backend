@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"myslotmate-backend/internal/lib/gststate"
 	"sort"
 	"strings"
 	"time"
@@ -387,8 +388,8 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 	if err := s.eventRepo.Create(ctx, newEvent); err != nil {
 		return nil, err
 	}
-	if req.StateCode != nil {
-		if err := s.eventRepo.SetStateCode(ctx, newEvent.ID, *req.StateCode); err != nil {
+	if code := resolveStateCode(req.StateCode, req.Location); code != nil {
+		if err := s.eventRepo.SetStateCode(ctx, newEvent.ID, *code); err != nil {
 			return nil, fmt.Errorf("save venue state: %w", err)
 		}
 	}
@@ -657,8 +658,8 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 	if err := s.eventRepo.Update(ctx, evt); err != nil {
 		return nil, err
 	}
-	if req.StateCode != nil {
-		if err := s.eventRepo.SetStateCode(ctx, evt.ID, *req.StateCode); err != nil {
+	if code := resolveStateCode(req.StateCode, req.Location); code != nil {
+		if err := s.eventRepo.SetStateCode(ctx, evt.ID, *code); err != nil {
 			return nil, fmt.Errorf("save venue state: %w", err)
 		}
 	}
@@ -1500,4 +1501,19 @@ func validateStateCode(code *string) error {
 		return errors.New("state_code must be a two-digit GST state code, like 27")
 	}
 	return nil
+}
+
+// resolveStateCode picks the venue state to store: an explicit state_code from
+// the client wins; otherwise it is read from the address text whenever the
+// location is set ("" clears it when the address names no Indian state).
+// nil means leave the stored value alone.
+func resolveStateCode(explicit, location *string) *string {
+	if explicit != nil {
+		return explicit
+	}
+	if location == nil {
+		return nil
+	}
+	code := gststate.FromAddress(*location)
+	return &code
 }

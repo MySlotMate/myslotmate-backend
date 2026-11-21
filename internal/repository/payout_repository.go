@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
+
 	"myslotmate-backend/internal/models"
 
 	"github.com/google/uuid"
@@ -37,6 +39,15 @@ type PayoutRepository interface {
 	GetBookingFeeConfig(ctx context.Context) (*models.BookingFeeConfig, error)
 	GetPlatformSetting(ctx context.Context, key string) (json.RawMessage, error)
 	SavePlatformSetting(ctx context.Context, key string, value json.RawMessage) error
+
+	// Statutory tax (tax_repository.go)
+	GetTaxSettings(ctx context.Context) (*models.TaxSettings, error)
+	GetTaxProfile(ctx context.Context, hostID uuid.UUID) (*models.TaxProfile, error)
+	UpsertTaxProfile(ctx context.Context, p *models.TaxProfile) error
+	FYGrossTicketCents(ctx context.Context, hostID uuid.UUID, fyStart time.Time) (int64, error)
+	HostTaxTotals(ctx context.Context, hostID uuid.UUID, fyStart time.Time) (tcs, tds int64, err error)
+	LockHost(ctx context.Context, hostID uuid.UUID) error
+	HostTaxByMonth(ctx context.Context, hostID uuid.UUID, from, to time.Time) ([]MonthTax, error)
 
 	// Fraud Flags
 	HasActiveFraudFlag(ctx context.Context, userID uuid.UUID) (bool, error)

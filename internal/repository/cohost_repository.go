@@ -176,7 +176,7 @@ func (r *postgresCoHostRepository) ListSharedWithHost(ctx context.Context, hostI
 		SELECT ch.id, e.id, e.title, e.slug, ch.status, ch.can_withdraw,
 		       TRIM(COALESCE(owner.first_name, '') || ' ' || COALESCE(owner.last_name, '')),
 		       ch.created_at, e.time,
-		       COALESCE((SELECT SUM(b.net_earning_cents) FROM bookings b
+		       COALESCE((SELECT SUM(COALESCE(b.host_payout_cents, b.net_earning_cents)) FROM bookings b
 		                  WHERE b.event_id = e.id AND b.status = 'confirmed'
 		                    AND b.occurrence_date < NOW()), 0)::BIGINT AS passed,
 		       COALESCE((SELECT SUM(c.amount_cents) FROM event_cohost_claims c
@@ -247,7 +247,7 @@ const coHostActive = `(
 			COALESCE((SELECT MAX(b.occurrence_date) FROM bookings b
 			           WHERE b.event_id = e.id AND b.status = 'confirmed'), e.time)
 		) >= NOW() - INTERVAL '30 days'
-		OR COALESCE((SELECT SUM(b.net_earning_cents) FROM bookings b
+		OR COALESCE((SELECT SUM(COALESCE(b.host_payout_cents, b.net_earning_cents)) FROM bookings b
 		              WHERE b.event_id = e.id AND b.status = 'confirmed'
 		                AND b.occurrence_date < NOW()), 0)
 		   > COALESCE((SELECT SUM(c.amount_cents) FROM event_cohost_claims c
@@ -272,7 +272,7 @@ func (r *postgresCoHostRepository) CountsForHost(ctx context.Context, hostID uui
 
 func (r *postgresCoHostRepository) EventPassedEarnings(ctx context.Context, eventID uuid.UUID) (int64, error) {
 	const query = `
-		SELECT COALESCE(SUM(net_earning_cents), 0)::BIGINT
+		SELECT COALESCE(SUM(COALESCE(host_payout_cents, net_earning_cents)), 0)::BIGINT
 		FROM bookings
 		WHERE event_id = $1 AND status = 'confirmed' AND occurrence_date < NOW()`
 	var sum int64
@@ -304,7 +304,7 @@ func (r *postgresCoHostRepository) ReserveClaim(ctx context.Context, cohostID, e
 		-- to deduce inconsistently.
 		SELECT $1, $2, $3, $4, $5::BIGINT, 'reserved'
 		WHERE $5::BIGINT <= (
-			COALESCE((SELECT SUM(b.net_earning_cents) FROM bookings b
+			COALESCE((SELECT SUM(COALESCE(b.host_payout_cents, b.net_earning_cents)) FROM bookings b
 			           WHERE b.event_id = $3 AND b.status = 'confirmed'
 			             AND b.occurrence_date < NOW()), 0)
 			- COALESCE((SELECT SUM(c.amount_cents) FROM event_cohost_claims c

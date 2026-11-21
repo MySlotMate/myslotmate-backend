@@ -468,8 +468,9 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	// back to the global platform_settings default when unset.
 	var platformAccount, hostAccount *models.Account
 	var host *models.Host
-	var platformFee, hostEarning int64
+	var platformFee, hostEarning, ticketCents int64
 	var appliedPlatformPercentage int
+	var taxSettings *models.TaxSettings
 	if totalAmount > 0 {
 		platformAccount, err = s.accountRepo.GetByOwner(ctx, models.AccountOwnerPlatform, uuid.Nil)
 		if err != nil {
@@ -492,6 +493,11 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		appliedPlatformPercentage = feeConfig.PlatformPercentage
 		platformFee = totalAmount * int64(feeConfig.PlatformPercentage) / 100
 		hostEarning = totalAmount - platformFee
+		ticketCents = totalAmount // post-coupon ticket value, before the guest fee
+
+		if taxSettings, err = s.payoutRepo.GetTaxSettings(ctx); err != nil {
+			return nil, fmt.Errorf("load tax settings: %w", err)
+		}
 
 		// Guest-paid booking fee, on top of the ticket total. Commission above is
 		// taken on the tickets only; the fee goes to the platform whole, so
@@ -551,6 +557,29 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		return nil, errors.New("event capacity exceeded")
 	}
 
+	// ── Statutory tax lines (TCS/TDS) ────────────────────────────────────
+	// The host row lock serialises this host's paid bookings, so the booking
+	// that crosses the ₹5 lakh TDS threshold is charged the catch-up exactly
+	// once. Lock order: event row (above), then host row.
+	// ponytail: one lock per host; switch to a per-host advisory lock if a
+	// busy host's bookings ever contend.
+	var tax TaxLines
+	if totalAmount > 0 {
+		in := TaxInput{TicketCents: ticketCents, NetEarningCents: hostEarning, ServiceFeeCents: platformFee, Settings: *taxSettings}
+		if taxSettings.Enabled {
+			if err := payoutTx.LockHost(ctx, host.ID); err != nil {
+				return nil, fmt.Errorf("booking: lock host: %w", err)
+			}
+			if in.Profile, err = payoutTx.GetTaxProfile(ctx, host.ID); err != nil {
+				return nil, fmt.Errorf("booking: load tax profile: %w", err)
+			}
+			if in.FYGrossBeforeCents, err = payoutTx.FYGrossTicketCents(ctx, host.ID, FinancialYearStart(time.Now())); err != nil {
+				return nil, fmt.Errorf("booking: FY gross: %w", err)
+			}
+		}
+		tax = ComputeBookingTax(in)
+	}
+
 	// ─────────────────────────────────────────────────────────────────────
 	// SWIGGY-STYLE LEDGER FLOW (Immutable Journal)
 	// Only process ledger entries for paid events (totalAmount > 0)
@@ -573,7 +602,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 			HostAccountID:       hostAccount.ID,
 			HostID:              host.ID,
 			TotalCents:          totalAmount,
-			HostEarningCents:    hostEarning,
+			HostEarningCents:    tax.HostPayoutCents, // net earning less TCS/TDS the platform withholds
 			ReferenceID:         req.EventID,
 			ReferenceType:       "event",
 			IdempotencyKey:      idempotencyKey,
@@ -612,6 +641,14 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		PassID:          req.PassID,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
+	}
+	if totalAmount > 0 {
+		newBooking.TicketCents = &ticketCents
+		newBooking.PlatformFeeGSTCents = tax.PlatformFeeGSTCents
+		newBooking.TCSCents = tax.TCSCents
+		newBooking.TCSInterstate = tax.TCSInterstate
+		newBooking.TDSCents = tax.TDSCents
+		newBooking.HostPayoutCents = &tax.HostPayoutCents
 	}
 	if err := bookingTx.Create(ctx, newBooking); err != nil {
 		return nil, fmt.Errorf("failed to create booking: %w", err)
@@ -1043,6 +1080,17 @@ func (s *bookingService) CancelBookingByHost(ctx context.Context, bookingID uuid
 // All writes run on one *sql.Tx and commit together, or roll back together —
 // a crash or error mid-way leaves the booking entirely uncancelled rather than
 // in a partial state.
+// bookingReversalAmounts is what a full cancellation takes back from the host
+// and from the platform. The host was credited only host_payout (net − TCS −
+// TDS); the platform holds the fee plus the withheld tax, so it gives back
+// both. The two always add up to amount_cents.
+func bookingReversalAmounts(b *models.Booking) (hostCents, platformCents int64) {
+	if b.ServiceFeeCents != nil {
+		platformCents = *b.ServiceFeeCents
+	}
+	return b.PayableCents(), platformCents + b.TCSCents + b.TDSCents
+}
+
 func (s *bookingService) performCancellation(ctx context.Context, booking *models.Booking) (*models.Booking, error) {
 	now := time.Now()
 
@@ -1050,14 +1098,7 @@ func (s *bookingService) performCancellation(ctx context.Context, booking *model
 	if booking.AmountCents != nil {
 		amountCents = *booking.AmountCents
 	}
-	netEarningCents := int64(0)
-	if booking.NetEarningCents != nil {
-		netEarningCents = *booking.NetEarningCents
-	}
-	serviceFeeCents := int64(0)
-	if booking.ServiceFeeCents != nil {
-		serviceFeeCents = *booking.ServiceFeeCents
-	}
+	netEarningCents, serviceFeeCents := bookingReversalAmounts(booking)
 	isRefund := amountCents > 0
 
 	// A paid cancellation becomes `refunded`; a free booking becomes `cancelled`.

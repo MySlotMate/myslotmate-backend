@@ -59,10 +59,30 @@ type Booking struct {
 	CreatedAt                        time.Time     `db:"created_at" json:"created_at"`
 	UpdatedAt                        time.Time     `db:"updated_at" json:"updated_at"`
 	CancelledAt                      *time.Time    `db:"cancelled_at" json:"cancelled_at,omitempty"`
+	// Statutory tax lines (Marketing Boost v2 Phase 1). HostPayoutCents nil =
+	// booked before tax stamping; use NetEarningCents (see PayableCents).
+	TicketCents         *int64 `db:"ticket_cents" json:"ticket_cents,omitempty"`
+	PlatformFeeGSTCents int64  `db:"platform_fee_gst_cents" json:"-"` // internal only, never shown to hosts
+	TCSCents            int64  `db:"tcs_cents" json:"tcs_cents"`
+	TCSInterstate       bool   `db:"tcs_interstate" json:"-"`
+	TDSCents            int64  `db:"tds_cents" json:"tds_cents"`
+	HostPayoutCents     *int64 `db:"host_payout_cents" json:"host_payout_cents,omitempty"`
 	NotificationSentWhatsapp         bool          `db:"notification_sent_whatsapp" json:"notification_sent_whatsapp"`
 	ReminderNotificationSentEmail    bool          `db:"reminder_notification_sent_email" json:"reminder_notification_sent_email"`
 	ReminderNotificationSentAt       *time.Time    `db:"reminder_notification_sent_at" json:"reminder_notification_sent_at,omitempty"`
 	NotificationSentEmail            bool          `db:"notification_sent_email" json:"notification_sent_email"`
 	ReminderNotificationSentWhatsapp bool          `db:"reminder_notification_sent_whatsapp" json:"reminder_notification_sent_whatsapp"`
 	ReminderWhatsappSentAt           *time.Time    `db:"reminder_whatsapp_sent_at" json:"reminder_whatsapp_sent_at,omitempty"`
+}
+
+// PayableCents is what the host is owed for this booking: host_payout_cents
+// when tax lines were stamped, else the pre-tax net earning.
+func (b *Booking) PayableCents() int64 {
+	if b.HostPayoutCents != nil {
+		return *b.HostPayoutCents
+	}
+	if b.NetEarningCents != nil {
+		return *b.NetEarningCents
+	}
+	return 0
 }

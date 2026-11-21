@@ -69,6 +69,11 @@ func (c *PayoutController) RegisterRoutes(r chi.Router) {
 
 		// Payout History
 		r.Get("/history/{hostID}", c.GetPayoutHistory)
+
+		// Tax profile (PAN/GSTIN) and statements — the caller's own only.
+		r.Get("/tax-profile", c.GetTaxProfile)
+		r.Put("/tax-profile", c.SaveTaxProfile)
+		r.Get("/tax-statements", c.GetTaxStatements)
 	})
 
 	// Co-hosting — sharing ONE event's earnings with another host.
@@ -246,7 +251,7 @@ func (c *PayoutController) RequestWithdrawal(w http.ResponseWriter, r *http.Requ
 
 	payment, err := c.payoutService.RequestWithdrawal(r.Context(), hostID, svcReq)
 	if err != nil {
-		RespondError(w, http.StatusBadRequest, err.Error())
+		RespondError(w, withdrawalErrorStatus(err), err.Error())
 		return
 	}
 
@@ -537,8 +542,79 @@ func (c *PayoutController) RequestCoHostWithdrawal(w http.ResponseWriter, r *htt
 		IdempotencyKey: req.IdempotencyKey,
 	})
 	if err != nil {
-		RespondError(w, http.StatusBadRequest, err.Error())
+		RespondError(w, withdrawalErrorStatus(err), err.Error())
 		return
 	}
 	RespondSuccess(w, http.StatusOK, payment)
+}
+
+// withdrawalErrorStatus: a missing tax profile is 409 with the bare
+// "tax_profile_required" message, which web and mobile match on to open the
+// PAN form; every other withdrawal refusal stays 400.
+func withdrawalErrorStatus(err error) int {
+	if errors.Is(err, service.ErrTaxProfileRequired) {
+		return http.StatusConflict
+	}
+	return http.StatusBadRequest
+}
+
+// ── Tax profile ─────────────────────────────────────────────────────────────
+
+// GetTaxProfile returns the caller's tax profile with the PAN masked, or
+// null data when none is saved yet.
+func (c *PayoutController) GetTaxProfile(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	view, err := c.payoutService.GetTaxProfile(r.Context(), hostID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, view)
+}
+
+func (c *PayoutController) SaveTaxProfile(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	var in service.TaxProfileInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	view, err := c.payoutService.SaveTaxProfile(r.Context(), hostID, in)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, view)
+}
+
+// GetTaxStatements: ?fy=2026 (default: the current financial year).
+func (c *PayoutController) GetTaxStatements(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	fy := service.FinancialYearStart(time.Now()).Year()
+	if v := r.URL.Query().Get("fy"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 2020 || n > 2100 {
+			RespondError(w, http.StatusBadRequest, "fy must be a year like 2026")
+			return
+		}
+		fy = n
+	}
+	st, err := c.payoutService.GetTaxStatements(r.Context(), hostID, fy)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, st)
 }

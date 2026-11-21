@@ -178,3 +178,55 @@ func TestReverseSplitRefusesSecondRefund(t *testing.T) {
 		t.Fatalf("buyer credited %d, want a single 100000", accounts.credited)
 	}
 }
+
+// A taxed booking credits the host only host_payout (net − TCS − TDS); the
+// platform holds the tax. Its cancellation must still net to zero on every
+// account, using the amounts bookingReversalAmounts derives from the row.
+func TestReverseSplit_TaxedBooking_Balances(t *testing.T) {
+	ctx := context.Background()
+	// ₹799 ticket, 8% guest fee ₹63.92, company host with GSTIN.
+	const ticket, fee, tcs, tds = 79900, 6392, 400, 80
+	total, net := int64(ticket+fee), int64(ticket)
+	payout := net - tcs - tds // 79420
+
+	b := &models.Booking{AmountCents: &total, ServiceFeeCents: ptr64(fee), NetEarningCents: &net,
+		TCSCents: tcs, TDSCents: tds, HostPayoutCents: &payout}
+
+	ledger, pay, accounts, payments := &fakeLedger{}, &fakePayout{}, &fakeAccounts{}, &fakePayments{}
+	userAcc, platformAcc, hostAcc, refID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	if err := creditSplit(ctx, ledger, pay, purchaseSplit{
+		UserID: uuid.New(), UserAccountID: userAcc, PlatformAccountID: platformAcc,
+		HostAccountID: hostAcc, HostID: uuid.New(), TotalCents: total, HostEarningCents: b.PayableCents(),
+		ReferenceID: refID, ReferenceType: "event", IdempotencyKey: "taxed_1",
+	}); err != nil {
+		t.Fatalf("creditSplit: %v", err)
+	}
+
+	hostBack, platformBack := bookingReversalAmounts(b)
+	if hostBack != 79420 || platformBack != 6872 {
+		t.Fatalf("reversal amounts = host %d platform %d, want 79420 / 6872", hostBack, platformBack)
+	}
+	if err := reverseSplit(ctx, ledger, accounts, payments, pay, refundSplit{
+		UserID: uuid.New(), UserAccountID: userAcc, HostID: uuid.New(), HostAccountID: hostAcc,
+		PlatformAccount: &models.Account{ID: platformAcc}, AmountCents: total,
+		NetEarningCents: hostBack, ServiceFeeCents: platformBack,
+		ReferenceID: refID, ReferenceType: "booking", Noun: "booking",
+	}); err != nil {
+		t.Fatalf("reverseSplit: %v", err)
+	}
+
+	perAccount := map[uuid.UUID]int64{}
+	for _, e := range ledger.entries {
+		perAccount[e.AccountID] += e.AmountCents
+	}
+	for acc, sum := range perAccount {
+		if sum != 0 {
+			t.Errorf("account %s nets to %d after cancel, want 0", acc, sum)
+		}
+	}
+	if pay.earnings != 0 || pay.pending != 0 {
+		t.Errorf("host earnings/pending = %d/%d, want 0/0", pay.earnings, pay.pending)
+	}
+}
+
+func ptr64(v int64) *int64 { return &v }

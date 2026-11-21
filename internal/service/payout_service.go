@@ -52,6 +52,11 @@ type PayoutService interface {
 	SetAdminPrimaryMethod(ctx context.Context, methodID uuid.UUID) error
 	DeleteAdminPayoutMethod(ctx context.Context, methodID uuid.UUID) error
 
+	// Host tax profile + statements (tax_service.go)
+	GetTaxProfile(ctx context.Context, hostID uuid.UUID) (*TaxProfileView, error)
+	SaveTaxProfile(ctx context.Context, hostID uuid.UUID, in TaxProfileInput) (*TaxProfileView, error)
+	GetTaxStatements(ctx context.Context, hostID uuid.UUID, fy int) (*TaxStatements, error)
+
 	// Admin Platform Withdrawal
 	RequestAdminWithdrawal(ctx context.Context, req WithdrawalRequest) (*models.Payment, error)
 
@@ -146,6 +151,15 @@ type EarningsSummary struct {
 
 	EstimatedClearanceAt *time.Time                `json:"estimated_clearance_at,omitempty"`
 	PlatformFee          *models.PlatformFeeConfig `json:"platform_fee"`
+
+	// Statutory tax for the current financial year (PRD Payout and tax spec §5).
+	TaxDeductedCents  int64 `json:"tax_deducted_cents"` // TCS + TDS this FY
+	TCSFYCents        int64 `json:"tcs_fy_cents"`
+	TDSFYCents        int64 `json:"tds_fy_cents"`
+	FYGrossCents      int64 `json:"fy_gross_cents"`      // ticket sales this FY, for the ₹5 lakh progress line
+	TDSThresholdCents int64 `json:"tds_threshold_cents"` // 50000000 by default
+	HasTaxProfile     bool  `json:"has_tax_profile"`
+	PANRequired       bool  `json:"pan_required"` // withdrawals refused until a PAN is saved
 }
 
 type PlatformBalanceInfo struct {
@@ -383,6 +397,21 @@ func (s *payoutService) RequestWithdrawal(ctx context.Context, hostID uuid.UUID,
 	if req.AmountCents <= 0 {
 		fmt.Printf("[PAYOUT] RequestWithdrawal failed: invalid amount %d\n", req.AmountCents)
 		return nil, errors.New("withdrawal amount must be positive")
+	}
+
+	// 0. PAN gate (Section 194-O needs a PAN before any payout). Covers the
+	// Tuesday auto payout and co-host withdrawals too — both route through here.
+	// Off until admin flips tax_settings.require_pan_for_withdrawal.
+	if taxSettings, err := s.payoutRepo.GetTaxSettings(ctx); err != nil {
+		return nil, fmt.Errorf("load tax settings: %w", err)
+	} else if taxSettings.RequirePANForWithdrawal {
+		profile, err := s.payoutRepo.GetTaxProfile(ctx, hostID)
+		if err != nil {
+			return nil, fmt.Errorf("load tax profile: %w", err)
+		}
+		if profile == nil {
+			return nil, ErrTaxProfileRequired
+		}
 	}
 
 	// 1. Check idempotency via ledger entries (prevents duplicate withdrawals)
@@ -776,7 +805,32 @@ func (s *payoutService) GetEarningsSummary(ctx context.Context, hostID uuid.UUID
 		estimatedClearanceAt = earnings.EstimatedClearanceAt
 	}
 
+	fyStart := FinancialYearStart(time.Now())
+	tcsFY, tdsFY, err := s.payoutRepo.HostTaxTotals(ctx, hostID, fyStart)
+	if err != nil {
+		return nil, fmt.Errorf("tax totals: %w", err)
+	}
+	fyGross, err := s.payoutRepo.FYGrossTicketCents(ctx, hostID, fyStart)
+	if err != nil {
+		return nil, fmt.Errorf("FY gross: %w", err)
+	}
+	taxSettings, err := s.payoutRepo.GetTaxSettings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tax settings: %w", err)
+	}
+	profile, err := s.payoutRepo.GetTaxProfile(ctx, hostID)
+	if err != nil {
+		return nil, fmt.Errorf("tax profile: %w", err)
+	}
+
 	summary := &EarningsSummary{
+		TaxDeductedCents:      tcsFY + tdsFY,
+		TCSFYCents:            tcsFY,
+		TDSFYCents:            tdsFY,
+		FYGrossCents:          fyGross,
+		TDSThresholdCents:     taxSettings.TDSThresholdCents,
+		HasTaxProfile:         profile != nil,
+		PANRequired:           taxSettings.RequirePANForWithdrawal,
 		TotalEarningsCents:    breakdown.TotalCents,
 		AvailableBalanceCents: available,
 		PendingClearanceCents: breakdown.EventUpcomingCents,

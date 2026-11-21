@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"myslotmate-backend/internal/lib/timeutil"
 	"myslotmate-backend/internal/repository"
 
 	"github.com/google/uuid"
@@ -77,4 +78,75 @@ func QuarterlyTDS(fy int, months []repository.MonthTax) []QuarterTDS {
 		}
 	}
 	return q
+}
+
+// SplitTCS divides TCS into CGST + SGST (intra-state, half each, the odd
+// paisa to CGST) or IGST (interstate).
+func SplitTCS(tcsCents int64, interstate bool) (cgst, sgst, igst int64) {
+	if interstate {
+		return 0, 0, tcsCents
+	}
+	sgst = tcsCents / 2
+	return tcsCents - sgst, sgst, 0
+}
+
+// platformWithdrawable is the platform balance less TCS/TDS stamped but not
+// yet deposited with the government. That tax belongs to the government; the
+// platform only holds it until finance pays the challan.
+func platformWithdrawable(balanceCents, stampedTaxCents, depositedTaxCents int64) int64 {
+	owed := stampedTaxCents - depositedTaxCents
+	if owed < 0 {
+		owed = 0
+	}
+	if w := balanceCents - owed; w > 0 {
+		return w
+	}
+	return 0
+}
+
+// TaxReportCSV renders the monthly finance report for month "2026-11" (IST).
+// Columns per the PRD Payout and tax spec §5 /admin/tax-report.
+func (s *payoutService) TaxReportCSV(ctx context.Context, month string) ([][]string, error) {
+	start, err := time.ParseInLocation("2006-01", month, timeutil.IST)
+	if err != nil {
+		return nil, fmt.Errorf("month must look like 2026-11")
+	}
+	rows, err := s.payoutRepo.TaxReportRows(ctx, start, start.AddDate(0, 1, 0))
+	if err != nil {
+		return nil, err
+	}
+	str := func(p *string) string {
+		if p == nil {
+			return ""
+		}
+		return *p
+	}
+	out := [][]string{{"host_id", "host_name", "pan", "gstin", "gst_state_code", "entity_type",
+		"gross_cents", "refunds_cents", "net_cents", "tcs_cgst_cents", "tcs_sgst_cents", "tcs_igst_cents",
+		"tds_cents", "venue_state_unknown"}}
+	for _, r := range rows {
+		cgst, sgst, _ := SplitTCS(r.TCSIntraCents, false)
+		out = append(out, []string{r.HostID.String(), r.HostName, str(r.PAN), str(r.GSTIN), str(r.GSTStateCode), str(r.EntityType),
+			fmt.Sprint(r.GrossCents), fmt.Sprint(r.ReturnsCents), fmt.Sprint(r.GrossCents - r.ReturnsCents),
+			fmt.Sprint(cgst), fmt.Sprint(sgst), fmt.Sprint(r.TCSInterCents),
+			fmt.Sprint(r.TDSCents), fmt.Sprint(r.VenueStateUnknown)})
+	}
+	return out, nil
+}
+
+// AddTaxDeposit logs a TCS/TDS challan paid by finance.
+func (s *payoutService) AddTaxDeposit(ctx context.Context, d *repository.TaxDeposit) error {
+	if d.Kind != "tcs" && d.Kind != "tds" {
+		return fmt.Errorf("kind must be tcs or tds")
+	}
+	if _, err := time.Parse("2006-01", d.Period); err != nil {
+		return fmt.Errorf("period must look like 2026-11")
+	}
+	if d.AmountCents <= 0 {
+		return fmt.Errorf("amount must be positive")
+	}
+	if d.DepositedAt.IsZero() {
+		d.DepositedAt = time.Now()
+	}
+	return s.payoutRepo.CreateTaxDeposit(ctx, d)
 }

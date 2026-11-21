@@ -56,6 +56,8 @@ type PayoutService interface {
 	GetTaxProfile(ctx context.Context, hostID uuid.UUID) (*TaxProfileView, error)
 	SaveTaxProfile(ctx context.Context, hostID uuid.UUID, in TaxProfileInput) (*TaxProfileView, error)
 	GetTaxStatements(ctx context.Context, hostID uuid.UUID, fy int) (*TaxStatements, error)
+	TaxReportCSV(ctx context.Context, month string) ([][]string, error)
+	AddTaxDeposit(ctx context.Context, d *repository.TaxDeposit) error
 
 	// Admin Platform Withdrawal
 	RequestAdminWithdrawal(ctx context.Context, req WithdrawalRequest) (*models.Payment, error)
@@ -166,6 +168,10 @@ type PlatformBalanceInfo struct {
 	AccountID            uuid.UUID `json:"account_id"`
 	BalanceCents         int64     `json:"balance_cents"`
 	CollectedFromBooking int64     `json:"collected_from_bookings"`
+	// TCS/TDS stamped on bookings but not yet deposited with the government.
+	TaxLiabilityCents int64 `json:"tax_liability_cents"`
+	// What the admin may withdraw: balance less the tax still owed.
+	WithdrawableCents int64 `json:"withdrawable_cents"`
 }
 
 // ── Implementation ──────────────────────────────────────────────────────────
@@ -1185,6 +1191,14 @@ func (s *payoutService) RequestAdminWithdrawal(ctx context.Context, req Withdraw
 		return nil, errors.New("withdrawal amount must be positive")
 	}
 
+	// TCS/TDS the platform holds for the government is not the platform's to
+	// withdraw until finance has deposited it.
+	if bal, err := s.GetPlatformBalance(ctx); err != nil {
+		return nil, err
+	} else if req.AmountCents > bal.WithdrawableCents {
+		return nil, fmt.Errorf("amount exceeds platform balance net of tax owed (withdrawable %d, tax owed %d)", bal.WithdrawableCents, bal.TaxLiabilityCents)
+	}
+
 	// 1. Check idempotency (use ledger as source of truth)
 	if req.IdempotencyKey != "" {
 		existing, err := s.ledgerRepo.GetByIdempotencyKey(ctx, req.IdempotencyKey)
@@ -1367,10 +1381,20 @@ func (s *payoutService) GetPlatformBalance(ctx context.Context) (*PlatformBalanc
 		return nil, errors.New("platform account not found")
 	}
 
+	stamped, deposited, err := s.payoutRepo.TaxLiability(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tax liability: %w", err)
+	}
+	owed := stamped - deposited
+	if owed < 0 {
+		owed = 0
+	}
 	return &PlatformBalanceInfo{
 		AccountID:            account.ID,
 		BalanceCents:         account.BalanceCents,
 		CollectedFromBooking: account.BalanceCents,
+		TaxLiabilityCents:    owed,
+		WithdrawableCents:    platformWithdrawable(account.BalanceCents, stamped, deposited),
 	}, nil
 }
 

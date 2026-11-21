@@ -119,3 +119,80 @@ func (r *postgresPayoutRepository) HostTaxByMonth(ctx context.Context, hostID uu
 	}
 	return out, rows.Err()
 }
+
+// TaxReportRow is one host's line in the monthly finance tax report.
+type TaxReportRow struct {
+	HostID            uuid.UUID
+	HostName          string
+	PAN, GSTIN        *string
+	GSTStateCode      *string
+	EntityType        *string
+	GrossCents        int64 // ticket value of bookings created in the month
+	ReturnsCents      int64 // of which refunded / cancelled
+	TCSIntraCents     int64 // on live bookings, venue in the GSTIN's state (or unknown)
+	TCSInterCents     int64
+	TDSCents          int64
+	VenueStateUnknown bool // some TCS was booked with no venue state on the event
+}
+
+// TaxReportRows aggregates stamped tax per host for bookings created in [from, to).
+func (r *postgresPayoutRepository) TaxReportRows(ctx context.Context, from, to time.Time) ([]TaxReportRow, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT h.id, trim(concat_ws(' ', h.first_name, h.last_name)), p.pan, p.gstin, p.gst_state_code, p.entity_type,
+		       COALESCE(SUM(b.ticket_cents), 0)::BIGINT,
+		       COALESCE(SUM(b.ticket_cents) FILTER (WHERE b.status IN ('refunded','cancelled')), 0)::BIGINT,
+		       COALESCE(SUM(b.tcs_cents) FILTER (WHERE b.status IN ('pending','confirmed') AND NOT b.tcs_interstate), 0)::BIGINT,
+		       COALESCE(SUM(b.tcs_cents) FILTER (WHERE b.status IN ('pending','confirmed') AND b.tcs_interstate), 0)::BIGINT,
+		       COALESCE(SUM(b.tds_cents) FILTER (WHERE b.status IN ('pending','confirmed')), 0)::BIGINT,
+		       COALESCE(bool_or(b.tcs_cents > 0 AND e.state_code IS NULL), false)
+		  FROM bookings b
+		  JOIN events e ON e.id = b.event_id
+		  JOIN hosts  h ON h.id = e.host_id
+		  LEFT JOIN host_tax_profiles p ON p.host_id = h.id
+		 WHERE b.created_at >= $1 AND b.created_at < $2 AND COALESCE(b.ticket_cents, 0) > 0
+		 GROUP BY h.id, h.first_name, h.last_name, p.pan, p.gstin, p.gst_state_code, p.entity_type
+		 ORDER BY 2`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TaxReportRow
+	for rows.Next() {
+		var t TaxReportRow
+		if err := rows.Scan(&t.HostID, &t.HostName, &t.PAN, &t.GSTIN, &t.GSTStateCode, &t.EntityType,
+			&t.GrossCents, &t.ReturnsCents, &t.TCSIntraCents, &t.TCSInterCents, &t.TDSCents, &t.VenueStateUnknown); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// TaxLiability returns all TCS+TDS stamped on live bookings and all tax
+// deposits finance has logged, both all-time.
+func (r *postgresPayoutRepository) TaxLiability(ctx context.Context) (stamped, deposited int64, err error) {
+	err = r.db.QueryRowContext(ctx, `
+		SELECT (SELECT COALESCE(SUM(tcs_cents + tds_cents), 0) FROM bookings WHERE status IN ('pending','confirmed'))::BIGINT,
+		       (SELECT COALESCE(SUM(amount_cents), 0) FROM tax_deposits)::BIGINT`,
+	).Scan(&stamped, &deposited)
+	return stamped, deposited, err
+}
+
+// TaxDeposit is a TCS/TDS payment to the government, logged by finance.
+type TaxDeposit struct {
+	ID          uuid.UUID  `json:"id"`
+	Kind        string     `json:"kind"`   // tcs | tds
+	Period      string     `json:"period"` // "2026-11"
+	AmountCents int64      `json:"amount_cents"`
+	ChallanRef  *string    `json:"challan_ref,omitempty"`
+	DepositedAt time.Time  `json:"deposited_at"`
+	CreatedBy   *uuid.UUID `json:"created_by,omitempty"`
+}
+
+func (r *postgresPayoutRepository) CreateTaxDeposit(ctx context.Context, d *TaxDeposit) error {
+	return r.db.QueryRowContext(ctx, `
+		INSERT INTO tax_deposits (kind, period, amount_cents, challan_ref, deposited_at, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+		d.Kind, d.Period, d.AmountCents, d.ChallanRef, d.DepositedAt, d.CreatedBy,
+	).Scan(&d.ID)
+}

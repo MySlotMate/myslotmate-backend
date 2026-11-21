@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -93,6 +95,10 @@ func (c *AdminController) RegisterRoutes(r chi.Router) {
 		r.Get("/ledger", c.ListLedger)
 		r.Get("/balances", c.ListBalances)
 		r.Get("/summary", c.GetPaymentsSummary)
+
+		// Statutory tax: monthly finance report (CSV) and challan log.
+		r.Get("/tax-report", c.GetTaxReport)
+		r.Post("/tax-deposits", c.AddTaxDeposit)
 	})
 
 	r.Get("/platform-settings/{key}", c.GetPlatformSetting)
@@ -773,4 +779,34 @@ func (c *AdminController) GetPaymentsSummary(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	RespondSuccess(w, http.StatusOK, summary)
+}
+
+// GetTaxReport streams the monthly TCS/TDS report as CSV: ?month=2026-11 (IST).
+func (c *AdminController) GetTaxReport(w http.ResponseWriter, r *http.Request) {
+	month := r.URL.Query().Get("month")
+	rows, err := c.payoutService.TaxReportCSV(r.Context(), month)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="tax-report-%s.csv"`, month))
+	w.Header().Set("Cache-Control", "private, no-store")
+	cw := csv.NewWriter(w)
+	_ = cw.WriteAll(rows)
+}
+
+// AddTaxDeposit logs a TCS/TDS challan finance has paid to the government.
+func (c *AdminController) AddTaxDeposit(w http.ResponseWriter, r *http.Request) {
+	var d repository.TaxDeposit
+	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	d.ID, d.CreatedBy = uuid.Nil, nil
+	if err := c.payoutService.AddTaxDeposit(r.Context(), &d); err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusCreated, d)
 }

@@ -48,6 +48,9 @@ type PayoutRepository interface {
 	HostTaxTotals(ctx context.Context, hostID uuid.UUID, fyStart time.Time) (tcs, tds int64, err error)
 	LockHost(ctx context.Context, hostID uuid.UUID) error
 	HostTaxByMonth(ctx context.Context, hostID uuid.UUID, from, to time.Time) ([]MonthTax, error)
+	TaxReportRows(ctx context.Context, from, to time.Time) ([]TaxReportRow, error)
+	TaxLiability(ctx context.Context) (stamped, deposited int64, err error)
+	CreateTaxDeposit(ctx context.Context, d *TaxDeposit) error
 
 	// Fraud Flags
 	HasActiveFraudFlag(ctx context.Context, userID uuid.UUID) (bool, error)

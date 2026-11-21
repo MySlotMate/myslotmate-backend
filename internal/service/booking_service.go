@@ -864,6 +864,30 @@ func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID,
 	if booking.OccurrenceDate.Before(time.Now()) {
 		return nil, errors.New("this event has already happened — cancellation is no longer available")
 	}
+	// A guest who already gave up the seat under a no-refund policy (see below).
+	if booking.CancelledAt != nil {
+		return nil, errors.New("booking is already cancelled or refunded")
+	}
+
+	// A guest cancel outside the policy's refund window gives up the seat and
+	// keeps no money back. Same rule and same row shape as the Node backend
+	// (booking/PARITY.md): the booking stays `confirmed` with cancelled_at set,
+	// because hosts are paid from confirmed rows, and a ₹0 refund_credit ledger
+	// row claims the refund idempotency key so no later cancel can refund it.
+	if booking.AmountCents != nil && *booking.AmountCents > 0 {
+		evt, err := s.eventRepo.GetByID(ctx, booking.EventID)
+		if err != nil {
+			return nil, fmt.Errorf("cancel: load event: %w", err)
+		}
+		var policy *string
+		if evt != nil && evt.CancellationPolicy != nil {
+			p := string(*evt.CancellationPolicy)
+			policy = &p
+		}
+		if !RefundDueOnCancel(policy, booking.OccurrenceDate, time.Now()) {
+			return s.cancelWithoutRefund(ctx, booking, policy)
+		}
+	}
 
 	cancelled, err := s.performCancellation(ctx, booking)
 	if err != nil {
@@ -879,6 +903,67 @@ func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID,
 		s.tryChainSourceRefundOnCancel(ctx, cancelled)
 	}
 	return cancelled, nil
+}
+
+// cancelWithoutRefund releases a guest's seat with no money moving: a ₹0
+// refund_credit ledger row (claiming the refund idempotency key) plus
+// cancelled_at on the still-confirmed booking, in one transaction.
+func (s *bookingService) cancelWithoutRefund(ctx context.Context, booking *models.Booking, policy *string) (*models.Booking, error) {
+	userAccount, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerUser, booking.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("cancel: load user account: %w", err)
+	}
+	if userAccount == nil {
+		return nil, errors.New("cancel: user account not found")
+	}
+	policyName := "policy"
+	if policy != nil {
+		policyName = *policy
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cancel: begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	key := "refund_credit_" + booking.ID.String()
+	if existing, err := s.ledgerRepo.WithTx(tx).GetByIdempotencyKey(ctx, key); err != nil {
+		return nil, fmt.Errorf("cancel: refund idempotency check: %w", err)
+	} else if existing != nil {
+		return nil, errors.New("booking is already cancelled or refunded")
+	}
+	if _, err := s.ledgerRepo.WithTx(tx).Create(ctx, &models.TransactionLedger{
+		ID:             uuid.New(),
+		AccountID:      userAccount.ID,
+		Type:           models.LedgerTypeRefundCredit,
+		AmountCents:    0,
+		ReferenceID:    &booking.ID,
+		ReferenceType:  strPtr("booking"),
+		IdempotencyKey: &key,
+		Description:    strPtr(fmt.Sprintf("Cancelled by guest — non-refundable (%s)", policyName)),
+		Status:         models.LedgerStatusCompleted,
+		CreatedAt:      time.Now(),
+		CreatedBy:      &booking.UserID,
+	}); err != nil {
+		return nil, fmt.Errorf("cancel: write no-refund ledger entry: %w", err)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE bookings SET cancelled_at = NOW(), updated_at = NOW()
+		  WHERE id = $1 AND status = 'confirmed' AND cancelled_at IS NULL`, booking.ID)
+	if err != nil {
+		return nil, fmt.Errorf("cancel: mark booking cancelled: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, errors.New("booking is already cancelled or refunded")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("cancel: commit: %w", err)
+	}
+
+	now := time.Now()
+	booking.CancelledAt = &now
+	return booking, nil
 }
 
 // tryChainSourceRefundOnCancel attempts to source-refund the booking amount

@@ -732,6 +732,11 @@ func (s *eventService) CancelEvent(ctx context.Context, eventID uuid.UUID, hostI
 		if b.Status != models.BookingStatusPending && b.Status != models.BookingStatusConfirmed {
 			continue
 		}
+		// The guest already gave this seat up under a no-refund policy
+		// (bookingService.cancelWithoutRefund); there is nothing to refund.
+		if b.CancelledAt != nil {
+			continue
+		}
 		// Past confirmed bookings — attendees already showed up. Do NOT refund.
 		if b.OccurrenceDate.Before(now) {
 			skippedPast++

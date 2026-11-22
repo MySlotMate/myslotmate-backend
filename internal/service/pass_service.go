@@ -657,7 +657,10 @@ func (s *passService) ReserveSession(ctx context.Context, userID, passID uuid.UU
 		OccurrenceDate: &occurrence,
 		PassID:         &pass.ID,
 		PriceTierID:    tierID,
-		IdempotencyKey: fmt.Sprintf("pass_%s_%d", pass.ID, occurrence.Unix()),
+		// Unique per attempt: a fixed per-session key outlived a refunded cancel
+		// and blocked rebooking that session. Double booking the same session is
+		// stopped by idx_bookings_pass_occurrence_live instead ("duplicate key").
+		IdempotencyKey: fmt.Sprintf("pass_%s_%d_%s", pass.ID, occurrence.Unix(), uuid.NewString()),
 		// The private gate was passed at purchase (see PassAccess). Gating each
 		// covered session again would refuse a guest who already paid for it.
 		// Safe because CreateBooking still checks the pass belongs to this user

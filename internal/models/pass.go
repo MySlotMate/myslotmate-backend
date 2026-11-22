@@ -21,6 +21,10 @@ const (
 // and removes any pro-rating argument mid-month.
 const PassValidityDays = 30
 
+// PassExpiryReminderWindow is how long before a pass runs out the guest is
+// reminded to use the sessions left on it.
+const PassExpiryReminderWindow = 5 * 24 * time.Hour
+
 // UserPass is one guest's monthly pass for one event: paid once, covers every
 // session (or SessionsIncluded of them) until ValidUntil.
 //
@@ -31,6 +35,11 @@ type UserPass struct {
 	EventID uuid.UUID `db:"event_id" json:"event_id"`
 	UserID  uuid.UUID `db:"user_id" json:"user_id"`
 
+	// Money snapshot, like a booking's amount/service_fee/net_earning:
+	// PriceCents = what the guest paid (pass price + guest booking fee),
+	// ServiceFeeCents = what the platform kept (guest booking fee + any host
+	// commission an admin set for this host; 0% by default),
+	// NetEarningCents = the host's share. Price = ServiceFee + NetEarning.
 	PriceCents      int64 `db:"price_cents" json:"price_cents"`
 	ServiceFeeCents int64 `db:"service_fee_cents" json:"service_fee_cents"`
 	NetEarningCents int64 `db:"net_earning_cents" json:"net_earning_cents"`

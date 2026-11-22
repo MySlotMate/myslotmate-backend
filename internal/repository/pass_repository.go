@@ -38,6 +38,12 @@ type PassRepository interface {
 	// ExpireLapsed flips the guest's out-of-window passes for this event to
 	// 'expired' so the one-active-pass index does not block a repurchase.
 	ExpireLapsed(ctx context.Context, eventID, userID uuid.UUID) error
+	// ListExpiringUnreminded lists active passes that end before `before`
+	// (and have not ended yet) whose guest has not had the expiry reminder.
+	ListExpiringUnreminded(ctx context.Context, before time.Time, limit int) ([]*models.UserPass, error)
+	// MarkExpiryReminded claims a pass for its one expiry reminder. False when
+	// another run already claimed it.
+	MarkExpiryReminded(ctx context.Context, passID uuid.UUID) (bool, error)
 	WithTx(tx *sql.Tx) PassRepository
 }
 
@@ -202,6 +208,39 @@ func (r *postgresPassRepository) UpdatePaymentID(ctx context.Context, passID, pa
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE user_passes SET payment_id = $2, updated_at = now() WHERE id = $1`, passID, paymentID)
 	return err
+}
+
+func (r *postgresPassRepository) ListExpiringUnreminded(ctx context.Context, before time.Time, limit int) ([]*models.UserPass, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+passColumns+` FROM user_passes
+		WHERE status = 'active' AND expiry_reminded_at IS NULL
+		  AND valid_until > now() AND valid_until <= $1
+		ORDER BY valid_until LIMIT $2`, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*models.UserPass
+	for rows.Next() {
+		p, err := scanPass(rows)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			out = append(out, p)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (r *postgresPassRepository) MarkExpiryReminded(ctx context.Context, passID uuid.UUID) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE user_passes SET expiry_reminded_at = now(), updated_at = now()
+		WHERE id = $1 AND expiry_reminded_at IS NULL`, passID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func (r *postgresPassRepository) ExpireLapsed(ctx context.Context, eventID, userID uuid.UUID) error {

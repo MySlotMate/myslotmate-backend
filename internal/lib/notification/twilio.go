@@ -71,10 +71,12 @@ type NotificationService interface {
 	// booked anything — template only, no plain-text fallback (see the comment
 	// on the implementation).
 	SendEventPromoWhatsapp(ctx context.Context, phone, userName, eventTitle, eventSlug, imageURL string) error
-	// SendPassConfirmationWhatsapp tells a guest their monthly pass is live.
-	// One message for the whole pass — the sessions it booked are deliberately
-	// NOT confirmed one by one, which would be a burst of messages.
-	SendPassConfirmationWhatsapp(ctx context.Context, phone, userName, eventTitle string, sessionsBooked int, validUntil time.Time) error
+	// SendPassConfirmationWhatsapp tells a guest their monthly pass is live and
+	// how many sessions it holds (0 = every session until it expires).
+	SendPassConfirmationWhatsapp(ctx context.Context, phone, userName, eventTitle string, sessionsIncluded int, validUntil time.Time) error
+	// SendPassExpiringWhatsapp reminds a guest to use the sessions left on a
+	// pass before it runs out (sessionsLeft 0 = unlimited pass).
+	SendPassExpiringWhatsapp(ctx context.Context, phone, userName, eventTitle, eventSlug string, sessionsLeft int, validUntil time.Time) error
 }
 
 // NewTwilioNotificationService creates a new Twilio notification service
@@ -151,36 +153,65 @@ func (s *TwilioNotificationService) SendBookingConfirmationWhatsapp(ctx context.
 	return nil
 }
 
-// SendPassConfirmationWhatsapp confirms a monthly pass in a single message,
-// listing how many sessions it just booked and when it runs out.
-func (s *TwilioNotificationService) SendPassConfirmationWhatsapp(ctx context.Context, phone, userName, eventTitle string, sessionsBooked int, validUntil time.Time) error {
-	if phone == "" {
-		return fmt.Errorf("user phone not available")
-	}
-
-	sessions := fmt.Sprintf("%d sessions", sessionsBooked)
-	if sessionsBooked == 1 {
+// SendPassConfirmationWhatsapp confirms a monthly pass in a single message:
+// how many sessions it holds and when it runs out. Nothing is booked yet — the
+// guest picks each session and uses one from the pass at checkout.
+func (s *TwilioNotificationService) SendPassConfirmationWhatsapp(ctx context.Context, phone, userName, eventTitle string, sessionsIncluded int, validUntil time.Time) error {
+	sessions := "unlimited sessions"
+	if sessionsIncluded == 1 {
 		sessions = "1 session"
-	}
-	greeting := "Hi"
-	if userName != "" {
-		greeting = "Hi " + userName
+	} else if sessionsIncluded > 1 {
+		sessions = fmt.Sprintf("%d sessions", sessionsIncluded)
 	}
 	message := fmt.Sprintf(
-		"%s! 🎟️ Your Monthly Pass for %s is active.\n\nWe've booked %s for you — your tickets are in My Bookings, nothing else to do.\n\nValid until: %s\n\nSee you there!",
-		greeting,
+		"%s! 🎟️ Your Monthly Pass for %s is active.\n\nYou have %s to use until %s. Pick any session and choose \"Use my pass\" at checkout — nothing more to pay.\n\nSee you there!",
+		passGreeting(userName),
 		eventTitle,
 		sessions,
 		timeutil.FormatEventTime(validUntil),
 	)
+	return s.sendWhatsappText(ctx, phone, message)
+}
 
+// SendPassExpiringWhatsapp reminds a guest that their pass runs out soon and
+// how many sessions are still on it.
+func (s *TwilioNotificationService) SendPassExpiringWhatsapp(ctx context.Context, phone, userName, eventTitle, eventSlug string, sessionsLeft int, validUntil time.Time) error {
+	left := "You still have sessions on it"
+	if sessionsLeft == 1 {
+		left = "You still have 1 session left"
+	} else if sessionsLeft > 1 {
+		left = fmt.Sprintf("You still have %d sessions left", sessionsLeft)
+	}
+	message := fmt.Sprintf(
+		"%s! ⏳ Your Monthly Pass for %s ends on %s.\n\n%s — book them before it expires:\nhttps://myslotmate.com/experience/%s",
+		passGreeting(userName),
+		eventTitle,
+		timeutil.FormatEventTime(validUntil),
+		left,
+		eventSlug,
+	)
+	return s.sendWhatsappText(ctx, phone, message)
+}
+
+func passGreeting(userName string) string {
+	if userName != "" {
+		return "Hi " + userName
+	}
+	return "Hi"
+}
+
+// sendWhatsappText sends a plain WhatsApp message via Kapso when configured,
+// else Twilio.
+func (s *TwilioNotificationService) sendWhatsappText(ctx context.Context, phone, message string) error {
+	if phone == "" {
+		return fmt.Errorf("user phone not available")
+	}
 	if s.kapsoClient != nil {
 		if err := s.kapsoClient.SendTextMessage(ctx, phone, message); err != nil {
 			return fmt.Errorf("failed to send WhatsApp message via Kapso: %w", err)
 		}
 		return nil
 	}
-
 	if s.cfg.WhatsappNumber == "" {
 		return fmt.Errorf("WhatsApp number not configured")
 	}

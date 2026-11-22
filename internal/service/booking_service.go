@@ -436,6 +436,9 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		if s.passRepo == nil {
 			return nil, errors.New("monthly passes are not available")
 		}
+		if couponID != nil {
+			return nil, errors.New("a code can't be combined with a pass session")
+		}
 		p, err := s.passRepo.GetByID(ctx, *req.PassID)
 		if err != nil {
 			return nil, err
@@ -450,8 +453,20 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 			return nil, errors.New("your pass does not cover this session")
 		}
 		pass = p
-		totalAmount = 0
-		unitPriceCents = 0 // no money at this seat; pass_id explains why
+		// A pass session covers the event's BASIC ticket — its cheapest active
+		// tier, or the single price when there are no tiers. Choosing a pricier
+		// tier (Gold over Bronze) charges only the difference, through the
+		// normal money path below: that difference is new money the pass never
+		// paid for, so crediting the host for it is not a double payment.
+		upgradeCents, baseTierID, err := s.passUpgradeCents(ctx, evt.ID, pricePerTicketCents, priceTierID)
+		if err != nil {
+			return nil, err
+		}
+		if priceTierID == nil {
+			priceTierID = baseTierID // record which ticket the pass covered
+		}
+		totalAmount = upgradeCents
+		unitPriceCents = upgradeCents // 0 = fully covered; pass_id explains why
 	}
 
 	// 7. Get user account (must exist)
@@ -736,6 +751,37 @@ func strPtr(s string) *string {
 	return &s
 }
 
+// passUpgradeCents is what a pass holder pays on top of their pass for the
+// ticket they picked: the chosen tier's price minus the basic (cheapest active)
+// tier's price. It also returns the basic tier's id, so a pass booking with no
+// tier chosen still records which ticket it took. No tiers → nothing to pay.
+func (s *bookingService) passUpgradeCents(ctx context.Context, eventID uuid.UUID, chosenCents int64, chosenTierID *uuid.UUID) (int64, *uuid.UUID, error) {
+	tiers, err := s.tierRepo.ListByEventID(ctx, eventID)
+	if err != nil {
+		return 0, nil, err
+	}
+	var base *models.EventPriceTier
+	for i := range tiers {
+		t := &tiers[i]
+		if !t.IsActive {
+			continue
+		}
+		if base == nil || t.PriceCents < base.PriceCents {
+			base = t
+		}
+	}
+	if base == nil {
+		return 0, nil, nil
+	}
+	if chosenTierID == nil {
+		return 0, &base.ID, nil
+	}
+	if diff := chosenCents - base.PriceCents; diff > 0 {
+		return diff, &base.ID, nil
+	}
+	return 0, &base.ID, nil
+}
+
 // passkeyMatches reports whether the provided value equals the event's shared
 // access passkey (trimmed, case-insensitive).
 func passkeyMatches(evt *models.Event, provided string) bool {
@@ -860,6 +906,11 @@ func (s *bookingService) confirmBooking(ctx context.Context, bookingID uuid.UUID
 // sendConfirmationNotificationsAsync sends the WhatsApp + email booking
 // confirmation in the background. Best-effort; failures are logged, not fatal.
 func (s *bookingService) sendConfirmationNotificationsAsync(booking *models.Booking) {
+	// Unconfigured notifications (no Twilio/Kapso keys) leave this nil; calling
+	// through it would panic in the goroutine and take the whole server down.
+	if s.notificationService == nil {
+		return
+	}
 	go func() {
 		user, err := s.userRepo.GetByID(context.Background(), booking.UserID)
 		if err != nil || user == nil {
@@ -913,7 +964,12 @@ func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID,
 	// (booking/PARITY.md): the booking stays `confirmed` with cancelled_at set,
 	// because hosts are paid from confirmed rows, and a ₹0 refund_credit ledger
 	// row claims the refund idempotency key so no later cancel can refund it.
-	if booking.AmountCents != nil && *booking.AmountCents > 0 {
+	//
+	// A pass session follows the same window even when it cost ₹0: inside it,
+	// the session goes back on the pass (performCancellation releases it);
+	// outside it, the guest gives up the seat and the session stays used —
+	// exactly what a paid ticket would lose.
+	if (booking.AmountCents != nil && *booking.AmountCents > 0) || booking.PassID != nil {
 		evt, err := s.eventRepo.GetByID(ctx, booking.EventID)
 		if err != nil {
 			return nil, fmt.Errorf("cancel: load event: %w", err)
@@ -1200,8 +1256,9 @@ func (s *bookingService) performCancellation(ctx context.Context, booking *model
 	}
 
 	// ── Hand the session back to the pass ────────────────────────────────
-	// A pass-covered seat moved no money; what it did consume is one of the
-	// pass's included sessions, and cancelling must return it.
+	// A pass-covered seat consumed one of the pass's included sessions, and a
+	// cancellation that reaches here (host cancel, or a guest inside the refund
+	// window) must return it. Any tier-upgrade money is reversed above.
 	if booking.PassID != nil && s.passRepo != nil {
 		if err := s.passRepo.WithTx(tx).ReleaseSession(ctx, *booking.PassID); err != nil {
 			return nil, fmt.Errorf("cancel: release pass session: %w", err)

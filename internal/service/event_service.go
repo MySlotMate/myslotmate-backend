@@ -117,7 +117,7 @@ type EventCreateRequest struct {
 // event's pass untouched; a PriceCents of 0 switches the pass off.
 type MonthlyPassInput struct {
 	PriceCents   int64 `json:"price_cents"`             // 0 = no monthly pass on this event
-	SessionLimit *int  `json:"session_limit,omitempty"` // nil = every session in the window
+	SessionLimit *int  `json:"session_limit,omitempty"` // required when PriceCents > 0
 	Capacity     *int  `json:"capacity,omitempty"`      // nil = unlimited passes
 }
 
@@ -142,7 +142,13 @@ func applyMonthlyPass(evt *models.Event, in *MonthlyPassInput) error {
 	if evt.IsFree {
 		return errors.New("a free experience cannot have a monthly pass")
 	}
-	if in.SessionLimit != nil && *in.SessionLimit <= 0 {
+	// A pass is a balance of sessions the guest spends one at a time, so it
+	// must say how many it holds. (Passes sold before this keep their nil =
+	// "every session in the window" and still work.)
+	if in.SessionLimit == nil {
+		return errors.New("set how many sessions the monthly pass includes")
+	}
+	if *in.SessionLimit <= 0 {
 		return errors.New("sessions included must be at least 1")
 	}
 	if in.Capacity != nil && *in.Capacity <= 0 {

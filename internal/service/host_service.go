@@ -242,6 +242,13 @@ func (s *hostService) SaveDraft(ctx context.Context, userID uuid.UUID, req HostA
 }
 
 func (s *hostService) SubmitApplication(ctx context.Context, userID uuid.UUID, req HostApplicationRequest) (*models.Host, error) {
+	bucketURL := ""
+	if s.uploads != nil {
+		bucketURL = s.uploads.PublicURLPrefix()
+	}
+	if err := ValidateHostApplication(req, bucketURL); err != nil {
+		return nil, err
+	}
 	return s.saveHostApplication(ctx, userID, req, models.HostApplicationPending)
 }
 

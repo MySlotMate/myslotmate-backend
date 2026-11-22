@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -300,6 +301,11 @@ func (c *HostController) SubmitApplication(w http.ResponseWriter, r *http.Reques
 
 	host, err := c.hostService.SubmitApplication(r.Context(), req.UserID, toHostApplicationRequest(req))
 	if err != nil {
+		var appErr *service.ApplicationError
+		if errors.As(err, &appErr) {
+			RespondJSON(w, http.StatusBadRequest, APIResponse{Success: false, Error: appErr.Code, Message: appErr.Message})
+			return
+		}
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

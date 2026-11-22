@@ -202,13 +202,18 @@ func sanitizeFilename(name string) string {
 	return name
 }
 
+// PublicURLPrefix is the prefix of every URL this service hands out,
+// "https://<bucket>.s3.<region>.amazonaws.com/".
+func (s *UploadService) PublicURLPrefix() string {
+	return fmt.Sprintf("https://%s.s3.%s.amazonaws.com/", s.bucket, s.region)
+}
+
 // DeleteOwnedObject deletes the object behind publicURL, but only when that URL
 // points into this bucket under folder/ — anything else (other folders, other
 // hosts) is left alone, since callers pass URLs that users supplied.
 // Returns (false, nil) when the URL was not ours to delete.
 func (s *UploadService) DeleteOwnedObject(ctx context.Context, folder, publicURL string) (bool, error) {
-	prefix := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/", s.bucket, s.region)
-	key, ok := strings.CutPrefix(publicURL, prefix)
+	key, ok := strings.CutPrefix(publicURL, s.PublicURLPrefix())
 	if !ok || !strings.HasPrefix(key, folder+"/") || strings.Contains(key, "..") {
 		return false, nil
 	}

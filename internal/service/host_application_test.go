@@ -127,10 +127,3 @@ func TestSaveApplication_OldProfessionalBuildKeepsTrack(t *testing.T) {
 		t.Fatalf("host_type=%q is_professional=%v", h.HostType, h.IsProfessional)
 	}
 }
-
-func deref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
-}

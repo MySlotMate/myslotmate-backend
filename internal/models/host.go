@@ -37,6 +37,10 @@ type Host struct {
 	SubmittedAt       *time.Time            `db:"submitted_at" json:"submitted_at,omitempty"`
 	ApprovedAt        *time.Time            `db:"approved_at" json:"approved_at,omitempty"`
 	RejectedAt        *time.Time            `db:"rejected_at" json:"rejected_at,omitempty"`
+	RejectionReason   *string               `db:"rejection_reason" json:"rejection_reason,omitempty"`
+
+	// Two-path application answers (host_type, community / professional fields).
+	HostApplicationAnswers
 
 	// ── Trust & Safety badges ───────────────────────────────────────────────
 	IsIdentityVerified bool `db:"is_identity_verified" json:"is_identity_verified"`
@@ -82,4 +86,58 @@ type Host struct {
 
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+// Host types: the two paths of the /become-host form.
+const (
+	HostTypeCommunity    = "community"
+	HostTypeProfessional = "professional"
+)
+
+// HostApplicationAnswers holds the two-path application answers (frontend
+// spec docs/backend-spec-host-application.md §2). It is embedded in both
+// Host and the apply request, so one assignment copies every answer and
+// clears the other path's answers when an applicant switches paths.
+//
+// SelfieURL, CertificateURL and DegreeURL (like Host.GovernmentIDURL) are
+// private documents: only the host and admins may see them, never a public
+// host DTO.
+type HostApplicationAnswers struct {
+	HostType  string  `db:"host_type" json:"host_type"`
+	SelfieURL *string `db:"selfie_url" json:"selfie_url,omitempty"`
+
+	// Community path
+	CommunityName      *string        `db:"community_name" json:"community_name,omitempty"`
+	CommunityCategory  *string        `db:"community_category" json:"community_category,omitempty"`
+	YearsExperience    *string        `db:"years_experience" json:"years_experience,omitempty"`
+	EventsHosted       *string        `db:"events_hosted" json:"events_hosted,omitempty"`
+	PortfolioURL       *string        `db:"portfolio_url" json:"portfolio_url,omitempty"`
+	PortfolioPhotoURLs pq.StringArray `db:"portfolio_photo_urls" json:"portfolio_photo_urls"`
+
+	// Professional path
+	Profession       *string        `db:"profession" json:"profession,omitempty"`
+	CertificateURL   *string        `db:"certificate_url" json:"certificate_url,omitempty"`
+	DegreeURL        *string        `db:"degree_url" json:"degree_url,omitempty"`
+	LicenseNumber    *string        `db:"license_number" json:"license_number,omitempty"`
+	ProfessionalBody *string        `db:"professional_body" json:"professional_body,omitempty"`
+	Specialization   *string        `db:"specialization" json:"specialization,omitempty"`
+	WorkHistory      *string        `db:"work_history" json:"work_history,omitempty"`
+	Languages        pq.StringArray `db:"languages" json:"languages"`
+	Achievements     *string        `db:"achievements" json:"achievements,omitempty"`
+	TestimonialURL   *string        `db:"testimonial_url" json:"testimonial_url,omitempty"`
+}
+
+// Normalized fills defaults the columns require: host_type defaults to
+// community (old app builds don't send it) and the arrays are never NULL.
+func (a HostApplicationAnswers) Normalized() HostApplicationAnswers {
+	if a.HostType == "" {
+		a.HostType = HostTypeCommunity
+	}
+	if a.PortfolioPhotoURLs == nil {
+		a.PortfolioPhotoURLs = pq.StringArray{}
+	}
+	if a.Languages == nil {
+		a.Languages = pq.StringArray{}
+	}
+	return a
 }

@@ -60,7 +60,11 @@ var hostColumns = `id, user_id, account_id,
 	created_at, updated_at,
 	is_active,
 	events_hosted_override, people_met_override, avg_rating_override,
-	slug`
+	slug,
+	host_type, selfie_url, community_name, community_category, years_experience, events_hosted,
+	portfolio_url, portfolio_photo_urls, profession, certificate_url, degree_url, license_number,
+	professional_body, specialization, work_history, languages, achievements, testimonial_url,
+	rejection_reason`
 
 func scanHost(row interface {
 	Scan(dest ...interface{}) error
@@ -79,6 +83,10 @@ func scanHost(row interface {
 		&h.IsActive,
 		&h.EventsHostedOverride, &h.PeopleMetOverride, &h.AvgRatingOverride,
 		&h.Slug,
+		&h.HostType, &h.SelfieURL, &h.CommunityName, &h.CommunityCategory, &h.YearsExperience, &h.EventsHosted,
+		&h.PortfolioURL, &h.PortfolioPhotoURLs, &h.Profession, &h.CertificateURL, &h.DegreeURL, &h.LicenseNumber,
+		&h.ProfessionalBody, &h.Specialization, &h.WorkHistory, &h.Languages, &h.Achievements, &h.TestimonialURL,
+		&h.RejectionReason,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -98,7 +106,11 @@ func (r *postgresHostRepository) Create(ctx context.Context, host *models.Host) 
 			government_id_url, submitted_at,
 			expertise_tags, social_instagram, social_linkedin, social_website,
 			is_professional, created_at, updated_at,
-			slug
+			slug,
+			host_type, selfie_url, community_name, community_category, years_experience, events_hosted,
+	portfolio_url, portfolio_photo_urls, profession, certificate_url, degree_url, license_number,
+	professional_body, specialization, work_history, languages, achievements, testimonial_url,
+	rejection_reason
 		) VALUES (
 			$1, $2,
 			$3, $4, $5, $6, $7, $8, $9,
@@ -106,12 +118,17 @@ func (r *postgresHostRepository) Create(ctx context.Context, host *models.Host) 
 			$16, $17,
 			$18, $19, $20, $21,
 			$22, $23, $24,
-			$25
+			$25,
+			$26, $27, $28, $29, $30, $31,
+			$32, $33, $34, $35, $36, $37,
+			$38, $39, $40, $41, $42, $43,
+			$44
 		)
 	`
 	if host.ID == uuid.Nil {
 		host.ID = uuid.New()
 	}
+	a := host.HostApplicationAnswers.Normalized()
 	_, err := r.db.ExecContext(ctx, query,
 		host.ID, host.UserID,
 		host.FirstName, host.LastName, host.PhnNumber, host.City, host.AvatarURL, host.Tagline, host.Bio,
@@ -120,6 +137,10 @@ func (r *postgresHostRepository) Create(ctx context.Context, host *models.Host) 
 		pq.Array(host.ExpertiseTags), host.SocialInstagram, host.SocialLinkedin, host.SocialWebsite,
 		host.IsProfessional, host.CreatedAt, host.UpdatedAt,
 		host.Slug,
+		a.HostType, a.SelfieURL, a.CommunityName, a.CommunityCategory, a.YearsExperience, a.EventsHosted,
+		a.PortfolioURL, pq.Array(a.PortfolioPhotoURLs), a.Profession, a.CertificateURL, a.DegreeURL, a.LicenseNumber,
+		a.ProfessionalBody, a.Specialization, a.WorkHistory, pq.Array(a.Languages), a.Achievements, a.TestimonialURL,
+		host.RejectionReason,
 	)
 	return err
 }
@@ -177,9 +198,15 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 			expertise_tags = $21, social_instagram = $22, social_linkedin = $23, social_website = $24,
 			avg_rating = $25, total_reviews = $26, platform_fee_percentage = $27,
 			avatar_from_instagram = $28, gallery_urls = $29, is_professional = $30,
-			events_hosted_override = $31, people_met_override = $32, avg_rating_override = $33
-		WHERE id = $34
+			events_hosted_override = $31, people_met_override = $32, avg_rating_override = $33,
+			host_type = $34, selfie_url = $35, community_name = $36, community_category = $37,
+			years_experience = $38, events_hosted = $39, portfolio_url = $40, portfolio_photo_urls = $41,
+			profession = $42, certificate_url = $43, degree_url = $44, license_number = $45,
+			professional_body = $46, specialization = $47, work_history = $48, languages = $49,
+			achievements = $50, testimonial_url = $51, rejection_reason = $52
+		WHERE id = $53
 	`
+	a := host.HostApplicationAnswers.Normalized()
 	_, err := r.db.ExecContext(ctx, query,
 		host.FirstName, host.LastName, host.PhnNumber, host.City, host.AvatarURL, host.Tagline, host.Bio,
 		host.ApplicationStatus, host.ExperienceDesc, pq.Array(host.Moods), host.Description, pq.Array(host.PreferredDays), host.GroupSize,
@@ -189,6 +216,10 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 		host.AvgRating, host.TotalReviews, host.PlatformFeePercentage,
 		host.AvatarFromInstagram, pq.Array(host.GalleryURLs), host.IsProfessional,
 		host.EventsHostedOverride, host.PeopleMetOverride, host.AvgRatingOverride,
+		a.HostType, a.SelfieURL, a.CommunityName, a.CommunityCategory, a.YearsExperience, a.EventsHosted,
+		a.PortfolioURL, pq.Array(a.PortfolioPhotoURLs), a.Profession, a.CertificateURL, a.DegreeURL, a.LicenseNumber,
+		a.ProfessionalBody, a.Specialization, a.WorkHistory, pq.Array(a.Languages), a.Achievements, a.TestimonialURL,
+		host.RejectionReason,
 		host.ID,
 	)
 	return err

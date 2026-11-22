@@ -93,6 +93,9 @@ type HostApplicationRequest struct {
 	SocialLinkedin  *string  `json:"social_linkedin,omitempty"`
 	SocialWebsite   *string  `json:"social_website,omitempty"`
 	IsProfessional  *bool    `json:"is_professional,omitempty"`
+
+	// Two-path form answers (host_type, community / professional fields).
+	models.HostApplicationAnswers
 }
 
 // HostProfileUpdateRequest maps to the Host Profile edit screen. Every field is
@@ -269,6 +272,9 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		existing.SocialInstagram = req.SocialInstagram
 		existing.SocialLinkedin = req.SocialLinkedin
 		existing.SocialWebsite = req.SocialWebsite
+		// Whole-struct copy: answers the new body omits are cleared, so
+		// switching path doesn't leave the other path's answers behind.
+		existing.HostApplicationAnswers = req.HostApplicationAnswers.Normalized()
 		// is_professional is not taken from the application: only an admin sets
 		// it (it decides who may run 1:1 sessions).
 		existing.ApplicationStatus = status
@@ -310,6 +316,7 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
+	newHost.HostApplicationAnswers = req.HostApplicationAnswers.Normalized()
 	if status == models.HostApplicationPending {
 		newHost.SubmittedAt = &now
 	}

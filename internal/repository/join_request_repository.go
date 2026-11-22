@@ -26,6 +26,10 @@ type JoinRequestRepository interface {
 	// whatever its status, so the public page can show "rejected" rather than
 	// "not asked".
 	GetLatestForUser(ctx context.Context, eventID, userID uuid.UUID, occurrenceDate time.Time) (*models.EventJoinRequest, error)
+	// HasApprovedForEvent reports whether the host has approved this guest for
+	// ANY session of the event. The monthly-pass purchase gate reads it: a pass
+	// spans many sessions, so one approval of the person is what lets them buy.
+	HasApprovedForEvent(ctx context.Context, eventID, userID uuid.UUID) (bool, error)
 	ListByEvent(ctx context.Context, eventID uuid.UUID, status string) ([]*models.EventJoinRequest, error)
 	// ListByHost spans every event the host owns — the dashboard queue.
 	ListByHost(ctx context.Context, hostID uuid.UUID, status string, limit, offset int) ([]*models.EventJoinRequest, error)
@@ -116,6 +120,15 @@ func (r *postgresJoinRequestRepository) GetLiveForUser(ctx context.Context, even
 	const where = ` WHERE r.event_id = $1 AND r.user_id = $2 AND r.occurrence_date = $3
 		AND r.status IN ('pending', 'approved')`
 	return scanJoinRequest(r.db.QueryRowContext(ctx, joinRequestSelect+where, eventID, userID, occurrenceDate))
+}
+
+func (r *postgresJoinRequestRepository) HasApprovedForEvent(ctx context.Context, eventID, userID uuid.UUID) (bool, error) {
+	var ok bool
+	err := r.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM event_join_requests
+		  WHERE event_id = $1 AND user_id = $2 AND status = 'approved')`,
+		eventID, userID).Scan(&ok)
+	return ok, err
 }
 
 func (r *postgresJoinRequestRepository) GetLatestForUser(ctx context.Context, eventID, userID uuid.UUID, occurrenceDate time.Time) (*models.EventJoinRequest, error) {

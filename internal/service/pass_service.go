@@ -25,7 +25,9 @@ import (
 type PassService interface {
 	// PurchasePass debits the guest's wallet for the event's monthly pass and
 	// issues it, valid for models.PassValidityDays from now.
-	PurchasePass(ctx context.Context, userID, eventID uuid.UUID, idempotencyKey string) (*models.UserPass, error)
+	// On a private experience the guest must get through the same door a
+	// booking does (see PassAccess) — checked BEFORE any money moves.
+	PurchasePass(ctx context.Context, userID, eventID uuid.UUID, idempotencyKey string, access PassAccess) (*models.UserPass, error)
 	// CancelPass refunds a pass to the guest's wallet, inside the refund window
 	// and only while no session has been used.
 	CancelPass(ctx context.Context, userID, passID uuid.UUID) (*models.UserPass, error)
@@ -37,9 +39,27 @@ type PassService interface {
 	// ReserveSession holds a seat on one covered date. It is a normal booking
 	// with pass_id set, so capacity, the roster and door check-in all work
 	// unchanged — it just costs nothing, because the pass was already paid for.
-	ReserveSession(ctx context.Context, userID, passID uuid.UUID, occurrence time.Time) (*models.Booking, error)
+	// tierID picks the ticket type; nil means the basic ticket the pass covers.
+	// A pricier tier charges only the difference (see bookingService).
+	ReserveSession(ctx context.Context, userID, passID uuid.UUID, occurrence time.Time, tierID *uuid.UUID) (*models.Booking, error)
+	// SendExpiryReminders tells guests whose pass ends within
+	// PassExpiryReminderWindow and still has sessions left. Each pass is
+	// reminded once. Safe to call on a timer.
+	SendExpiryReminders(ctx context.Context) (int, error)
 	// ListHolders is the host's roster of pass holders on their own event.
 	ListHolders(ctx context.Context, hostID, eventID uuid.UUID) ([]*models.PassHolder, error)
+}
+
+// PassAccess is what the guest typed to get into a private experience.
+//
+// The private gate is checked ONCE, at purchase, and not again per session:
+// a pass spans many sessions, and the guest has already paid for all of them.
+// Before this, purchase was ungated while every pass-covered booking was gated,
+// so a guest could pay for a pass on a private experience and then be refused
+// every session ("invalid passkey") — money taken, nothing booked.
+type PassAccess struct {
+	Passkey    string // the event's shared passkey (passkey mode)
+	CouponCode string // a per-guest access code (passkey mode)
 }
 
 type passService struct {
@@ -56,6 +76,10 @@ type passService struct {
 	bookings    BookingService
 	events      EventService
 	notifier    notification.NotificationService
+
+	// Private-experience gate at purchase (see PassAccess).
+	couponRepo      repository.CouponRepository
+	joinRequestRepo repository.JoinRequestRepository
 }
 
 func NewPassService(
@@ -72,6 +96,8 @@ func NewPassService(
 	bookings BookingService,
 	events EventService,
 	notifier notification.NotificationService,
+	couponRepo repository.CouponRepository,
+	joinRequestRepo repository.JoinRequestRepository,
 ) PassService {
 	return &passService{
 		db:          db,
@@ -87,10 +113,13 @@ func NewPassService(
 		bookings:    bookings,
 		events:      events,
 		notifier:    notifier,
+
+		couponRepo:      couponRepo,
+		joinRequestRepo: joinRequestRepo,
 	}
 }
 
-func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUID, idempotencyKey string) (*models.UserPass, error) {
+func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUID, idempotencyKey string, access PassAccess) (*models.UserPass, error) {
 	if idempotencyKey == "" {
 		idempotencyKey = fmt.Sprintf("pass_%s_%d", userID, time.Now().UnixNano())
 	}
@@ -125,6 +154,10 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 	}
 	if evt.Status != models.EventStatusLive {
 		return nil, errors.New("this experience is not taking bookings right now")
+	}
+	accessCode, err := s.checkPrivateAccess(ctx, evt, userID, access)
+	if err != nil {
+		return nil, err
 	}
 
 	// A lapsed pass keeps status 'active' until someone looks at it. Retire it
@@ -220,6 +253,16 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 	if err := passTx.Create(ctx, pass); err != nil {
 		return nil, fmt.Errorf("failed to create pass: %w", err)
 	}
+	// A per-guest access code is single-use: spend it with the sale, or the
+	// same code could unlock passes for any number of people.
+	if accessCode != nil {
+		if err := s.couponRepo.WithTx(tx).Redeem(ctx, accessCode.ID); err != nil {
+			if errors.Is(err, repository.ErrCouponExhausted) {
+				return nil, errors.New("this coupon has reached its redemption limit")
+			}
+			return nil, fmt.Errorf("failed to redeem access code: %w", err)
+		}
+	}
 
 	// The same four-entry split a booking writes — the ledger points at the pass.
 	if err := creditSplit(ctx, ledgerTx, payoutTx, purchaseSplit{
@@ -276,17 +319,75 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 	// here — they get tickets, and the host's roster and capacity are right from
 	// the moment of sale. Best-effort by design: a session that is already full
 	// is skipped, and the pass (with its money) still stands.
-	booked := s.reserveCoveredSessions(ctx, pass)
-	s.sendPassConfirmationAsync(pass, evt, booked)
+	// A pass is a balance of sessions, not a set of bookings: the guest picks
+	// each session they want and pays for it with one session off the pass.
+	// Nothing is booked here, so no seats are held for weeks the guest may
+	// never come to.
+	s.sendPassConfirmationAsync(pass, evt)
 	return pass, nil
 }
 
-// sendPassConfirmationAsync tells the guest, once, that their pass is live and
-// how many sessions it booked. Fire-and-forget on its own context: the pass is
-// already paid for and valid, so a messaging outage must not fail the purchase.
-func (s *passService) sendPassConfirmationAsync(pass *models.UserPass, evt *models.Event, sessionsBooked int) {
+// checkPrivateAccess is the pass-purchase twin of the booking's private gate.
+// It returns the per-guest access code that opened the door (to be redeemed
+// with the sale), or nil when none was used or the experience is public.
+//
+//   - rsvp: the host must have approved this guest for at least one session.
+//     Approval vets the person; a pass then covers the sessions they paid for.
+//   - passkey: the shared passkey, or a valid per-guest ACCESS code. A free or
+//     discount code is refused here: its value is a cheaper booking, and
+//     spending it on a full-price pass would quietly burn it.
+func (s *passService) checkPrivateAccess(ctx context.Context, evt *models.Event, userID uuid.UUID, access PassAccess) (*models.Coupon, error) {
+	if !evt.IsPrivate {
+		return nil, nil
+	}
+	if evt.PrivateAccessMode == models.PrivateAccessModeRSVP {
+		if s.joinRequestRepo == nil {
+			return nil, errors.New("the host needs to approve your request to join before you can buy a pass")
+		}
+		ok, err := s.joinRequestRepo.HasApprovedForEvent(ctx, evt.ID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, errors.New("the host needs to approve your request to join before you can buy a pass")
+		}
+		return nil, nil
+	}
+	if passkeyMatches(evt, access.Passkey) {
+		return nil, nil
+	}
+	code := strings.TrimSpace(access.CouponCode)
+	if code == "" {
+		code = strings.TrimSpace(access.Passkey)
+	}
+	if code == "" || s.couponRepo == nil || s.bookings == nil {
+		return nil, errors.New("invalid passkey")
+	}
+	c, err := s.bookings.ValidateCoupon(ctx, evt.ID, userID, code)
+	if err != nil {
+		if strings.TrimSpace(access.CouponCode) == "" {
+			// They typed into the passkey box; keep the passkey wording.
+			return nil, errors.New("invalid passkey")
+		}
+		return nil, err
+	}
+	if c.GrantsFree || c.DiscountPercent != nil {
+		return nil, errors.New("this code can't be used to buy a monthly pass")
+	}
+	return c, nil
+}
+
+// sendPassConfirmationAsync tells the guest, once, that their pass is live,
+// how many sessions it holds and when it runs out. Fire-and-forget on its own
+// context: the pass is already paid for and valid, so a messaging outage must
+// not fail the purchase.
+func (s *passService) sendPassConfirmationAsync(pass *models.UserPass, evt *models.Event) {
 	if s.notifier == nil || s.userRepo == nil {
 		return
+	}
+	sessions := 0 // 0 = every session in the window (legacy passes)
+	if pass.SessionsIncluded != nil {
+		sessions = *pass.SessionsIncluded
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -298,48 +399,56 @@ func (s *passService) sendPassConfirmationAsync(pass *models.UserPass, evt *mode
 			return
 		}
 		if err := s.notifier.SendPassConfirmationWhatsapp(
-			ctx, user.PhnNumber, user.Name, evt.Title, sessionsBooked, pass.ValidUntil,
+			ctx, user.PhnNumber, user.Name, evt.Title, sessions, pass.ValidUntil,
 		); err != nil {
 			fmt.Printf("[PASS] confirmation: WhatsApp send failed for pass %s: %v\n", pass.ID, err)
 		}
 	}()
 }
 
-// reserveCoveredSessions books a seat on every session the pass covers inside
-// its validity window, up to its included-session limit. Runs after the
-// purchase has committed; individual failures are logged and skipped rather
-// than failing the sale.
-func (s *passService) reserveCoveredSessions(ctx context.Context, pass *models.UserPass) int {
-	if s.events == nil {
-		return 0
+// SendExpiryReminders nudges guests to use the sessions left on a pass before
+// it runs out. A pass is claimed (MarkExpiryReminded) before the message goes
+// out, so a crash or a second server can never send the same reminder twice;
+// the cost is that a failed send is not retried.
+func (s *passService) SendExpiryReminders(ctx context.Context) (int, error) {
+	if s.notifier == nil || s.userRepo == nil {
+		return 0, nil
 	}
-	occurrences, err := s.events.GetEventAvailability(ctx, pass.EventID)
+	due, err := s.passRepo.ListExpiringUnreminded(ctx, time.Now().Add(models.PassExpiryReminderWindow), 100)
 	if err != nil {
-		fmt.Printf("[PASS] auto-reserve: availability lookup failed for pass %s: %v\n", pass.ID, err)
-		return 0
+		return 0, err
 	}
-
-	booked := 0
-	for _, occ := range occurrences {
-		if pass.SessionsIncluded != nil && booked >= *pass.SessionsIncluded {
-			break
+	sent := 0
+	for _, p := range due {
+		left, limited := p.SessionsRemaining()
+		if limited && left <= 0 {
+			continue // nothing left to use — no reason to message
 		}
-		if occ.IsPaused || occ.IsFullyBooked {
+		claimed, err := s.passRepo.MarkExpiryReminded(ctx, p.ID)
+		if err != nil || !claimed {
 			continue
 		}
-		if occ.Date.Before(pass.ValidFrom) || occ.Date.After(pass.ValidUntil) {
+		user, err := s.userRepo.GetByID(ctx, p.UserID)
+		if err != nil || user == nil {
 			continue
 		}
-		// Quiet: one pass confirmation goes out afterwards instead of a
-		// confirmation per session, which would be a burst of messages.
-		if _, err := s.reserveSession(ctx, pass.UserID, pass.ID, occ.Date, false); err != nil {
-			fmt.Printf("[PASS] auto-reserve: %s on %s skipped: %v\n", pass.ID, occ.Date.Format(time.RFC3339), err)
+		evt, err := s.eventRepo.GetByID(ctx, p.EventID)
+		if err != nil || evt == nil {
 			continue
 		}
-		booked++
+		sessionsLeft := 0 // 0 = unlimited (legacy pass)
+		if limited {
+			sessionsLeft = left
+		}
+		if err := s.notifier.SendPassExpiringWhatsapp(
+			ctx, user.PhnNumber, user.Name, evt.Title, evt.Slug, sessionsLeft, p.ValidUntil,
+		); err != nil {
+			fmt.Printf("[PASS] expiry reminder failed for pass %s: %v\n", p.ID, err)
+			continue
+		}
+		sent++
 	}
-	fmt.Printf("[PASS] auto-reserve: pass %s booked %d session(s)\n", pass.ID, booked)
-	return booked
+	return sent, nil
 }
 
 func (s *passService) CancelPass(ctx context.Context, userID, passID uuid.UUID) (*models.UserPass, error) {
@@ -376,7 +485,10 @@ func (s *passService) CancelPass(ctx context.Context, userID, passID uuid.UUID) 
 	// Give the seats back before refunding. These bookings moved no money, so
 	// cancelling them only frees capacity and returns the pass's sessions.
 	for _, b := range held {
-		if _, err := s.bookings.CancelBooking(ctx, b.ID, pass.UserID, RefundDestinationWallet); err != nil {
+		// Cancelled the way a host cancel is: always returns the session and any
+		// tier-upgrade money, whatever the experience's refund policy — the
+		// whole pass is being unwound, not one session given up.
+		if _, err := s.bookings.CancelBookingByHost(ctx, b.ID); err != nil {
 			return nil, fmt.Errorf("cancel pass: release session booking %s: %w", b.ID, err)
 		}
 	}
@@ -502,14 +614,8 @@ func (s *passService) GetPassForEvent(ctx context.Context, userID, eventID uuid.
 	return pass, &left, nil
 }
 
-func (s *passService) ReserveSession(ctx context.Context, userID, passID uuid.UUID, occurrence time.Time) (*models.Booking, error) {
-	return s.reserveSession(ctx, userID, passID, occurrence, true)
-}
-
-// reserveSession holds one covered seat. notify controls whether the guest gets
-// the per-booking confirmation — off for the sessions booked automatically at
-// purchase, which are covered by the single pass confirmation instead.
-func (s *passService) reserveSession(ctx context.Context, userID, passID uuid.UUID, occurrence time.Time, notify bool) (*models.Booking, error) {
+// ReserveSession pays for one session with one session off the pass.
+func (s *passService) ReserveSession(ctx context.Context, userID, passID uuid.UUID, occurrence time.Time, tierID *uuid.UUID) (*models.Booking, error) {
 	pass, err := s.passRepo.GetByID(ctx, passID)
 	if err != nil {
 		return nil, err
@@ -531,9 +637,15 @@ func (s *passService) reserveSession(ctx context.Context, userID, passID uuid.UU
 		Quantity:       1,
 		OccurrenceDate: &occurrence,
 		PassID:         &pass.ID,
+		PriceTierID:    tierID,
 		IdempotencyKey: fmt.Sprintf("pass_%s_%d", pass.ID, occurrence.Unix()),
-		AutoConfirm:    true,
-		Notify:         notify,
+		// The private gate was passed at purchase (see PassAccess). Gating each
+		// covered session again would refuse a guest who already paid for it.
+		// Safe because CreateBooking still checks the pass belongs to this user
+		// and this event.
+		BypassPasskey: true,
+		AutoConfirm:   true,
+		Notify:        true,
 	})
 	if err != nil && strings.Contains(err.Error(), "duplicate key") {
 		return nil, errors.New("you have already reserved this session")

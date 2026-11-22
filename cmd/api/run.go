@@ -207,7 +207,7 @@ func main() {
 	reviewService := service.NewReviewService(reviewRepo, eventRepo, hostRepo, dispatcher)
 	inboxService := service.NewInboxService(inboxRepo, eventRepo, socketService)
 	supportService := service.NewSupportService(supportRepo)
-	passService := service.NewPassService(dbConn, passRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, ledgerRepo, bookingRepo, userRepo, bookingService, eventService, notifService)
+	passService := service.NewPassService(dbConn, passRepo, eventRepo, accountRepo, paymentRepo, payoutRepo, hostRepo, ledgerRepo, bookingRepo, userRepo, bookingService, eventService, notifService, couponRepo, joinRequestRepo)
 	payoutService := service.NewPayoutService(payoutRepo, accountRepo, paymentRepo, bookingRepo, hostRepo, ledgerRepo, cohostRepo, eventRepo, userRepo, payoutProvider, dispatcher, notifService, cfg.FrontendBaseURL)
 
 	// Initialize reminder scheduler
@@ -216,6 +216,29 @@ func main() {
 		reminderScheduler = initializeReminderScheduler(dbConn, notifService, 5, 90)
 		reminderScheduler.Start(5 * time.Minute)
 	}
+
+	// Monthly-pass expiry reminders: once an hour, message guests whose pass
+	// ends within 5 days and still has sessions on it. Each pass is reminded
+	// once (claimed in the database), so restarts and extra instances are safe.
+	passReminderStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				if n, err := passService.SendExpiryReminders(ctx); err != nil {
+					log.Printf("[PASS] expiry reminders: %v", err)
+				} else if n > 0 {
+					log.Printf("[PASS] expiry reminders sent: %d", n)
+				}
+				cancel()
+			case <-passReminderStop:
+				return
+			}
+		}
+	}()
 
 	profileController := controller.NewProfileController(hostService, eventRepo, repository.NewAlbumRepository(dbConn), repository.NewConnectionRepository(dbConn), userRepo, uploadService, fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	userController := controller.NewUserController(userService, fbApp.Auth, cfg.AdminAuth.JWTSecret).WithProfile(profileController)
@@ -341,6 +364,8 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Println("shutting down server...")
+
+	close(passReminderStop)
 
 	// Stop reminder scheduler
 	if reminderScheduler != nil {

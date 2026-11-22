@@ -74,6 +74,10 @@ func (c *PassController) resolveUserID(ctx context.Context) (uuid.UUID, error) {
 type purchasePassRequest struct {
 	EventID        uuid.UUID `json:"event_id"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
+	// Private experiences only: the shared passkey, or a per-guest access code.
+	// Validated server-side exactly like the booking gate.
+	Passkey    string `json:"passkey,omitempty"`
+	CouponCode string `json:"coupon_code,omitempty"`
 }
 
 func (c *PassController) PurchasePass(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +96,10 @@ func (c *PassController) PurchasePass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pass, err := c.passService.PurchasePass(r.Context(), userID, req.EventID, req.IdempotencyKey)
+	pass, err := c.passService.PurchasePass(r.Context(), userID, req.EventID, req.IdempotencyKey, service.PassAccess{
+		Passkey:    req.Passkey,
+		CouponCode: req.CouponCode,
+	})
 	if err != nil {
 		RespondError(w, passErrorStatus(err), err.Error())
 		return
@@ -122,6 +129,9 @@ func (c *PassController) CancelPass(w http.ResponseWriter, r *http.Request) {
 
 type reserveSessionRequest struct {
 	OccurrenceDate string `json:"occurrence_date"` // RFC3339
+	// Optional ticket type. Omitted = the basic ticket the pass covers; a
+	// pricier tier charges the difference from the guest's wallet.
+	PriceTierID *uuid.UUID `json:"price_tier_id,omitempty"`
 }
 
 // ReserveSession holds a seat for a pass holder on one covered date. Free — the
@@ -149,7 +159,7 @@ func (c *PassController) ReserveSession(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	booking, err := c.passService.ReserveSession(r.Context(), userID, passID, occurrence)
+	booking, err := c.passService.ReserveSession(r.Context(), userID, passID, occurrence, req.PriceTierID)
 	if err != nil {
 		RespondError(w, passErrorStatus(err), err.Error())
 		return
@@ -228,7 +238,8 @@ func (c *PassController) ListHolders(w http.ResponseWriter, r *http.Request) {
 func passErrorStatus(err error) int {
 	msg := err.Error()
 	switch {
-	case strings.HasPrefix(msg, "insufficient wallet balance"):
+	case strings.HasPrefix(msg, "insufficient wallet balance"),
+		strings.HasPrefix(msg, "insufficient balance"):
 		return http.StatusPaymentRequired
 	case msg == "event not found", msg == "pass not found", msg == "user account not found":
 		return http.StatusNotFound
@@ -240,9 +251,19 @@ func passErrorStatus(err error) int {
 	case msg == "your account is blocked due to suspicious activity",
 		msg == "not authorized to cancel this pass",
 		msg == "not authorized to use this pass",
-		msg == "not your experience":
+		msg == "not your experience",
+		msg == "invalid passkey",
+		msg == "the host needs to approve your request to join before you can buy a pass":
 		return http.StatusForbidden
+	case msg == "this code can't be used to buy a monthly pass",
+		msg == "invalid coupon code",
+		msg == "you have already used this coupon",
+		strings.HasPrefix(msg, "this coupon "):
+		return http.StatusBadRequest
 	case msg == "your pass does not cover this session",
+		msg == "a code can't be combined with a pass session",
+		msg == "invalid ticket tier for this event",
+		msg == "you have already reserved this session",
 		msg == "a monthly pass covers one guest per session",
 		msg == "this experience does not offer a monthly pass",
 		msg == "this experience is not taking bookings right now",

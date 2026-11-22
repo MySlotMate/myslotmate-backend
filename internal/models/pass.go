@@ -21,6 +21,10 @@ const (
 // and removes any pro-rating argument mid-month.
 const PassValidityDays = 30
 
+// PassExpiryReminderWindow is how long before a pass runs out the guest is
+// reminded to use the sessions left on it.
+const PassExpiryReminderWindow = 5 * 24 * time.Hour
+
 // UserPass is one guest's monthly pass for one event: paid once, covers every
 // session (or SessionsIncluded of them) until ValidUntil.
 //

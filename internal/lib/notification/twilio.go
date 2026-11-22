@@ -25,6 +25,18 @@ type TwilioNotificationService struct {
 	emailSvc    *EmailService
 	kapsoClient *KapsoClient
 	kapsoCfg    *config.KapsoConfig
+
+	// FrontendBaseURL is the public site root for links in messages
+	// (FRONTEND_BASE_URL). Empty falls back to https://myslotmate.com.
+	FrontendBaseURL string
+}
+
+// siteURL is the public site root, without a trailing slash.
+func (s *TwilioNotificationService) siteURL() string {
+	if u := strings.TrimRight(s.FrontendBaseURL, "/"); u != "" {
+		return u
+	}
+	return "https://myslotmate.com"
 }
 
 // formatPhoneNumber ensures phone number has country code (+91 for India)
@@ -183,11 +195,12 @@ func (s *TwilioNotificationService) SendPassExpiringWhatsapp(ctx context.Context
 		left = fmt.Sprintf("You still have %d sessions left", sessionsLeft)
 	}
 	message := fmt.Sprintf(
-		"%s! ⏳ Your Monthly Pass for %s ends on %s.\n\n%s — book them before it expires:\nhttps://myslotmate.com/experience/%s",
+		"%s! ⏳ Your Monthly Pass for %s ends on %s.\n\n%s — book them before it expires:\n%s/experience/%s",
 		passGreeting(userName),
 		eventTitle,
 		timeutil.FormatEventTime(validUntil),
 		left,
+		s.siteURL(),
 		eventSlug,
 	)
 	return s.sendWhatsappText(ctx, phone, message)

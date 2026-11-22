@@ -192,7 +192,7 @@ func main() {
 	log.Println("Using Razorpay Payment Collection Provider")
 
 	// Initialize notification service
-	notifService, err := initializeNotificationService(&cfg.Twilio, &cfg.SMTP, &cfg.Kapso, dbConn)
+	notifService, err := initializeNotificationService(&cfg.Twilio, &cfg.SMTP, &cfg.Kapso, dbConn, cfg.FrontendBaseURL)
 	if err != nil {
 		log.Printf("Warning: failed to initialize notification service: %v", err)
 	}
@@ -501,6 +501,7 @@ func initializeNotificationService(
 	smtpConfig *config.SMTPConfig,
 	kapsoConfig *config.KapsoConfig,
 	db *sql.DB,
+	frontendBaseURL string,
 ) (notification.NotificationService, error) {
 	if (twilioConfig.AccountSID == "" || twilioConfig.AuthToken == "") && (kapsoConfig.APIKey == "" || kapsoConfig.PhoneNumberID == "") {
 		log.Println("Warning: Neither Twilio nor Kapso credentials configured — notifications disabled")
@@ -522,6 +523,7 @@ func initializeNotificationService(
 		userRepo,
 	)
 
+	svc.FrontendBaseURL = frontendBaseURL
 	log.Println("✓ Notification service initialized (Twilio with Email)")
 	return svc, nil
 }

@@ -211,6 +211,20 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 	platformFee := totalAmount * int64(feeConfig.PlatformPercentage) / 100
 	hostEarning := totalAmount - platformFee
 
+	// Guest-paid booking fee, on top of the pass price — the same fee and the
+	// same rule a ticket booking uses (bookingService.CreateBooking): commission
+	// above is taken on the price only, the fee goes to the platform whole, and
+	// the buyer pays price + fee. Stored in PriceCents/ServiceFeeCents with the
+	// rest, so a pass refund (CancelPass → reverseSplit) returns it too, exactly
+	// as a refunded ticket returns its fee.
+	bookingFeeConfig, err := s.payoutRepo.GetBookingFeeConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	bookingFee := bookingFeeConfig.FeeCents(totalAmount)
+	totalAmount += bookingFee
+	platformFee += bookingFee
+
 	// ── Transaction — every write below commits all-or-nothing ───────────
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

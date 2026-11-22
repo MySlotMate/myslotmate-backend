@@ -35,6 +35,10 @@ type UserPass struct {
 	EventID uuid.UUID `db:"event_id" json:"event_id"`
 	UserID  uuid.UUID `db:"user_id" json:"user_id"`
 
+	// Money snapshot, like a booking's amount/service_fee/net_earning:
+	// PriceCents = what the guest paid (pass price + guest booking fee),
+	// ServiceFeeCents = what the platform kept (commission + booking fee),
+	// NetEarningCents = the host's share. Price = ServiceFee + NetEarning.
 	PriceCents      int64 `db:"price_cents" json:"price_cents"`
 	ServiceFeeCents int64 `db:"service_fee_cents" json:"service_fee_cents"`
 	NetEarningCents int64 `db:"net_earning_cents" json:"net_earning_cents"`

@@ -57,26 +57,40 @@ func (r *postgresPayoutRepository) UpsertTaxProfile(ctx context.Context, p *mode
 	return err
 }
 
-// FYGrossTicketCents is the host's ticket value on live bookings created since
-// fyStart. Refunded and cancelled bookings drop out; a no-refund guest cancel
-// (confirmed + cancelled_at) stays in, because the host kept that sale.
+// taxSales is every taxable sale: ticket bookings and monthly passes, with the
+// same tax columns. live = the host kept the sale (booking pending/confirmed —
+// a no-refund guest cancel stays confirmed — or pass active/expired);
+// returned = it was refunded or cancelled. Alias it b so the queries below
+// read as they did when they covered bookings only.
+const taxSales = `(
+	SELECT event_id, created_at, ticket_cents, tcs_cents, tcs_interstate, tds_cents,
+	       status IN ('pending', 'confirmed') AS live, status IN ('refunded', 'cancelled') AS returned
+	  FROM bookings
+	UNION ALL
+	SELECT event_id, created_at, ticket_cents, tcs_cents, tcs_interstate, tds_cents,
+	       status IN ('active', 'expired') AS live, status = 'refunded' AS returned
+	  FROM user_passes
+)`
+
+// FYGrossTicketCents is the host's ticket value on live sales (bookings and
+// passes) created since fyStart. Refunded and cancelled sales drop out.
 func (r *postgresPayoutRepository) FYGrossTicketCents(ctx context.Context, hostID uuid.UUID, fyStart time.Time) (int64, error) {
 	var total int64
 	err := r.db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(b.ticket_cents), 0)::BIGINT
-		  FROM bookings b JOIN events e ON e.id = b.event_id
-		 WHERE e.host_id = $1 AND b.status IN ('pending', 'confirmed') AND b.created_at >= $2`,
+		  FROM `+taxSales+` b JOIN events e ON e.id = b.event_id
+		 WHERE e.host_id = $1 AND b.live AND b.created_at >= $2`,
 		hostID, fyStart,
 	).Scan(&total)
 	return total, err
 }
 
-// HostTaxTotals sums the host's stamped TCS/TDS on live bookings since fyStart.
+// HostTaxTotals sums the host's stamped TCS/TDS on live sales since fyStart.
 func (r *postgresPayoutRepository) HostTaxTotals(ctx context.Context, hostID uuid.UUID, fyStart time.Time) (tcs, tds int64, err error) {
 	err = r.db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(b.tcs_cents), 0)::BIGINT, COALESCE(SUM(b.tds_cents), 0)::BIGINT
-		  FROM bookings b JOIN events e ON e.id = b.event_id
-		 WHERE e.host_id = $1 AND b.status IN ('pending', 'confirmed') AND b.created_at >= $2`,
+		  FROM `+taxSales+` b JOIN events e ON e.id = b.event_id
+		 WHERE e.host_id = $1 AND b.live AND b.created_at >= $2`,
 		hostID, fyStart,
 	).Scan(&tcs, &tds)
 	return tcs, tds, err
@@ -101,8 +115,8 @@ func (r *postgresPayoutRepository) HostTaxByMonth(ctx context.Context, hostID uu
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT to_char(b.created_at AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM') AS month,
 		       COALESCE(SUM(b.tcs_cents), 0)::BIGINT, COALESCE(SUM(b.tds_cents), 0)::BIGINT
-		  FROM bookings b JOIN events e ON e.id = b.event_id
-		 WHERE e.host_id = $1 AND b.status IN ('pending', 'confirmed')
+		  FROM `+taxSales+` b JOIN events e ON e.id = b.event_id
+		 WHERE e.host_id = $1 AND b.live
 		   AND b.created_at >= $2 AND b.created_at < $3
 		 GROUP BY 1 ORDER BY 1`, hostID, from, to)
 	if err != nil {
@@ -135,17 +149,18 @@ type TaxReportRow struct {
 	VenueStateUnknown bool // some TCS was booked with no venue state on the event
 }
 
-// TaxReportRows aggregates stamped tax per host for bookings created in [from, to).
+// TaxReportRows aggregates stamped tax per host for sales (bookings and
+// passes) created in [from, to).
 func (r *postgresPayoutRepository) TaxReportRows(ctx context.Context, from, to time.Time) ([]TaxReportRow, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT h.id, trim(concat_ws(' ', h.first_name, h.last_name)), p.pan, p.gstin, p.gst_state_code, p.entity_type,
 		       COALESCE(SUM(b.ticket_cents), 0)::BIGINT,
-		       COALESCE(SUM(b.ticket_cents) FILTER (WHERE b.status IN ('refunded','cancelled')), 0)::BIGINT,
-		       COALESCE(SUM(b.tcs_cents) FILTER (WHERE b.status IN ('pending','confirmed') AND NOT b.tcs_interstate), 0)::BIGINT,
-		       COALESCE(SUM(b.tcs_cents) FILTER (WHERE b.status IN ('pending','confirmed') AND b.tcs_interstate), 0)::BIGINT,
-		       COALESCE(SUM(b.tds_cents) FILTER (WHERE b.status IN ('pending','confirmed')), 0)::BIGINT,
+		       COALESCE(SUM(b.ticket_cents) FILTER (WHERE b.returned), 0)::BIGINT,
+		       COALESCE(SUM(b.tcs_cents) FILTER (WHERE b.live AND NOT b.tcs_interstate), 0)::BIGINT,
+		       COALESCE(SUM(b.tcs_cents) FILTER (WHERE b.live AND b.tcs_interstate), 0)::BIGINT,
+		       COALESCE(SUM(b.tds_cents) FILTER (WHERE b.live), 0)::BIGINT,
 		       COALESCE(bool_or(b.tcs_cents > 0 AND e.state_code IS NULL), false)
-		  FROM bookings b
+		  FROM `+taxSales+` b
 		  JOIN events e ON e.id = b.event_id
 		  JOIN hosts  h ON h.id = e.host_id
 		  LEFT JOIN host_tax_profiles p ON p.host_id = h.id
@@ -168,11 +183,11 @@ func (r *postgresPayoutRepository) TaxReportRows(ctx context.Context, from, to t
 	return out, rows.Err()
 }
 
-// TaxLiability returns all TCS+TDS stamped on live bookings and all tax
+// TaxLiability returns all TCS+TDS stamped on live sales and all tax
 // deposits finance has logged, both all-time.
 func (r *postgresPayoutRepository) TaxLiability(ctx context.Context) (stamped, deposited int64, err error) {
 	err = r.db.QueryRowContext(ctx, `
-		SELECT (SELECT COALESCE(SUM(tcs_cents + tds_cents), 0) FROM bookings WHERE status IN ('pending','confirmed'))::BIGINT,
+		SELECT (SELECT COALESCE(SUM(tcs_cents + tds_cents), 0) FROM `+taxSales+` s WHERE live)::BIGINT,
 		       (SELECT COALESCE(SUM(amount_cents), 0) FROM tax_deposits)::BIGINT`,
 	).Scan(&stamped, &deposited)
 	return stamped, deposited, err

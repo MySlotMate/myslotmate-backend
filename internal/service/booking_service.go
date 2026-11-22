@@ -574,27 +574,13 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	}
 
 	// ── Statutory tax lines (TCS/TDS) ────────────────────────────────────
-	// The host row lock serialises this host's paid bookings, so the booking
-	// that crosses the ₹5 lakh TDS threshold is charged the catch-up exactly
-	// once. Lock order: event row (above), then host row.
-	// ponytail: one lock per host; switch to a per-host advisory lock if a
-	// busy host's bookings ever contend.
+	// Lock order: event row (above), then host row (inside stampTax).
 	var tax TaxLines
 	if totalAmount > 0 {
-		in := TaxInput{TicketCents: ticketCents, NetEarningCents: hostEarning, ServiceFeeCents: platformFee,
-			EventStateCode: venueStateCode, Settings: *taxSettings}
-		if taxSettings.Enabled {
-			if err := payoutTx.LockHost(ctx, host.ID); err != nil {
-				return nil, fmt.Errorf("booking: lock host: %w", err)
-			}
-			if in.Profile, err = payoutTx.GetTaxProfile(ctx, host.ID); err != nil {
-				return nil, fmt.Errorf("booking: load tax profile: %w", err)
-			}
-			if in.FYGrossBeforeCents, err = payoutTx.FYGrossTicketCents(ctx, host.ID, FinancialYearStart(time.Now())); err != nil {
-				return nil, fmt.Errorf("booking: FY gross: %w", err)
-			}
+		if tax, err = stampTax(ctx, payoutTx, host.ID, TaxInput{TicketCents: ticketCents, NetEarningCents: hostEarning,
+			ServiceFeeCents: platformFee, EventStateCode: venueStateCode, Settings: *taxSettings}); err != nil {
+			return nil, fmt.Errorf("booking: %w", err)
 		}
-		tax = ComputeBookingTax(in)
 	}
 
 	// ─────────────────────────────────────────────────────────────────────

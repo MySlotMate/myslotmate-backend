@@ -61,7 +61,8 @@ func (r *postgresPassRepository) WithTx(tx *sql.Tx) PassRepository {
 
 const passColumns = `id, event_id, user_id, price_cents, service_fee_cents, net_earning_cents,
 	sessions_included, sessions_used, valid_from, valid_until, status, payment_id,
-	idempotency_key, created_at, updated_at`
+	idempotency_key, created_at, updated_at,
+	ticket_cents, platform_fee_gst_cents, tcs_cents, tcs_interstate, tds_cents, host_payout_cents`
 
 func scanPass(row interface {
 	Scan(dest ...interface{}) error
@@ -71,6 +72,7 @@ func scanPass(row interface {
 		&p.ID, &p.EventID, &p.UserID, &p.PriceCents, &p.ServiceFeeCents, &p.NetEarningCents,
 		&p.SessionsIncluded, &p.SessionsUsed, &p.ValidFrom, &p.ValidUntil, &p.Status, &p.PaymentID,
 		&p.IdempotencyKey, &p.CreatedAt, &p.UpdatedAt,
+		&p.TicketCents, &p.PlatformFeeGSTCents, &p.TCSCents, &p.TCSInterstate, &p.TDSCents, &p.HostPayoutCents,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -91,10 +93,12 @@ func (r *postgresPassRepository) Create(ctx context.Context, p *models.UserPass)
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO user_passes (
 			id, event_id, user_id, price_cents, service_fee_cents, net_earning_cents,
-			sessions_included, valid_from, valid_until, status, idempotency_key
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			sessions_included, valid_from, valid_until, status, idempotency_key,
+			ticket_cents, platform_fee_gst_cents, tcs_cents, tcs_interstate, tds_cents, host_payout_cents
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
 		p.ID, p.EventID, p.UserID, p.PriceCents, p.ServiceFeeCents, p.NetEarningCents,
 		p.SessionsIncluded, p.ValidFrom, p.ValidUntil, p.Status, p.IdempotencyKey,
+		p.TicketCents, p.PlatformFeeGSTCents, p.TCSCents, p.TCSInterstate, p.TDSCents, p.HostPayoutCents,
 	)
 	return err
 }

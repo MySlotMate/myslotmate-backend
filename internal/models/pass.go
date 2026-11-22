@@ -44,6 +44,16 @@ type UserPass struct {
 	ServiceFeeCents int64 `db:"service_fee_cents" json:"service_fee_cents"`
 	NetEarningCents int64 `db:"net_earning_cents" json:"net_earning_cents"`
 
+	// Statutory tax lines, as on a booking. TicketCents is the pass price
+	// excluding the guest booking fee. HostPayoutCents nil = sold before tax
+	// stamping; use NetEarningCents (see PayableCents).
+	TicketCents         *int64 `db:"ticket_cents" json:"ticket_cents,omitempty"`
+	PlatformFeeGSTCents int64  `db:"platform_fee_gst_cents" json:"-"`
+	TCSCents            int64  `db:"tcs_cents" json:"tcs_cents"`
+	TCSInterstate       bool   `db:"tcs_interstate" json:"-"`
+	TDSCents            int64  `db:"tds_cents" json:"tds_cents"`
+	HostPayoutCents     *int64 `db:"host_payout_cents" json:"host_payout_cents,omitempty"`
+
 	// SessionsIncluded nil = every session inside the validity window. Serialised
 	// explicitly as null (no omitempty): the client distinguishes "unlimited"
 	// from "field missing", and an absent key reads as undefined there.
@@ -58,6 +68,15 @@ type UserPass struct {
 	IdempotencyKey *string    `db:"idempotency_key" json:"idempotency_key,omitempty"`
 	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// PayableCents is what the host is owed for this pass: host_payout_cents when
+// tax lines were stamped, else the pre-tax net earning.
+func (p *UserPass) PayableCents() int64 {
+	if p.HostPayoutCents != nil {
+		return *p.HostPayoutCents
+	}
+	return p.NetEarningCents
 }
 
 // SessionsRemaining reports how many more sessions this pass can reserve, and

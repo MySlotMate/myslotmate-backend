@@ -226,9 +226,15 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 	if err != nil {
 		return nil, err
 	}
+	ticketCents := totalAmount // pass price, before the guest fee: the tax base
 	bookingFee := bookingFeeConfig.FeeCents(totalAmount)
 	totalAmount += bookingFee
 	platformFee += bookingFee
+
+	taxSettings, err := s.payoutRepo.GetTaxSettings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load tax settings: %w", err)
+	}
 
 	// ── Transaction — every write below commits all-or-nothing ───────────
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -247,6 +253,19 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 	paymentTx := s.paymentRepo.WithTx(tx)
 	payoutTx := s.payoutRepo.WithTx(tx)
 	passTx := s.passRepo.WithTx(tx)
+
+	// ── Statutory tax lines (TCS/TDS), same as a ticket booking ──────────
+	// Taken before the wallet debit so the lock order matches CreateBooking
+	// (host row before accounts). The pass flow takes no event-row lock.
+	var venueStateCode *string
+	if err := tx.QueryRowContext(ctx, `SELECT state_code FROM events WHERE id = $1`, eventID).Scan(&venueStateCode); err != nil {
+		return nil, fmt.Errorf("pass: load venue state: %w", err)
+	}
+	tax, err := stampTax(ctx, payoutTx, host.ID, TaxInput{TicketCents: ticketCents, NetEarningCents: hostEarning,
+		ServiceFeeCents: platformFee, EventStateCode: venueStateCode, Settings: *taxSettings})
+	if err != nil {
+		return nil, fmt.Errorf("pass: %w", err)
+	}
 
 	if err := accountTx.Debit(ctx, userAccount.ID, totalAmount); err != nil {
 		if errors.Is(err, repository.ErrInsufficientBalance) {
@@ -268,6 +287,13 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 		ValidUntil:       now.AddDate(0, 0, models.PassValidityDays),
 		Status:           models.PassActive,
 		IdempotencyKey:   &idempotencyKey,
+
+		TicketCents:         &ticketCents,
+		PlatformFeeGSTCents: tax.PlatformFeeGSTCents,
+		TCSCents:            tax.TCSCents,
+		TCSInterstate:       tax.TCSInterstate,
+		TDSCents:            tax.TDSCents,
+		HostPayoutCents:     &tax.HostPayoutCents,
 	}
 	if err := passTx.Create(ctx, pass); err != nil {
 		return nil, fmt.Errorf("failed to create pass: %w", err)
@@ -291,7 +317,7 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 		HostAccountID:       hostAccount.ID,
 		HostID:              host.ID,
 		TotalCents:          totalAmount,
-		HostEarningCents:    hostEarning,
+		HostEarningCents:    tax.HostPayoutCents, // net earning less TCS/TDS the platform withholds
 		ReferenceID:         pass.ID,
 		ReferenceType:       "pass",
 		IdempotencyKey:      idempotencyKey,
@@ -470,6 +496,14 @@ func (s *passService) SendExpiryReminders(ctx context.Context) (int, error) {
 	return sent, nil
 }
 
+// passReversalAmounts is the pass twin of bookingReversalAmounts: the host
+// gives back what it was credited (host_payout, which a TDS catch-up can make
+// negative); the platform gives back its fee plus the tax it withheld. The two
+// always add up to price_cents.
+func passReversalAmounts(p *models.UserPass) (hostCents, platformCents int64) {
+	return p.PayableCents(), p.ServiceFeeCents + p.TCSCents + p.TDSCents
+}
+
 func (s *passService) CancelPass(ctx context.Context, userID, passID uuid.UUID) (*models.UserPass, error) {
 	pass, err := s.passRepo.GetByID(ctx, passID)
 	if err != nil {
@@ -524,9 +558,10 @@ func (s *passService) CancelPass(ctx context.Context, userID, passID uuid.UUID) 
 	if err != nil {
 		return nil, fmt.Errorf("cancel pass: load event: %w", err)
 	}
+	hostBack, platformBack := passReversalAmounts(pass)
 	var hostID uuid.UUID
 	var hostAccountID uuid.UUID
-	if evt != nil && pass.NetEarningCents > 0 {
+	if evt != nil && hostBack != 0 { // may be negative: see passReversalAmounts
 		hostID = evt.HostID
 		ha, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerHost, evt.HostID)
 		if err != nil {
@@ -537,7 +572,7 @@ func (s *passService) CancelPass(ctx context.Context, userID, passID uuid.UUID) 
 		}
 	}
 	var platformAccount *models.Account
-	if pass.ServiceFeeCents > 0 {
+	if platformBack > 0 {
 		pa, err := s.accountRepo.GetByOwner(ctx, models.AccountOwnerPlatform, uuid.Nil)
 		if err != nil {
 			return nil, fmt.Errorf("cancel pass: load platform account: %w", err)
@@ -569,8 +604,8 @@ func (s *passService) CancelPass(ctx context.Context, userID, passID uuid.UUID) 
 		HostAccountID:   hostAccountID,
 		PlatformAccount: platformAccount,
 		AmountCents:     pass.PriceCents,
-		NetEarningCents: pass.NetEarningCents,
-		ServiceFeeCents: pass.ServiceFeeCents,
+		NetEarningCents: hostBack,
+		ServiceFeeCents: platformBack,
 		ReferenceID:     pass.ID,
 		ReferenceType:   "pass",
 		Noun:            "monthly pass",

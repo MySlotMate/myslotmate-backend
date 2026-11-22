@@ -272,3 +272,27 @@ func reverseSplit(
 	}
 	return nil
 }
+
+// stampTax computes the statutory tax lines for one sale (booking or monthly
+// pass) inside the caller's transaction. With tax on it first locks the host
+// row, so the sale that crosses the ₹5 lakh TDS threshold is charged the
+// catch-up exactly once; the FY gross it reads excludes this sale. Lock order
+// everywhere: event row (when the caller takes it), then host row, then
+// accounts.
+// ponytail: one lock per host; switch to a per-host advisory lock if a busy
+// host's sales ever contend.
+func stampTax(ctx context.Context, payoutTx repository.PayoutRepository, hostID uuid.UUID, in TaxInput) (TaxLines, error) {
+	if in.Settings.Enabled {
+		var err error
+		if err = payoutTx.LockHost(ctx, hostID); err != nil {
+			return TaxLines{}, fmt.Errorf("lock host: %w", err)
+		}
+		if in.Profile, err = payoutTx.GetTaxProfile(ctx, hostID); err != nil {
+			return TaxLines{}, fmt.Errorf("load tax profile: %w", err)
+		}
+		if in.FYGrossBeforeCents, err = payoutTx.FYGrossTicketCents(ctx, hostID, FinancialYearStart(time.Now())); err != nil {
+			return TaxLines{}, fmt.Errorf("FY gross: %w", err)
+		}
+	}
+	return ComputeBookingTax(in), nil
+}

@@ -110,7 +110,8 @@ type HostSale struct {
 	OccurrenceDate  time.Time
 	Quantity        int
 	AmountCents     int64
-	NetEarningCents *int64 // host's share — nil for free bookings
+	NetEarningCents *int64 // host's share before TCS/TDS — nil for free bookings
+	HostPayoutCents *int64 // what the host is paid: net less TCS/TDS (falls back to net for older bookings)
 	ServiceFeeCents *int64
 	Status          models.BookingStatus
 	CreatedAt       time.Time
@@ -146,7 +147,8 @@ func (r *postgresBookingRepository) ListHostSales(ctx context.Context, hostID uu
 			b.user_id,      u.name,         u.email,         u.avatar_url,
 			b.occurrence_date, b.quantity,
 			b.amount_cents, b.net_earning_cents, b.service_fee_cents,
-			b.status,       b.created_at,   b.cancelled_at
+			b.status,       b.created_at,   b.cancelled_at,
+			COALESCE(b.host_payout_cents, b.net_earning_cents)
 		FROM bookings b
 		JOIN events e ON e.id = b.event_id
 		JOIN users  u ON u.id = b.user_id
@@ -170,6 +172,7 @@ func (r *postgresBookingRepository) ListHostSales(ctx context.Context, hostID uu
 			&s.OccurrenceDate, &s.Quantity,
 			&amount, &s.NetEarningCents, &s.ServiceFeeCents,
 			&s.Status, &s.CreatedAt, &s.CancelledAt,
+			&s.HostPayoutCents,
 		); err != nil {
 			return nil, err
 		}

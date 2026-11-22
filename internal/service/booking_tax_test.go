@@ -30,6 +30,9 @@ func TestComputeBookingTax(t *testing.T) {
 		{"single 799, GSTIN, above 5L", 79900, 79900, 60000000, indivGST, on, 400, 80, 79420},
 		{"crossing booking takes catch-up", 200000, 200000, 49900000, indiv, on, 0, 50100, 149900},
 		{"exactly at threshold", 100000, 100000, 49900000, indiv, on, 0, 0, 100000},
+		// A ₹20 booking that crosses ₹5L carries ~₹500 of catch-up TDS: the host's
+		// share of this one booking goes negative (they owe it from other sales).
+		{"small crossing booking goes negative", 2000, 2000, 49999000, indiv, on, 0, 50001, -48001},
 		{"no profile treated as individual", 79900, 79900, 60000000, nil, on, 0, 80, 79820},
 		{"disabled", 79900, 79900, 0, companyGST, models.TaxSettings{}, 0, 0, 79900},
 	}

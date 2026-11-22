@@ -1124,7 +1124,7 @@ func (s *bookingService) performCancellation(ctx context.Context, booking *model
 
 	var hostID uuid.UUID
 	var hostAccount *models.Account
-	if netEarningCents > 0 {
+	if netEarningCents != 0 { // may be negative: see bookingReversalAmounts
 		evt, err := s.eventRepo.GetByID(ctx, booking.EventID)
 		if err != nil {
 			return nil, fmt.Errorf("cancel: load event: %w", err)

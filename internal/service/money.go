@@ -220,7 +220,10 @@ func reverseSplit(
 	}
 
 	// ── Reverse the host side ────────────────────────────────────────────
-	if s.NetEarningCents > 0 && s.HostAccountID != uuid.Nil {
+	// != 0, not > 0: a booking that crosses the ₹5 lakh TDS threshold can carry
+	// more catch-up TDS than its own value, leaving a negative host share that
+	// must be reversed too.
+	if s.NetEarningCents != 0 && s.HostAccountID != uuid.Nil {
 		cancelLedgerKey := "cancellation_debit_" + s.ReferenceID.String()
 		if _, err := ledgerTx.Create(ctx, &models.TransactionLedger{
 			ID:             uuid.New(),
@@ -237,7 +240,7 @@ func reverseSplit(
 			return fmt.Errorf("cancel: write host cancellation ledger entry: %w", err)
 		}
 	}
-	if s.NetEarningCents > 0 && s.HostID != uuid.Nil {
+	if s.NetEarningCents != 0 && s.HostID != uuid.Nil {
 		// Reduce both the pending clearance and the lifetime earnings total.
 		if err := payoutTx.ClearPending(ctx, s.HostID, s.NetEarningCents); err != nil {
 			return fmt.Errorf("cancel: clear host pending clearance: %w", err)

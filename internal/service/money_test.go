@@ -230,3 +230,45 @@ func TestReverseSplit_TaxedBooking_Balances(t *testing.T) {
 }
 
 func ptr64(v int64) *int64 { return &v }
+
+// The small booking that crosses ₹5 lakh carries more catch-up TDS than its
+// own value, so host_payout is negative. Its cancellation must still net to
+// zero on every account — the host side is reversed even when negative.
+func TestReverseSplit_NegativeHostPayout_Balances(t *testing.T) {
+	ctx := context.Background()
+	const ticket, tds = 2000, 50001
+	total, net := int64(ticket), int64(ticket)
+	payout := net - tds // -48001
+	b := &models.Booking{AmountCents: &total, ServiceFeeCents: ptr64(0), NetEarningCents: &net, TDSCents: tds, HostPayoutCents: &payout}
+
+	ledger, pay, accounts, payments := &fakeLedger{}, &fakePayout{}, &fakeAccounts{}, &fakePayments{}
+	userAcc, platformAcc, hostAcc, refID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	if err := creditSplit(ctx, ledger, pay, purchaseSplit{
+		UserID: uuid.New(), UserAccountID: userAcc, PlatformAccountID: platformAcc,
+		HostAccountID: hostAcc, HostID: uuid.New(), TotalCents: total, HostEarningCents: b.PayableCents(),
+		ReferenceID: refID, ReferenceType: "event", IdempotencyKey: "neg_1",
+	}); err != nil {
+		t.Fatalf("creditSplit: %v", err)
+	}
+	hostBack, platformBack := bookingReversalAmounts(b)
+	if err := reverseSplit(ctx, ledger, accounts, payments, pay, refundSplit{
+		UserID: uuid.New(), UserAccountID: userAcc, HostID: uuid.New(), HostAccountID: hostAcc,
+		PlatformAccount: &models.Account{ID: platformAcc}, AmountCents: total,
+		NetEarningCents: hostBack, ServiceFeeCents: platformBack,
+		ReferenceID: refID, ReferenceType: "booking", Noun: "booking",
+	}); err != nil {
+		t.Fatalf("reverseSplit: %v", err)
+	}
+	perAccount := map[uuid.UUID]int64{}
+	for _, e := range ledger.entries {
+		perAccount[e.AccountID] += e.AmountCents
+	}
+	for acc, sum := range perAccount {
+		if sum != 0 {
+			t.Errorf("account %s nets to %d after cancel, want 0", acc, sum)
+		}
+	}
+	if pay.earnings != 0 {
+		t.Errorf("host earnings = %d after cancel, want 0", pay.earnings)
+	}
+}

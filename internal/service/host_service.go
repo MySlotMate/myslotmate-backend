@@ -103,8 +103,12 @@ type HostApplicationRequest struct {
 // is_professional column itself stays admin-only).
 func (r HostApplicationRequest) answers() models.HostApplicationAnswers {
 	a := r.HostApplicationAnswers
-	if a.HostType == "" && r.IsProfessional != nil && *r.IsProfessional {
-		a.HostType = models.HostTypeProfessional
+	if a.HostType != models.HostTypeCommunity && a.HostType != models.HostTypeProfessional {
+		// Missing, or an unknown value in a draft (submit rejects it first).
+		a.HostType = models.HostTypeCommunity
+		if r.IsProfessional != nil && *r.IsProfessional {
+			a.HostType = models.HostTypeProfessional
+		}
 	}
 	return a.Normalized()
 }

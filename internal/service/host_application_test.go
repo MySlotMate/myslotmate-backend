@@ -127,3 +127,15 @@ func TestSaveApplication_OldProfessionalBuildKeepsTrack(t *testing.T) {
 		t.Fatalf("host_type=%q is_professional=%v", h.HostType, h.IsProfessional)
 	}
 }
+
+func TestSaveApplication_UnknownHostTypeInDraftFallsBack(t *testing.T) {
+	hosts := &fakeAppHosts{}
+	req := HostApplicationRequest{FirstName: "Asha"}
+	req.HostType = "vip"
+	if _, err := newAppService(hosts).SaveDraft(context.Background(), uuid.New(), req); err != nil {
+		t.Fatal(err)
+	}
+	if hosts.created.HostType != models.HostTypeCommunity {
+		t.Fatalf("host_type=%q would break the column check", hosts.created.HostType)
+	}
+}

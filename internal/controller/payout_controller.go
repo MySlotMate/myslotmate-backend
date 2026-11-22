@@ -634,3 +634,82 @@ func (c *PayoutController) GetEventEarnings(w http.ResponseWriter, r *http.Reque
 	}
 	RespondSuccess(w, http.StatusOK, rows)
 }
+
+// ── /hosts/{hostID}/tax-profile (the web frontend's contract) ───────────────
+//
+// Same data as /payouts/tax-profile, at the path and in the shape the web
+// TaxDetails component calls (frontend docs/backend-spec-boost-and-payouts.md):
+// always an object, nulls until a PAN is saved. The caller may only read or
+// write their own host.
+
+type hostTaxProfileResponse struct {
+	EntityType   string     `json:"entity_type"`
+	PANMasked    *string    `json:"pan_masked"`
+	PANName      *string    `json:"pan_name"`
+	GSTIN        *string    `json:"gstin"`
+	GSTStateCode *string    `json:"gst_state_code"`
+	UpdatedAt    *time.Time `json:"updated_at"`
+}
+
+func hostTaxProfileDTO(v *service.TaxProfileView) hostTaxProfileResponse {
+	if v == nil {
+		return hostTaxProfileResponse{EntityType: models.EntityIndividual}
+	}
+	out := hostTaxProfileResponse{EntityType: v.EntityType, PANMasked: &v.PANMasked, PANName: &v.PANName, GSTIN: v.GSTIN, UpdatedAt: &v.UpdatedAt}
+	if v.GSTIN != nil && len(*v.GSTIN) >= 2 {
+		state := (*v.GSTIN)[:2]
+		out.GSTStateCode = &state
+	}
+	return out
+}
+
+// RegisterHostRoutes is called inside the /hosts route.
+func (c *PayoutController) RegisterHostRoutes(r chi.Router) {
+	r.With(auth.RequireUser(c.firebaseAuth, c.jwtSecret)).Get("/{hostID}/tax-profile", c.GetHostTaxProfile)
+	r.With(auth.RequireUser(c.firebaseAuth, c.jwtSecret)).Put("/{hostID}/tax-profile", c.PutHostTaxProfile)
+}
+
+// ownHostFromPath returns the caller's host id when it matches {hostID}.
+func (c *PayoutController) ownHostFromPath(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return uuid.Nil, false
+	}
+	if chi.URLParam(r, "hostID") != hostID.String() {
+		RespondError(w, http.StatusForbidden, "you can only manage your own tax profile")
+		return uuid.Nil, false
+	}
+	return hostID, true
+}
+
+func (c *PayoutController) GetHostTaxProfile(w http.ResponseWriter, r *http.Request) {
+	hostID, ok := c.ownHostFromPath(w, r)
+	if !ok {
+		return
+	}
+	view, err := c.payoutService.GetTaxProfile(r.Context(), hostID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, hostTaxProfileDTO(view))
+}
+
+func (c *PayoutController) PutHostTaxProfile(w http.ResponseWriter, r *http.Request) {
+	hostID, ok := c.ownHostFromPath(w, r)
+	if !ok {
+		return
+	}
+	var in service.TaxProfileInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	view, err := c.payoutService.SaveTaxProfile(r.Context(), hostID, in)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, hostTaxProfileDTO(view))
+}

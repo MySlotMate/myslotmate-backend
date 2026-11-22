@@ -12,6 +12,7 @@ import (
 )
 
 type HostController struct {
+	extra       []hostRoutes
 	hostService service.HostService
 	profile     *ProfileController // optional: public events + albums under /hosts
 }
@@ -19,6 +20,16 @@ type HostController struct {
 // WithProfile mounts the public profile routes (events, albums) under /hosts.
 func (c *HostController) WithProfile(p *ProfileController) *HostController {
 	c.profile = p
+	return c
+}
+
+// hostRoutes is a controller that adds its own routes under /hosts.
+type hostRoutes interface{ RegisterHostRoutes(r chi.Router) }
+
+// WithHostRoutes adds another controller's /hosts/* routes (e.g. the payout
+// controller's /hosts/{hostID}/tax-profile) to this router.
+func (c *HostController) WithHostRoutes(extra hostRoutes) *HostController {
+	c.extra = append(c.extra, extra)
 	return c
 }
 
@@ -75,6 +86,9 @@ func (c *HostController) RegisterRoutes(r chi.Router) {
 		r.Get("/earnings/breakdown", c.GetEarningsBreakdown)
 		if c.profile != nil {
 			c.profile.RegisterHostRoutes(r)
+		}
+		for _, x := range c.extra {
+			x.RegisterHostRoutes(r)
 		}
 	})
 }

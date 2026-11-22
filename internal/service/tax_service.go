@@ -150,3 +150,8 @@ func (s *payoutService) AddTaxDeposit(ctx context.Context, d *repository.TaxDepo
 	}
 	return s.payoutRepo.CreateTaxDeposit(ctx, d)
 }
+
+// GetEventEarnings is the per-event earnings breakdown (gross, fee, TCS, TDS, earned).
+func (s *payoutService) GetEventEarnings(ctx context.Context, hostID uuid.UUID) ([]repository.EventEarnings, error) {
+	return s.payoutRepo.HostEventEarnings(ctx, hostID)
+}

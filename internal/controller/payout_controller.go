@@ -74,6 +74,7 @@ func (c *PayoutController) RegisterRoutes(r chi.Router) {
 		r.Get("/tax-profile", c.GetTaxProfile)
 		r.Put("/tax-profile", c.SaveTaxProfile)
 		r.Get("/tax-statements", c.GetTaxStatements)
+		r.Get("/event-earnings", c.GetEventEarnings)
 	})
 
 	// Co-hosting — sharing ONE event's earnings with another host.
@@ -617,4 +618,19 @@ func (c *PayoutController) GetTaxStatements(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	RespondSuccess(w, http.StatusOK, st)
+}
+
+// GetEventEarnings: per-event gross, deductions and net for the caller.
+func (c *PayoutController) GetEventEarnings(w http.ResponseWriter, r *http.Request) {
+	hostID, err := c.resolveHostID(r.Context())
+	if err != nil {
+		RespondError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	rows, err := c.payoutService.GetEventEarnings(r.Context(), hostID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, rows)
 }

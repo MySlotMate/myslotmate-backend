@@ -51,6 +51,7 @@ type PayoutRepository interface {
 	TaxReportRows(ctx context.Context, from, to time.Time) ([]TaxReportRow, error)
 	TaxLiability(ctx context.Context) (stamped, deposited int64, err error)
 	CreateTaxDeposit(ctx context.Context, d *TaxDeposit) error
+	HostEventEarnings(ctx context.Context, hostID uuid.UUID) ([]EventEarnings, error)
 
 	// Fraud Flags
 	HasActiveFraudFlag(ctx context.Context, userID uuid.UUID) (bool, error)

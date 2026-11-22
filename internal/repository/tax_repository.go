@@ -196,3 +196,44 @@ func (r *postgresPayoutRepository) CreateTaxDeposit(ctx context.Context, d *TaxD
 		d.Kind, d.Period, d.AmountCents, d.ChallanRef, d.DepositedAt, d.CreatedBy,
 	).Scan(&d.ID)
 }
+
+// EventEarnings is one event's line in the host's earnings breakdown (PRD
+// Earnings screen: gross sales, deductions, net). Live bookings only.
+type EventEarnings struct {
+	EventID     uuid.UUID `json:"event_id"`
+	EventTitle  string    `json:"event_title"`
+	Bookings    int64     `json:"bookings"`
+	GrossCents  int64     `json:"gross_cents"` // ticket sales after coupons, before any deduction
+	FeeCents    int64     `json:"fee_cents"`   // platform commission taken from the host's share (0 when the guest pays the fee)
+	TCSCents    int64     `json:"tcs_cents"`
+	TDSCents    int64     `json:"tds_cents"`
+	EarnedCents int64     `json:"earned_cents"` // what the host is paid for this event
+}
+
+// HostEventEarnings groups the host's live bookings by event, newest event first.
+func (r *postgresPayoutRepository) HostEventEarnings(ctx context.Context, hostID uuid.UUID) ([]EventEarnings, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT e.id, e.title, COUNT(*)::BIGINT,
+		       COALESCE(SUM(COALESCE(b.ticket_cents, b.amount_cents)), 0)::BIGINT,
+		       COALESCE(SUM(COALESCE(b.ticket_cents, b.amount_cents) - COALESCE(b.net_earning_cents, 0)), 0)::BIGINT,
+		       COALESCE(SUM(b.tcs_cents), 0)::BIGINT,
+		       COALESCE(SUM(b.tds_cents), 0)::BIGINT,
+		       COALESCE(SUM(COALESCE(b.host_payout_cents, b.net_earning_cents)), 0)::BIGINT
+		  FROM bookings b JOIN events e ON e.id = b.event_id
+		 WHERE e.host_id = $1 AND b.status = 'confirmed' AND COALESCE(b.amount_cents, 0) > 0
+		 GROUP BY e.id, e.title
+		 ORDER BY MAX(b.occurrence_date) DESC`, hostID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []EventEarnings{}
+	for rows.Next() {
+		var x EventEarnings
+		if err := rows.Scan(&x.EventID, &x.EventTitle, &x.Bookings, &x.GrossCents, &x.FeeCents, &x.TCSCents, &x.TDSCents, &x.EarnedCents); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}

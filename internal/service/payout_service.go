@@ -57,6 +57,7 @@ type PayoutService interface {
 	SaveTaxProfile(ctx context.Context, hostID uuid.UUID, in TaxProfileInput) (*TaxProfileView, error)
 	GetTaxStatements(ctx context.Context, hostID uuid.UUID, fy int) (*TaxStatements, error)
 	TaxReportCSV(ctx context.Context, month string) ([][]string, error)
+	GetEventEarnings(ctx context.Context, hostID uuid.UUID) ([]repository.EventEarnings, error)
 	AddTaxDeposit(ctx context.Context, d *repository.TaxDeposit) error
 
 	// Admin Platform Withdrawal

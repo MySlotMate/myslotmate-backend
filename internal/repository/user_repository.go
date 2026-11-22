@@ -13,6 +13,8 @@ import (
 // UserRepository defines the interface for user data access (Abstract Factory / Repository Pattern)
 // This interface allows swapping implementations (e.g., PostgreSQL, Mock for testing)
 type UserRepository interface {
+	// PhoneVerifiedAt is when the user last passed the phone OTP (nil if never).
+	PhoneVerifiedAt(ctx context.Context, id uuid.UUID) (*time.Time, error)
 	Create(ctx context.Context, user *models.User) error
 	GetByEmail(ctx context.Context, email string) (*models.User, error)
 	SetAuthUID(ctx context.Context, id uuid.UUID, authUID string) error
@@ -49,7 +51,7 @@ func (r *postgresUserRepository) UpdateOTP(ctx context.Context, id uuid.UUID, ot
 }
 
 func (r *postgresUserRepository) SetPhoneVerified(ctx context.Context, id uuid.UUID) error {
-	query := `UPDATE users SET is_phone_verified = true, updated_at = NOW() WHERE id = $1`
+	query := `UPDATE users SET is_phone_verified = true, phone_verified_at = NOW(), updated_at = NOW() WHERE id = $1`
 	_, err := r.db.ExecContext(ctx, query, id)
 	return err
 }
@@ -186,4 +188,14 @@ func (r *postgresUserRepository) ExistsByEmail(ctx context.Context, email string
 	query := `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`
 	err := r.db.QueryRowContext(ctx, query, email).Scan(&exists)
 	return exists, err
+}
+
+// PhoneVerifiedAt is when the user last passed the phone OTP (nil if never).
+func (r *postgresUserRepository) PhoneVerifiedAt(ctx context.Context, id uuid.UUID) (*time.Time, error) {
+	var t *time.Time
+	err := r.db.QueryRowContext(ctx, `SELECT phone_verified_at FROM users WHERE id = $1`, id).Scan(&t)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return t, err
 }

@@ -255,6 +255,9 @@ func (s *hostService) SubmitApplication(ctx context.Context, userID uuid.UUID, r
 	if err := ValidateHostApplication(req, bucketURL); err != nil {
 		return nil, err
 	}
+	if err := s.checkPhoneVerified(ctx, userID, req); err != nil {
+		return nil, err
+	}
 	return s.saveHostApplication(ctx, userID, req, models.HostApplicationPending)
 }
 
@@ -1223,4 +1226,24 @@ func applyApprovedTier(h *models.Host) {
 	if h.HostType == models.HostTypeProfessional {
 		h.IsProfessional = true
 	}
+}
+
+// phoneVerifyWindow is how recent the phone OTP must be for a submit.
+const phoneVerifyWindow = 15 * time.Minute
+
+// checkPhoneVerified enforces the spec's phone_not_verified rule: the form does
+// the OTP right before submitting. Like the other submit rules it skips bodies
+// without host_type (app builds older than the two-path form).
+func (s *hostService) checkPhoneVerified(ctx context.Context, userID uuid.UUID, req HostApplicationRequest) error {
+	if req.HostType == "" {
+		return nil
+	}
+	at, err := s.userRepo.PhoneVerifiedAt(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if at == nil || time.Since(*at) > phoneVerifyWindow {
+		return appErr("phone_not_verified", "Please verify your phone number first.")
+	}
+	return nil
 }

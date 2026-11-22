@@ -116,6 +116,18 @@ func TestSaveApplication_MissingHostTypeDefaultsCommunity(t *testing.T) {
 	}
 }
 
+func TestSaveApplication_OldProfessionalBuildKeepsTrack(t *testing.T) {
+	hosts := &fakeAppHosts{}
+	yes := true
+	req := HostApplicationRequest{FirstName: "Asha", IsProfessional: &yes}
+	if _, err := newAppService(hosts).SaveDraft(context.Background(), uuid.New(), req); err != nil {
+		t.Fatal(err)
+	}
+	if h := hosts.created; h.HostType != models.HostTypeProfessional || h.IsProfessional {
+		t.Fatalf("host_type=%q is_professional=%v", h.HostType, h.IsProfessional)
+	}
+}
+
 func deref(s *string) string {
 	if s == nil {
 		return ""

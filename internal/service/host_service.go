@@ -98,6 +98,17 @@ type HostApplicationRequest struct {
 	models.HostApplicationAnswers
 }
 
+// answers returns the answers to store. Builds without host_type mark the
+// professional track with is_professional, so that picks the path (the
+// is_professional column itself stays admin-only).
+func (r HostApplicationRequest) answers() models.HostApplicationAnswers {
+	a := r.HostApplicationAnswers
+	if a.HostType == "" && r.IsProfessional != nil && *r.IsProfessional {
+		a.HostType = models.HostTypeProfessional
+	}
+	return a.Normalized()
+}
+
 // HostProfileUpdateRequest maps to the Host Profile edit screen. Every field is
 // optional-by-pointer/slice: a nil pointer (or nil slice) means "leave
 // unchanged", so partial updates only touch the fields the caller sends. The
@@ -274,7 +285,7 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		existing.SocialWebsite = req.SocialWebsite
 		// Whole-struct copy: answers the new body omits are cleared, so
 		// switching path doesn't leave the other path's answers behind.
-		existing.HostApplicationAnswers = req.HostApplicationAnswers.Normalized()
+		existing.HostApplicationAnswers = req.answers()
 		// is_professional is not taken from the application: only an admin sets
 		// it (it decides who may run 1:1 sessions).
 		existing.ApplicationStatus = status
@@ -316,7 +327,7 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
-	newHost.HostApplicationAnswers = req.HostApplicationAnswers.Normalized()
+	newHost.HostApplicationAnswers = req.answers()
 	if status == models.HostApplicationPending {
 		newHost.SubmittedAt = &now
 	}

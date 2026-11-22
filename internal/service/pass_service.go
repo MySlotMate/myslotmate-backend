@@ -207,14 +207,19 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 	if err != nil {
 		return nil, err
 	}
+	// Host commission. Hosts use the platform free: the global default is 0%,
+	// and it is non-zero only when an admin sets a per-host override (the
+	// "Commission split" in the admin host profile, e.g. for a boosted host).
+	// Same rule as a ticket booking.
 	feeConfig = models.EffectiveFeeConfig(feeConfig, host.PlatformFeePercentage)
 	platformFee := totalAmount * int64(feeConfig.PlatformPercentage) / 100
 	hostEarning := totalAmount - platformFee
 
-	// Guest-paid booking fee, on top of the pass price — the same fee and the
-	// same rule a ticket booking uses (bookingService.CreateBooking): commission
-	// above is taken on the price only, the fee goes to the platform whole, and
-	// the buyer pays price + fee. Stored in PriceCents/ServiceFeeCents with the
+	// Guest-paid booking fee (the platform's revenue, e.g. 8%), on top of the
+	// pass price — the same fee and the same rule a ticket booking uses
+	// (bookingService.CreateBooking): any host commission above is taken on the
+	// price only, the fee goes to the platform whole, and the buyer pays
+	// price + fee. Stored in PriceCents/ServiceFeeCents with the
 	// rest, so a pass refund (CancelPass → reverseSplit) returns it too, exactly
 	// as a refunded ticket returns its fee.
 	bookingFeeConfig, err := s.payoutRepo.GetBookingFeeConfig(ctx)

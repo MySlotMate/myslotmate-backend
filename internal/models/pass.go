@@ -37,7 +37,8 @@ type UserPass struct {
 
 	// Money snapshot, like a booking's amount/service_fee/net_earning:
 	// PriceCents = what the guest paid (pass price + guest booking fee),
-	// ServiceFeeCents = what the platform kept (commission + booking fee),
+	// ServiceFeeCents = what the platform kept (guest booking fee + any host
+	// commission an admin set for this host; 0% by default),
 	// NetEarningCents = the host's share. Price = ServiceFee + NetEarning.
 	PriceCents      int64 `db:"price_cents" json:"price_cents"`
 	ServiceFeeCents int64 `db:"service_fee_cents" json:"service_fee_cents"`

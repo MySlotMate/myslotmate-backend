@@ -1,6 +1,10 @@
 package service
 
-import "testing"
+import (
+	"testing"
+
+	"myslotmate-backend/internal/models"
+)
 
 func TestSplitTCS(t *testing.T) {
 	cases := []struct {
@@ -63,5 +67,22 @@ func TestResolveStateCode(t *testing.T) {
 	}
 	if got := resolveStateCode(nil, nil); got != nil {
 		t.Errorf("no location leaves it alone: got %q", *got)
+	}
+}
+
+func TestTaxSettingsValid(t *testing.T) {
+	ok := models.TaxSettings{Enabled: true, TCSBps: 50, TDSBps: 10, TDSThresholdCents: 50000000}
+	if !ok.Valid() {
+		t.Error("PRD defaults should be valid")
+	}
+	for name, bad := range map[string]models.TaxSettings{
+		"tcs over 1%":   {TCSBps: 101, TDSBps: 10, TDSThresholdCents: 50000000},
+		"tds over 5%":   {TCSBps: 50, TDSBps: 501, TDSThresholdCents: 50000000},
+		"negative rate": {TCSBps: -1, TDSBps: 10, TDSThresholdCents: 50000000},
+		"no threshold":  {TCSBps: 50, TDSBps: 10, TDSThresholdCents: 0},
+	} {
+		if bad.Valid() {
+			t.Errorf("%s: want invalid", name)
+		}
 	}
 }

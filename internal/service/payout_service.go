@@ -1407,6 +1407,9 @@ func (s *payoutService) GetPlatformFeeConfig(ctx context.Context) (*models.Platf
 	return s.payoutRepo.GetPlatformFeeConfig(ctx)
 }
 
+// ErrInvalidTaxSettings rejects a malformed or out-of-bounds tax_settings value.
+var ErrInvalidTaxSettings = errors.New(`tax_settings must have tcs_bps 0-100, tds_bps 0-500 and a positive tds_threshold_cents`)
+
 // ErrInvalidBookingFee rejects a malformed or out-of-bounds booking_fee setting.
 var ErrInvalidBookingFee = errors.New(`booking_fee must be {"type": "flat"|"percentage", "amount_cents": 0-100000, "percentage": 0-100}`)
 
@@ -1427,6 +1430,15 @@ func (s *payoutService) SavePlatformSetting(ctx context.Context, key string, val
 		} else {
 			cfg.Type = models.BookingFeeFlat
 			cfg.Percentage = 0
+		}
+		normalized, _ := json.Marshal(cfg)
+		value = normalized
+	}
+	// Tax rates come out of every host's payout, so they are bounded too.
+	if key == models.TaxSettingsKey {
+		var cfg models.TaxSettings
+		if err := json.Unmarshal(value, &cfg); err != nil || !cfg.Valid() {
+			return ErrInvalidTaxSettings
 		}
 		normalized, _ := json.Marshal(cfg)
 		value = normalized

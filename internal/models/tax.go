@@ -41,3 +41,12 @@ type TaxProfile struct {
 	GSTStateCode *string   `db:"gst_state_code" json:"gst_state_code,omitempty"`
 	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
 }
+
+// Valid bounds the setting so a typo cannot take a large slice of every host's
+// payout: TCS at most 1% (statute is 0.5%; was 1% before Jul 2024), TDS at
+// most 5% (the no-PAN rate), and a positive threshold.
+func (t TaxSettings) Valid() bool {
+	return t.TCSBps >= 0 && t.TCSBps <= 100 &&
+		t.TDSBps >= 0 && t.TDSBps <= 500 &&
+		t.TDSThresholdCents > 0
+}

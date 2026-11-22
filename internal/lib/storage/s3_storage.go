@@ -96,7 +96,7 @@ func (s *UploadService) UploadFile(ctx context.Context, folder string, fh *multi
 		Key:          aws.String(objectKey),
 		Body:         body,
 		ContentType:  aws.String(contentType),
-		CacheControl: aws.String("public, max-age=86400"),
+		CacheControl: aws.String(cacheControl(folder)),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("upload to S3: %w", err)
@@ -208,6 +208,26 @@ func (s *UploadService) PublicURLPrefix() string {
 	return fmt.Sprintf("https://%s.s3.%s.amazonaws.com/", s.bucket, s.region)
 }
 
+// SignPrivateURL returns a 15-minute signed GET link for a URL in this
+// bucket's private documents folder (hosts/government-ids/). Any other URL,
+// including other buckets, comes back unchanged. Signing is local; no network.
+func (s *UploadService) SignPrivateURL(u string) string {
+	key, ok := strings.CutPrefix(u, s.PublicURLPrefix())
+	if !ok || !strings.HasPrefix(key, privateDocsFolder) || strings.Contains(key, "..") {
+		return u
+	}
+	req, err := s3.NewPresignClient(s.client).PresignGetObject(context.Background(),
+		&s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)},
+		s3.WithPresignExpires(15*time.Minute))
+	if err != nil {
+		return u
+	}
+	return req.URL
+}
+
+// privateDocsFolder mirrors models.PrivateDocsFolder (storage can't import models).
+const privateDocsFolder = "hosts/government-ids/"
+
 // DeleteOwnedObject deletes the object behind publicURL, but only when that URL
 // points into this bucket under folder/ — anything else (other folders, other
 // hosts) is left alone, since callers pass URLs that users supplied.
@@ -219,4 +239,12 @@ func (s *UploadService) DeleteOwnedObject(ctx context.Context, folder, publicURL
 	}
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
 	return err == nil, err
+}
+
+// cacheControl keeps private documents out of shared and browser caches.
+func cacheControl(folder string) string {
+	if strings.HasPrefix(folder+"/", privateDocsFolder) {
+		return "private, no-store"
+	}
+	return "public, max-age=86400"
 }

@@ -98,6 +98,7 @@ func scanHost(row interface {
 }
 
 func (r *postgresHostRepository) Create(ctx context.Context, host *models.Host) error {
+	unsignPrivateDocs(host)
 	query := `
 		INSERT INTO hosts (
 			id, user_id,
@@ -189,6 +190,7 @@ func (r *postgresHostRepository) ListScrapedWithInstagram(ctx context.Context) (
 }
 
 func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) error {
+	unsignPrivateDocs(host)
 	query := `
 		UPDATE hosts SET
 			first_name = $1, last_name = $2, phn_number = $3, city = $4, avatar_url = $5, tagline = $6, bio = $7,
@@ -338,4 +340,13 @@ func (r *postgresHostRepository) ListAutoPayoutHostIDs(ctx context.Context) ([]u
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// unsignPrivateDocs stores private document URLs without a presign query, in
+// case a client echoed back the signed link it was shown.
+func unsignPrivateDocs(h *models.Host) {
+	h.GovernmentIDURL = models.UnsignURL(h.GovernmentIDURL)
+	h.SelfieURL = models.UnsignURL(h.SelfieURL)
+	h.CertificateURL = models.UnsignURL(h.CertificateURL)
+	h.DegreeURL = models.UnsignURL(h.DegreeURL)
 }

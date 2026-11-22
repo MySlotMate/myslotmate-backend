@@ -36,9 +36,6 @@ func appErr(code, msg string) *ApplicationError { return &ApplicationError{Code:
 
 func blank(s *string) bool { return s == nil || strings.TrimSpace(*s) == "" }
 
-// privateDocsFolder is where ID, selfie, certificate and degree uploads live.
-const privateDocsFolder = "hosts/government-ids/"
-
 // ValidateHostApplication checks a submitted (not draft) application.
 // bucketURL is the upload bucket's public URL prefix ("https://<bucket>.s3.<region>.amazonaws.com/");
 // empty means S3 isn't configured and only https is checked.
@@ -84,7 +81,7 @@ func ValidateHostApplication(r HostApplicationRequest, bucketURL string) *Applic
 
 	badFile := appErr("invalid_file_url", "One of your files didn't upload properly. Please try again.")
 	for _, u := range []*string{r.GovernmentIDURL, r.SelfieURL, r.CertificateURL, r.DegreeURL} {
-		if !blank(u) && !uploadedTo(*u, bucketURL, privateDocsFolder) {
+		if !blank(u) && !uploadedTo(*u, bucketURL, models.PrivateDocsFolder) {
 			return badFile
 		}
 	}

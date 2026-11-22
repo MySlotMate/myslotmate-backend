@@ -101,6 +101,7 @@ func main() {
 		}
 		s3Client := s3.NewFromConfig(awsCfg)
 		uploadService = storage.NewUploadService(s3Client, cfg.S3.Bucket, cfg.S3.Region)
+		models.SignPrivateURL = uploadService.SignPrivateURL
 		log.Printf("✓ AWS S3 upload service enabled: bucket=%s, region=%s", cfg.S3.Bucket, cfg.S3.Region)
 	} else {
 		log.Println("✗ WARNING: AWS S3 not fully configured — file uploads DISABLED")

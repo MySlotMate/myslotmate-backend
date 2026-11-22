@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/service"
 
 	"github.com/go-chi/chi/v5"
@@ -114,6 +115,9 @@ type HostApplicationRequestBody struct {
 	SocialLinkedin  *string   `json:"social_linkedin,omitempty"`
 	SocialWebsite   *string   `json:"social_website,omitempty"`
 	IsProfessional  *bool     `json:"is_professional,omitempty"`
+
+	// Two-path form answers (host_type, community / professional fields).
+	models.HostApplicationAnswers
 }
 
 type HostProfileUpdateRequestBody struct {
@@ -282,6 +286,8 @@ func toHostApplicationRequest(req HostApplicationRequestBody) service.HostApplic
 		SocialLinkedin:  req.SocialLinkedin,
 		SocialWebsite:   req.SocialWebsite,
 		IsProfessional:  req.IsProfessional,
+
+		HostApplicationAnswers: req.HostApplicationAnswers,
 	}
 }
 

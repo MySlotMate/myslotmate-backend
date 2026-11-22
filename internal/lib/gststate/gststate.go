@@ -71,7 +71,17 @@ var pattern = func() *regexp.Regexp {
 func FromAddress(addr string) string {
 	matches := pattern.FindAllString(addr, -1)
 	if len(matches) == 0 {
+		if m := cityPattern.FindString(addr); m != "" {
+			return cities[strings.ToLower(m)]
+		}
 		return ""
 	}
 	return names[strings.ToLower(matches[len(matches)-1])]
 }
+
+// cities backs up addresses that name a city but no state. Only used when no
+// state name is found. ponytail: Guwahati/Dispur only (where hosts are); add
+// cities as venues spread.
+var cities = map[string]string{"guwahati": "18", "dispur": "18"}
+
+var cityPattern = regexp.MustCompile(`(?i)\b(guwahati|dispur)\b`)

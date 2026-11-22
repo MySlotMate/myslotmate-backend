@@ -151,7 +151,7 @@ func (c *AdminController) CreateHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	approved, err := c.hostService.ApproveApplication(r.Context(), host.ID)
+	approved, err := c.hostService.ApproveApplication(r.Context(), host.ID, false)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -196,7 +196,8 @@ func (c *AdminController) ApproveApplication(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	host, err := c.hostService.ApproveApplication(r.Context(), hostID)
+	// ?as=community approves a professional application as a community host.
+	host, err := c.hostService.ApproveApplication(r.Context(), hostID, r.URL.Query().Get("as") == "community")
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, err.Error())
 		return

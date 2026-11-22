@@ -29,7 +29,9 @@ type HostService interface {
 	GetApplicationStatus(ctx context.Context, userID uuid.UUID) (*models.Host, error)
 
 	// Admin — approve / reject applications
-	ApproveApplication(ctx context.Context, hostID uuid.UUID) (*models.Host, error)
+	// ApproveApplication approves a pending application. asCommunity approves a
+	// professional application as a community host instead.
+	ApproveApplication(ctx context.Context, hostID uuid.UUID, asCommunity bool) (*models.Host, error)
 	RejectApplication(ctx context.Context, hostID uuid.UUID, reason string) (*models.Host, error)
 	// SetApplicationStatus is an admin override that moves a host to any
 	// application status (used by the admin dashboard). It applies the same
@@ -297,6 +299,7 @@ func (s *hostService) saveHostApplication(ctx context.Context, userID uuid.UUID,
 		// Whole-struct copy: answers the new body omits are cleared, so
 		// switching path doesn't leave the other path's answers behind.
 		existing.HostApplicationAnswers = req.answers()
+		existing.RejectionReason = nil
 		// is_professional is not taken from the application: only an admin sets
 		// it (it decides who may run 1:1 sessions).
 		existing.ApplicationStatus = status
@@ -873,7 +876,7 @@ func (s *hostService) SetAutoPayout(ctx context.Context, hostID uuid.UUID, enabl
 
 // ── Admin: Approve / Reject ─────────────────────────────────────────────────
 
-func (s *hostService) ApproveApplication(ctx context.Context, hostID uuid.UUID) (*models.Host, error) {
+func (s *hostService) ApproveApplication(ctx context.Context, hostID uuid.UUID, asCommunity bool) (*models.Host, error) {
 	host, err := s.hostRepo.GetByID(ctx, hostID)
 	if err != nil {
 		return nil, err
@@ -890,6 +893,11 @@ func (s *hostService) ApproveApplication(ctx context.Context, hostID uuid.UUID) 
 	host.ApplicationStatus = models.HostApplicationApproved
 	host.ApprovedAt = &now
 	host.IsIdentityVerified = true
+	if asCommunity {
+		host.HostType = models.HostTypeCommunity
+		host.IsProfessional = false
+	}
+	applyApprovedTier(host)
 
 	if err := s.hostRepo.Update(ctx, host); err != nil {
 		return nil, err
@@ -919,6 +927,10 @@ func (s *hostService) RejectApplication(ctx context.Context, hostID uuid.UUID, r
 	now := time.Now()
 	host.ApplicationStatus = models.HostApplicationRejected
 	host.RejectedAt = &now
+	host.RejectionReason = nil
+	if r := strings.TrimSpace(reason); r != "" {
+		host.RejectionReason = &r
+	}
 
 	if err := s.hostRepo.Update(ctx, host); err != nil {
 		return nil, err
@@ -952,6 +964,7 @@ func (s *hostService) SetApplicationStatus(ctx context.Context, hostID uuid.UUID
 	case models.HostApplicationApproved:
 		host.ApprovedAt = &now
 		host.IsIdentityVerified = true
+		applyApprovedTier(host)
 	case models.HostApplicationRejected:
 		host.RejectedAt = &now
 	}
@@ -1200,4 +1213,14 @@ func (s *hostService) GetEarningsBreakdown(ctx context.Context, hostID uuid.UUID
 	result.AvailableBalanceCents = availableBalance
 
 	return result, nil
+}
+
+// applyApprovedTier: an approved professional application makes the host a
+// professional (1:1 sessions etc.). A community approval never clears an
+// is_professional an admin set by hand. There is no host_tier column;
+// is_professional is the tier.
+func applyApprovedTier(h *models.Host) {
+	if h.HostType == models.HostTypeProfessional {
+		h.IsProfessional = true
+	}
 }

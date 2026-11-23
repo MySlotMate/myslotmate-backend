@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"myslotmate-backend/internal/models"
 
@@ -239,4 +240,82 @@ func (r *BillingRepository) ListByUser(ctx context.Context, userID uuid.UUID, li
 		limit = 200
 	}
 	return r.list(ctx, `WHERE i.user_id = $1 ORDER BY i.issued_at DESC, i.number DESC LIMIT $2`, userID, limit)
+}
+
+// ReportRow is one group of document lines in a period.
+type ReportRow struct {
+	Kind          string
+	PlaceOfSupply string
+	SACCode       string
+	RateBps       int
+	Documents     int
+	Quantity      int64
+	TaxableCents  int64
+	CGSTCents     int64
+	SGSTCents     int64
+	IGSTCents     int64
+	TotalCents    int64
+}
+
+// ReportRows sums document lines issued in [from, to) by kind, place of supply,
+// SAC code and GST rate.
+func (r *BillingRepository) ReportRows(ctx context.Context, from, to time.Time) ([]ReportRow, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT i.kind, i.place_of_supply, l.sac_code, l.gst_rate_bps, COUNT(DISTINCT i.id), COALESCE(SUM(l.quantity), 0),
+		       SUM(l.taxable_cents), SUM(l.cgst_cents), SUM(l.sgst_cents), SUM(l.igst_cents), SUM(l.total_cents)
+		  FROM invoices i JOIN invoice_lines l ON l.invoice_id = i.id
+		 WHERE i.issued_at >= $1 AND i.issued_at < $2
+		 GROUP BY i.kind, i.place_of_supply, l.sac_code, l.gst_rate_bps
+		 ORDER BY i.kind, i.place_of_supply, l.sac_code, l.gst_rate_bps`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReportRow
+	for rows.Next() {
+		var x ReportRow
+		if err := rows.Scan(&x.Kind, &x.PlaceOfSupply, &x.SACCode, &x.RateBps, &x.Documents, &x.Quantity,
+			&x.TaxableCents, &x.CGSTCents, &x.SGSTCents, &x.IGSTCents, &x.TotalCents); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// SeriesRange is the first and last number used in one series in a period.
+type SeriesRange struct {
+	Kind  string
+	First string
+	Last  string
+	Count int
+}
+
+// SeriesRanges returns each series' number range in [from, to). Numbers are
+// zero-padded, so text order is number order within a series.
+func (r *BillingRepository) SeriesRanges(ctx context.Context, from, to time.Time) ([]SeriesRange, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT kind, MIN(number), MAX(number), COUNT(*)
+		  FROM invoices
+		 WHERE issued_at >= $1 AND issued_at < $2
+		 GROUP BY kind, split_part(number, '/', 1), fy
+		 ORDER BY kind DESC, MIN(number)`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SeriesRange
+	for rows.Next() {
+		var x SeriesRange
+		if err := rows.Scan(&x.Kind, &x.First, &x.Last, &x.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// Register returns every document issued in [from, to), in number order.
+func (r *BillingRepository) Register(ctx context.Context, from, to time.Time) ([]*models.Invoice, error) {
+	return r.list(ctx, `WHERE i.issued_at >= $1 AND i.issued_at < $2 ORDER BY i.kind DESC, i.number`, from, to)
 }

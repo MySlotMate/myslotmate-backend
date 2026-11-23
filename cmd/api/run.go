@@ -308,7 +308,8 @@ func main() {
 		}
 		return &notification.Attachment{Filename: name, ContentType: "application/pdf", Data: pdf}, nil
 	}
-	billingController := controller.NewBillingController(billingService, userRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
+	billingController := controller.NewBillingController(billingService, userRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail).
+		WithEmail(notification.NewEmailService(&cfg.SMTP).SendEmailWithAttachments)
 
 	// Initialize RAG components
 	ragEngine := rag.NewRAGEngine(

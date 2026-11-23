@@ -4,11 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	htmlpkg "html"
 	"net/http"
+	"net/mail"
 	"strconv"
+	"strings"
 	"time"
 
 	"myslotmate-backend/internal/auth"
+	"myslotmate-backend/internal/lib/notification"
 	"myslotmate-backend/internal/models"
 	"myslotmate-backend/internal/repository"
 	"myslotmate-backend/internal/service"
@@ -22,6 +26,7 @@ import (
 // paid, and to admins (with the billing settings).
 type BillingController struct {
 	billing      *service.BillingService
+	sendEmail    func(to, subject, htmlBody string, files ...notification.Attachment) error
 	userRepo     repository.UserRepository
 	firebaseAuth *fbauth.Client
 	jwtSecret    string
@@ -30,6 +35,12 @@ type BillingController struct {
 
 func NewBillingController(b *service.BillingService, ur repository.UserRepository, fa *fbauth.Client, jwtSecret, adminEmail string) *BillingController {
 	return &BillingController{billing: b, userRepo: ur, firebaseAuth: fa, jwtSecret: jwtSecret, adminEmail: adminEmail}
+}
+
+// WithEmail lets admins resend a receipt by email.
+func (c *BillingController) WithEmail(send func(to, subject, htmlBody string, files ...notification.Attachment) error) *BillingController {
+	c.sendEmail = send
+	return c
 }
 
 func (c *BillingController) RegisterRoutes(r chi.Router) {
@@ -47,6 +58,9 @@ func (c *BillingController) RegisterRoutes(r chi.Router) {
 		r.Get("/invoices", c.List)
 		r.Get("/invoices/{invoiceID}", c.Get)
 		r.Get("/invoices/{invoiceID}/pdf", c.AdminPDF)
+		r.Post("/invoices/{invoiceID}/resend", c.Resend)
+		// ?month=2026-11 (IST); &format=csv&table=b2cs|hsn|docs|register for a file.
+		r.Get("/reports/gst", c.GSTReport)
 	})
 }
 
@@ -255,4 +269,99 @@ func (c *BillingController) List(w http.ResponseWriter, r *http.Request) {
 		items = []*models.Invoice{}
 	}
 	RespondSuccess(w, http.StatusOK, map[string]any{"items": items, "total": total})
+}
+
+// Resend emails the document's PDF to the buyer, or to "email" in the body.
+func (c *BillingController) Resend(w http.ResponseWriter, r *http.Request) {
+	inv := c.load(w, r)
+	if inv == nil {
+		return
+	}
+	var body struct {
+		Email string `json:"email"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	to := strings.TrimSpace(body.Email)
+	if to == "" {
+		to = inv.BuyerEmail
+	}
+	if _, err := mail.ParseAddress(to); err != nil || strings.ContainsAny(to, "\r\n") {
+		RespondError(w, http.StatusBadRequest, "That email address doesn't look right.")
+		return
+	}
+	if c.sendEmail == nil {
+		RespondError(w, http.StatusServiceUnavailable, "Email isn't set up on this server.")
+		return
+	}
+	pdf, err := c.billing.PDF(r.Context(), inv)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, "Couldn't build the PDF: "+err.Error())
+		return
+	}
+	what := "fee receipt"
+	if inv.Kind == models.InvoiceKindCreditNote {
+		what = "refund note"
+	}
+	name := inv.BuyerName
+	if name == "" {
+		name = "there"
+	}
+	html := fmt.Sprintf(`<html><body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+<p>Hi %s,</p>
+<p>Here is your MySlotMate platform %s <strong>%s</strong>%s, attached as a PDF.</p>
+<p>Thank you for using MySlotMate!</p></body></html>`,
+		htmlpkg.EscapeString(name), what, htmlpkg.EscapeString(inv.Number), forEvent(inv.EventTitle))
+	err = c.sendEmail(to, fmt.Sprintf("Your MySlotMate %s %s", what, inv.Number), html,
+		notification.Attachment{Filename: service.InvoiceFilename(inv), ContentType: "application/pdf", Data: pdf})
+	if err != nil {
+		if strings.Contains(err.Error(), "SMTP configuration incomplete") {
+			RespondError(w, http.StatusServiceUnavailable, "Email isn't set up on this server.")
+			return
+		}
+		RespondError(w, http.StatusBadGateway, "Couldn't send the email: "+err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, map[string]string{"sent_to": to})
+}
+
+func forEvent(title string) string {
+	if title == "" {
+		return ""
+	}
+	return " for " + htmlpkg.EscapeString(title)
+}
+
+func (c *BillingController) GSTReport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	month := q.Get("month")
+	if q.Get("format") == "csv" {
+		table := q.Get("table")
+		b, err := c.billing.GSTReportCSV(r.Context(), month, table)
+		if err != nil {
+			var bad *service.ErrBillingSettings
+			if errors.As(err, &bad) {
+				RespondError(w, http.StatusBadRequest, bad.Message)
+				return
+			}
+			RespondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="gst-%s-%s.csv"`, table, month))
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
+		return
+	}
+	rep, err := c.billing.GSTReport(r.Context(), month)
+	if err != nil {
+		var bad *service.ErrBillingSettings
+		if errors.As(err, &bad) {
+			RespondError(w, http.StatusBadRequest, bad.Message)
+			return
+		}
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, rep)
 }

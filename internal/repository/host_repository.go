@@ -133,7 +133,7 @@ func (r *postgresHostRepository) Create(ctx context.Context, host *models.Host) 
 	_, err := r.db.ExecContext(ctx, query,
 		host.ID, host.UserID,
 		host.FirstName, host.LastName, host.PhnNumber, host.City, host.AvatarURL, host.Tagline, host.Bio,
-		host.ApplicationStatus, host.ExperienceDesc, pq.Array(host.Moods), host.Description, pq.Array(host.PreferredDays), host.GroupSize,
+		host.ApplicationStatus, textOrEmpty(host.ExperienceDesc), pq.Array(host.Moods), host.Description, pq.Array(host.PreferredDays), host.GroupSize,
 		host.GovernmentIDURL, host.SubmittedAt,
 		pq.Array(host.ExpertiseTags), host.SocialInstagram, host.SocialLinkedin, host.SocialWebsite,
 		host.IsProfessional, host.CreatedAt, host.UpdatedAt,
@@ -211,7 +211,7 @@ func (r *postgresHostRepository) Update(ctx context.Context, host *models.Host) 
 	a := host.HostApplicationAnswers.Normalized()
 	_, err := r.db.ExecContext(ctx, query,
 		host.FirstName, host.LastName, host.PhnNumber, host.City, host.AvatarURL, host.Tagline, host.Bio,
-		host.ApplicationStatus, host.ExperienceDesc, pq.Array(host.Moods), host.Description, pq.Array(host.PreferredDays), host.GroupSize,
+		host.ApplicationStatus, textOrEmpty(host.ExperienceDesc), pq.Array(host.Moods), host.Description, pq.Array(host.PreferredDays), host.GroupSize,
 		host.GovernmentIDURL, host.SubmittedAt, host.ApprovedAt, host.RejectedAt,
 		host.IsIdentityVerified, host.IsSuperHost, host.IsCommunityChamp,
 		pq.Array(host.ExpertiseTags), host.SocialInstagram, host.SocialLinkedin, host.SocialWebsite,
@@ -349,4 +349,13 @@ func unsignPrivateDocs(h *models.Host) {
 	h.SelfieURL = models.UnsignURL(h.SelfieURL)
 	h.CertificateURL = models.UnsignURL(h.CertificateURL)
 	h.DegreeURL = models.UnsignURL(h.DegreeURL)
+}
+
+// textOrEmpty writes nil as "" for NOT NULL text columns that clients may
+// leave out (experience_desc: the web form no longer sends its summary).
+func textOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

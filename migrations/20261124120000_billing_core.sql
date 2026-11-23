@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS billing_settings (
     credit_note_prefix  TEXT    NOT NULL DEFAULT 'C' CHECK (credit_note_prefix ~ '^[A-Z]{1,3}$'),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-INSERT INTO billing_settings (id) VALUES (true) ON CONFLICT DO NOTHING;
+-- The company is Moodverse Private Limited; MySlotMate is its brand. Invoices
+-- print the legal name, then "Trading as MySlotMate".
+INSERT INTO billing_settings (id, legal_name, trade_name)
+VALUES (true, 'Moodverse Private Limited', 'MySlotMate') ON CONFLICT DO NOTHING;
 
 -- The last number used per prefix and financial year ("2627" = FY 2026-27).
 -- Taken with an upsert inside the sale's transaction, so a rolled-back sale

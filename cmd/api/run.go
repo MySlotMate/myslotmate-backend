@@ -292,6 +292,16 @@ func main() {
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	experienceTemplateController := controller.NewExperienceTemplateController(experienceTemplateRepo)
 
+	// Billing core: fee invoices and credit notes. PDFs are archived to S3 when
+	// it is configured; otherwise they are rebuilt from the invoice row.
+	var invoiceStore service.InvoiceStore
+	if uploadService != nil {
+		invoiceStore = uploadService
+	}
+	billingService := service.NewBillingService(repository.NewBillingRepository(dbConn), invoiceStore)
+	go billingService.RunArchiver(ctx, 5*time.Minute)
+	billingController := controller.NewBillingController(billingService, userRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
+
 	// Initialize RAG components
 	ragEngine := rag.NewRAGEngine(
 		dbConn,
@@ -335,6 +345,7 @@ func main() {
 		experienceTemplateController,
 		ragChatCtrl,
 		ragDocCtrl,
+		billingController,
 	)
 
 	srv := &http.Server{

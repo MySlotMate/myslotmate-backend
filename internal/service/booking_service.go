@@ -737,6 +737,23 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	}
 	newBooking.PaymentID = &bookingPayment.ID
 
+	// ── Fee invoice (billing core) ───────────────────────────────────────
+	// The guest booking fee is what was paid on top of the tickets. Written in
+	// this transaction so a booking and its invoice number commit together.
+	if totalAmount > 0 {
+		tickets := "1 ticket"
+		if req.Quantity != 1 {
+			tickets = fmt.Sprintf("%d tickets", req.Quantity)
+		}
+		if _, err := issueFeeInvoice(ctx, tx, FeeSale{
+			SourceType: models.InvoiceSourceBooking, SourceID: newBooking.ID, UserID: userID,
+			EventID: &evt.ID, EventTitle: evt.Title, FeeCents: totalAmount - ticketCents, At: newBooking.CreatedAt,
+			Description: fmt.Sprintf("Platform fee for booking %s (%s)", evt.Title, tickets),
+		}); err != nil {
+			return nil, fmt.Errorf("booking: %w", err)
+		}
+	}
+
 	// ── Commit ───────────────────────────────────────────────────────────
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("booking: commit transaction: %w", err)
@@ -1267,6 +1284,11 @@ func (s *bookingService) performCancellation(ctx context.Context, booking *model
 			return nil, errors.New("booking has already been refunded")
 		}
 		return nil, err
+	}
+
+	// The fee is refunded with the booking, so its invoice gets a credit note.
+	if _, err := issueCreditNote(ctx, tx, models.InvoiceSourceBooking, booking.ID, now); err != nil {
+		return nil, fmt.Errorf("cancel: %w", err)
 	}
 
 	// ── Mark the booking ─────────────────────────────────────────────────

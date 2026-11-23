@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.11
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.4
 	github.com/go-chi/chi/v5 v5.1.0
+	github.com/go-pdf/fpdf v0.9.0
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/googollee/go-socket.io v1.7.0
@@ -19,6 +20,7 @@ require (
 	github.com/pinecone-io/go-pinecone/v4 v4.1.4
 	github.com/teambition/rrule-go v1.8.2
 	github.com/twilio/twilio-go v1.30.4
+	github.com/xuri/excelize/v2 v2.11.0
 	golang.org/x/time v0.11.0
 	google.golang.org/api v0.231.0
 	google.golang.org/protobuf v1.36.6
@@ -86,7 +88,6 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/tiendc/go-deepcopy v1.7.2 // indirect
 	github.com/xuri/efp v0.0.1 // indirect
-	github.com/xuri/excelize/v2 v2.11.0 // indirect
 	github.com/xuri/nfp v0.0.2-0.20250530014748-2ddeb826f9a9 // indirect
 	github.com/zeebo/errs v1.4.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect

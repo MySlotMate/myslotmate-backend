@@ -64,6 +64,8 @@ func NewRouter(
 	experienceTemplateCtrl *controller.ExperienceTemplateController,
 	ragChatCtrl *controller.RAGChatController,
 	ragDocCtrl *controller.RAGDocumentController,
+	// More controllers that register their own routes (e.g. billing).
+	extra ...interface{ RegisterRoutes(chi.Router) },
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -185,6 +187,10 @@ func NewRouter(
 
 	if experienceTemplateCtrl != nil {
 		experienceTemplateCtrl.RegisterRoutes(r)
+	}
+
+	for _, c := range extra {
+		c.RegisterRoutes(r)
 	}
 
 	if ragChatCtrl != nil {

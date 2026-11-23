@@ -215,7 +215,7 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 	platformFee := totalAmount * int64(feeConfig.PlatformPercentage) / 100
 	hostEarning := totalAmount - platformFee
 
-	// Guest-paid booking fee (the platform's revenue, e.g. 8%), on top of the
+	// Guest-paid booking fee (the platform's revenue, set in admin), on top of the
 	// pass price — the same fee and the same rule a ticket booking uses
 	// (bookingService.CreateBooking): any host commission above is taken on the
 	// price only, the fee goes to the platform whole, and the buyer pays

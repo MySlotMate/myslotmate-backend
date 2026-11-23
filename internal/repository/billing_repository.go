@@ -319,3 +319,114 @@ func (r *BillingRepository) SeriesRanges(ctx context.Context, from, to time.Time
 func (r *BillingRepository) Register(ctx context.Context, from, to time.Time) ([]*models.Invoice, error) {
 	return r.list(ctx, `WHERE i.issued_at >= $1 AND i.issued_at < $2 ORDER BY i.kind DESC, i.number`, from, to)
 }
+
+// StatementSale is one paid sale on a host's events, for the payout statement.
+type StatementSale struct {
+	Kind            string // "booking" or "pass"
+	ID              uuid.UUID
+	CreatedAt       time.Time
+	EventTitle      string
+	Quantity        int
+	TicketCents     int64
+	NetEarningCents int64 // ticket − MySlotMate commission (if any)
+	TCSCents        int64
+	TDSCents        int64
+	PayableCents    int64 // what the host is owed (net − TCS − TDS)
+	Status          string
+	Returned        bool // refunded / cancelled: no longer owed
+}
+
+// StatementSales lists the paid sales (bookings and passes) on the host's
+// events created in [from, to), oldest first.
+func (r *BillingRepository) StatementSales(ctx context.Context, hostID uuid.UUID, from, to time.Time) ([]StatementSale, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT s.kind, s.id, s.created_at, e.title, s.quantity, s.ticket, s.net, s.tcs_cents, s.tds_cents,
+		       COALESCE(s.host_payout_cents, s.net), s.status, s.returned
+		  FROM (
+		    SELECT 'booking' AS kind, id, event_id, created_at, quantity,
+		           COALESCE(ticket_cents, amount_cents, 0) AS ticket, COALESCE(net_earning_cents, 0) AS net,
+		           tcs_cents, tds_cents, host_payout_cents, status::text AS status,
+		           status IN ('refunded', 'cancelled') AS returned
+		      FROM bookings
+		    UNION ALL
+		    SELECT 'pass', id, event_id, created_at, 1,
+		           COALESCE(ticket_cents, price_cents, 0), net_earning_cents,
+		           tcs_cents, tds_cents, host_payout_cents, status::text,
+		           status = 'refunded'
+		      FROM user_passes
+		  ) s
+		  JOIN events e ON e.id = s.event_id
+		 WHERE e.host_id = $1 AND s.created_at >= $2 AND s.created_at < $3 AND s.ticket > 0
+		 ORDER BY s.created_at`, hostID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StatementSale
+	for rows.Next() {
+		var x StatementSale
+		if err := rows.Scan(&x.Kind, &x.ID, &x.CreatedAt, &x.EventTitle, &x.Quantity, &x.TicketCents, &x.NetEarningCents,
+			&x.TCSCents, &x.TDSCents, &x.PayableCents, &x.Status, &x.Returned); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// StatementPayout is money sent to the host's bank or UPI.
+type StatementPayout struct {
+	ID          uuid.UUID
+	CreatedAt   time.Time
+	AmountCents int64
+	Status      string
+	Reference   string
+}
+
+// StatementPayouts lists payouts and withdrawals from the host's account
+// requested in [from, to), oldest first. Failed and reversed ones are kept so
+// the statement explains them.
+func (r *BillingRepository) StatementPayouts(ctx context.Context, hostID uuid.UUID, from, to time.Time) ([]StatementPayout, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT p.id, p.created_at, p.amount_cents, p.status::text, COALESCE(p.display_reference, '')
+		  FROM payments p JOIN accounts a ON a.id = p.account_id
+		 WHERE a.owner_type = 'host' AND a.owner_id = $1
+		   AND p.type IN ('payout', 'withdrawal')
+		   AND p.created_at >= $2 AND p.created_at < $3
+		 ORDER BY p.created_at`, hostID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StatementPayout
+	for rows.Next() {
+		var x StatementPayout
+		if err := rows.Scan(&x.ID, &x.CreatedAt, &x.AmountCents, &x.Status, &x.Reference); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// StatementHost is the header of a host's statement.
+type StatementHost struct {
+	ID    uuid.UUID
+	Name  string
+	Email string
+	Phone string
+	PAN   *string
+	GSTIN *string
+}
+
+func (r *BillingRepository) StatementHost(ctx context.Context, hostID uuid.UUID) (*StatementHost, error) {
+	h := &StatementHost{ID: hostID}
+	err := r.db.QueryRowContext(ctx, `
+		SELECT trim(concat_ws(' ', h.first_name, h.last_name)), COALESCE(u.email, ''), COALESCE(h.phn_number, ''), p.pan, p.gstin
+		  FROM hosts h LEFT JOIN users u ON u.id = h.user_id LEFT JOIN host_tax_profiles p ON p.host_id = h.id
+		 WHERE h.id = $1`, hostID).Scan(&h.Name, &h.Email, &h.Phone, &h.PAN, &h.GSTIN)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return h, err
+}

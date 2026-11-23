@@ -27,6 +27,7 @@ import (
 type BillingController struct {
 	billing      *service.BillingService
 	sendEmail    func(to, subject, htmlBody string, files ...notification.Attachment) error
+	hostRepo     repository.HostRepository
 	userRepo     repository.UserRepository
 	firebaseAuth *fbauth.Client
 	jwtSecret    string
@@ -35,6 +36,12 @@ type BillingController struct {
 
 func NewBillingController(b *service.BillingService, ur repository.UserRepository, fa *fbauth.Client, jwtSecret, adminEmail string) *BillingController {
 	return &BillingController{billing: b, userRepo: ur, firebaseAuth: fa, jwtSecret: jwtSecret, adminEmail: adminEmail}
+}
+
+// WithHosts lets a host read their own payout statement.
+func (c *BillingController) WithHosts(hr repository.HostRepository) *BillingController {
+	c.hostRepo = hr
+	return c
 }
 
 // WithEmail lets admins resend a receipt by email.
@@ -50,6 +57,8 @@ func (c *BillingController) RegisterRoutes(r chi.Router) {
 		r.Get("/documents", c.ListMine)
 		r.Get("/documents/mine", c.ListAllMine)
 		r.Get("/documents/{invoiceID}/pdf", c.MyPDF)
+		// ?month=2026-11[&format=pdf]. A host gets their own; an admin passes host_id.
+		r.Get("/host-statement", c.HostStatement)
 	})
 	r.Route("/admin/billing", func(r chi.Router) {
 		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
@@ -364,4 +373,64 @@ func (c *BillingController) GSTReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	RespondSuccess(w, http.StatusOK, rep)
+}
+
+// HostStatement serves a host's monthly payout statement (JSON, or the PDF
+// with format=pdf). Hosts read their own only; admins name the host.
+func (c *BillingController) HostStatement(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var hostID uuid.UUID
+	if auth.IsAdminCaller(r) {
+		id, err := uuid.Parse(q.Get("host_id"))
+		if err != nil {
+			RespondError(w, http.StatusBadRequest, "host_id is required")
+			return
+		}
+		hostID = id
+	} else {
+		caller, err := c.callerUserID(r)
+		if err != nil {
+			RespondError(w, http.StatusUnauthorized, err.Error())
+			return
+		}
+		if c.hostRepo == nil {
+			RespondError(w, http.StatusForbidden, "Not a host")
+			return
+		}
+		h, err := c.hostRepo.GetByUserID(r.Context(), caller)
+		if err != nil || h == nil {
+			RespondError(w, http.StatusForbidden, "Not a host")
+			return
+		}
+		hostID = h.ID // host_id in the query is ignored for hosts
+	}
+	st, err := c.billing.HostStatement(r.Context(), hostID, q.Get("month"))
+	if err != nil {
+		var bad *service.ErrBillingSettings
+		if errors.As(err, &bad) {
+			status := http.StatusBadRequest
+			if err == service.ErrHostNotFound {
+				status = http.StatusNotFound
+			}
+			RespondError(w, status, bad.Message)
+			return
+		}
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if q.Get("format") != "pdf" {
+		RespondSuccess(w, http.StatusOK, st)
+		return
+	}
+	b, err := service.RenderHostStatementPDF(st)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, "Couldn't build the PDF: "+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, service.StatementFilename(st)))
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
 }

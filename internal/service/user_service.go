@@ -46,7 +46,7 @@ type UserService interface {
 	SendPhoneOTP(ctx context.Context, userID uuid.UUID) error
 	VerifyPhoneOTP(ctx context.Context, userID uuid.UUID, otp string) error
 	SendLoginOTP(ctx context.Context, phone string) (string, error)
-	VerifyLoginOTP(ctx context.Context, phone, sessionID, otp string) (*models.User, string, string, error)
+	VerifyLoginOTP(ctx context.Context, phone, sessionID, otp string, profile LoginProfile) (*models.User, string, string, error)
 	GetAttendeeProfile(ctx context.Context, userID uuid.UUID) (*models.AttendeeProfile, error)
 	UpsertAttendeeProfile(ctx context.Context, p *models.AttendeeProfile) (*models.AttendeeProfile, error)
 }
@@ -1000,21 +1000,86 @@ func (s *userService) GetByAuthUID(ctx context.Context, authUID string) (*models
 	return user, nil
 }
 
-// SendLoginOTP sends a verification code via 2Factor
+// LoginProfile is optional sign-up info sent with the login OTP — the
+// marketing-page guest checkout collects name and email up front. It only
+// fills gaps: a new user is created with it, and an existing user gets just
+// the fields still empty (a placeholder name, a missing email). Nothing an
+// account already has is overwritten.
+type LoginProfile struct {
+	Name  string
+	Email string
+}
+
+// SendLoginOTP sends a verification code and returns a session id bound to
+// this phone (see otp_session.go).
 func (s *userService) SendLoginOTP(ctx context.Context, phone string) (string, error) {
 	if phone == "" {
 		return "", errors.New("phone number is required")
 	}
-	return s.otpClient.SendOTP(ctx, phone)
+	if s.jwtSecret == "" {
+		return "", errors.New("login is not configured")
+	}
+	phone, ok := loginPhone(phone)
+	if !ok {
+		return "", errors.New("phone must be a 10-digit Indian mobile number")
+	}
+	verificationID, err := s.otpClient.SendOTP(ctx, phone)
+	if err != nil {
+		return "", err
+	}
+	return sealOTPSession(s.jwtSecret, verificationID, phone), nil
+}
+
+// freeEmail returns the normalized email when no account uses it yet, else "".
+// A taken email is dropped rather than failing the login.
+func (s *userService) freeEmail(ctx context.Context, email string) string {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" || !strings.Contains(email, "@") {
+		return ""
+	}
+	if taken, err := s.repo.ExistsByEmail(ctx, email); err != nil || taken {
+		return ""
+	}
+	return email
+}
+
+// fillProfileGaps replaces the "Guest User" placeholder name and sets an email
+// where none exists. Best effort: a failure never blocks the login.
+func (s *userService) fillProfileGaps(ctx context.Context, user *models.User, profile LoginProfile) {
+	if name := strings.TrimSpace(profile.Name); name != "" && (user.Name == "" || user.Name == "Guest User") {
+		user.Name = name
+		user.UpdatedAt = time.Now()
+		if err := s.repo.Update(ctx, user); err != nil {
+			fmt.Printf("[LOGIN] could not set name for %s: %v\n", user.ID, err)
+		}
+	}
+	if user.Email == "" {
+		if email := s.freeEmail(ctx, profile.Email); email != "" {
+			if err := s.repo.FillEmail(ctx, user.ID, email); err != nil {
+				fmt.Printf("[LOGIN] could not set email for %s: %v\n", user.ID, err)
+			} else {
+				user.Email = email
+			}
+		}
+	}
 }
 
 // VerifyLoginOTP verifies OTP and returns signed token, Firebase Custom Token, and user profile
-func (s *userService) VerifyLoginOTP(ctx context.Context, phone string, sessionID string, otp string) (*models.User, string, string, error) {
+func (s *userService) VerifyLoginOTP(ctx context.Context, phone string, sessionID string, otp string, profile LoginProfile) (*models.User, string, string, error) {
 	if phone == "" || sessionID == "" || otp == "" {
 		return nil, "", "", errors.New("phone, session_id, and otp are required")
 	}
 
-	verified, err := s.otpClient.VerifyOTP(ctx, sessionID, otp)
+	// The session must have been issued for this exact phone; otherwise an OTP
+	// read on one phone could log in as another.
+	verificationID, ok := openOTPSession(s.jwtSecret, sessionID, phone)
+	if !ok || s.jwtSecret == "" {
+		return nil, "", "", errors.New("invalid or expired OTP")
+	}
+	// From here on use the one normalized form the session was sealed with.
+	phone, _ = loginPhone(phone)
+
+	verified, err := s.otpClient.VerifyOTP(ctx, verificationID, otp)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -1030,12 +1095,16 @@ func (s *userService) VerifyLoginOTP(ctx context.Context, phone string, sessionI
 
 	if user == nil {
 		// Create a new user
+		name := strings.TrimSpace(profile.Name)
+		if name == "" {
+			name = "Guest User"
+		}
 		user = &models.User{
 			ID:              uuid.New(),
 			AuthUID:         placeholderAuthUIDPrefix + phone,
-			Name:            "Guest User",
+			Name:            name,
 			PhnNumber:       phone,
-			Email:           "",
+			Email:           s.freeEmail(ctx, profile.Email),
 			IsVerified:      false,
 			IsPhoneVerified: true,
 			CreatedAt:       time.Now(),
@@ -1051,10 +1120,13 @@ func (s *userService) VerifyLoginOTP(ctx context.Context, phone string, sessionI
 		s.workerPool.Submit(func() {
 			fmt.Printf("User registered via phone: %s (ID: %s)\n", user.PhnNumber, user.ID)
 		})
-	} else if !user.IsPhoneVerified {
-		if err := s.repo.SetPhoneVerified(ctx, user.ID); err == nil {
-			user.IsPhoneVerified = true
+	} else {
+		if !user.IsPhoneVerified {
+			if err := s.repo.SetPhoneVerified(ctx, user.ID); err == nil {
+				user.IsPhoneVerified = true
+			}
 		}
+		s.fillProfileGaps(ctx, user, profile)
 	}
 
 	// Issue user token (signed JWT) valid for 30 days

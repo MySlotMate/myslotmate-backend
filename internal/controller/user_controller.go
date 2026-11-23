@@ -654,6 +654,10 @@ type VerifyLoginOTPRequest struct {
 	Phone     string `json:"phone"`
 	SessionID string `json:"session_id"`
 	OTP       string `json:"otp"`
+	// Optional; the marketing-page guest checkout sends them. They only fill
+	// an account's empty fields (see service.LoginProfile).
+	Name  string `json:"name,omitempty"`
+	Email string `json:"email,omitempty"`
 }
 
 // SendLoginOTP handles initiating OTP flow via 2Factor
@@ -694,7 +698,7 @@ func (c *UserController) VerifyLoginOTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	user, token, firebaseCustomToken, err := c.userService.VerifyLoginOTP(r.Context(), req.Phone, req.SessionID, req.OTP)
+	user, token, firebaseCustomToken, err := c.userService.VerifyLoginOTP(r.Context(), req.Phone, req.SessionID, req.OTP, service.LoginProfile{Name: req.Name, Email: req.Email})
 	if err != nil {
 		RespondError(w, http.StatusUnauthorized, err.Error())
 		return

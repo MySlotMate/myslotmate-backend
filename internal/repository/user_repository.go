@@ -26,6 +26,8 @@ type UserRepository interface {
 	GetByAuthUID(ctx context.Context, authUID string) (*models.User, error)
 	UpdateOTP(ctx context.Context, id uuid.UUID, otp string, expiresAt time.Time) error
 	SetPhoneVerified(ctx context.Context, id uuid.UUID) error
+	// FillEmail sets the email only when the user has none yet.
+	FillEmail(ctx context.Context, id uuid.UUID, email string) error
 }
 
 // postgresUserRepository is the concrete implementation
@@ -47,6 +49,13 @@ func (r *postgresUserRepository) SetVerified(ctx context.Context, id uuid.UUID) 
 func (r *postgresUserRepository) UpdateOTP(ctx context.Context, id uuid.UUID, otp string, expiresAt time.Time) error {
 	query := `UPDATE users SET otp = $2, otp_expires_at = $3, updated_at = NOW() WHERE id = $1`
 	_, err := r.db.ExecContext(ctx, query, id, otp, expiresAt)
+	return err
+}
+
+func (r *postgresUserRepository) FillEmail(ctx context.Context, id uuid.UUID, email string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET email = $2, updated_at = NOW() WHERE id = $1 AND (email IS NULL OR email = '')`,
+		id, email)
 	return err
 }
 

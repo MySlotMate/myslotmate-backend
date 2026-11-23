@@ -759,6 +759,18 @@ func (s *BoostService) Campaign(ctx context.Context, admin string, boostID uuid.
 	return s.repo.GetByID(ctx, boostID)
 }
 
+// HostInvited reports whether the host is in the Boost pilot.
+func (s *BoostService) HostInvited(ctx context.Context, hostID uuid.UUID) (bool, error) {
+	acc, err := s.repo.HostAccess(ctx, hostID)
+	if err != nil {
+		return false, err
+	}
+	if acc == nil {
+		return false, boostErr(http.StatusNotFound, "host_not_found", "Host not found.")
+	}
+	return acc.Invited, nil
+}
+
 // SetHostInvited adds or removes a host from the Boost pilot.
 func (s *BoostService) SetHostInvited(ctx context.Context, hostID uuid.UUID, invited bool) error {
 	return s.repo.SetInvited(ctx, hostID, invited)

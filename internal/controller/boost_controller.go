@@ -48,6 +48,7 @@ func (c *BoostController) RegisterRoutes(r chi.Router) {
 		r.Patch("/{boostID}/campaign", c.Campaign)
 	})
 	r.With(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret)).Put("/admin/boost-invites/{hostID}", c.SetInvite)
+	r.With(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret)).Get("/admin/boost-invites/{hostID}", c.GetInvite)
 }
 
 // RegisterHostRoutes adds /hosts/{hostID}/payout-eligibility to the hosts router.
@@ -336,4 +337,17 @@ func (c *BoostController) SetInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	RespondSuccess(w, http.StatusOK, map[string]any{"host_id": hostID, "invited": body.Invited})
+}
+
+func (c *BoostController) GetInvite(w http.ResponseWriter, r *http.Request) {
+	hostID, ok := pathUUID(w, r, "hostID")
+	if !ok {
+		return
+	}
+	invited, err := c.boosts.HostInvited(r.Context(), hostID)
+	if err != nil {
+		respondBoost(w, err)
+		return
+	}
+	RespondSuccess(w, http.StatusOK, map[string]any{"host_id": hostID, "invited": invited})
 }

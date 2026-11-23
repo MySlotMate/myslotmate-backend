@@ -304,6 +304,31 @@ func (s *BillingService) ForSource(ctx context.Context, sourceType string, sourc
 	return s.repo.ListBySource(ctx, sourceType, sourceID)
 }
 
+// ForUser returns a guest's own invoices and credit notes, newest first.
+func (s *BillingService) ForUser(ctx context.Context, userID uuid.UUID) ([]*models.Invoice, error) {
+	return s.repo.ListByUser(ctx, userID, 200)
+}
+
+// InvoiceFilename is the download name of a document, e.g.
+// "MySlotMate-F-2627-0000001.pdf".
+func InvoiceFilename(inv *models.Invoice) string {
+	return "MySlotMate-" + strings.ReplaceAll(inv.Number, "/", "-") + ".pdf"
+}
+
+// BookingReceipt returns the fee invoice PDF of a booking, or nil (no error)
+// when the booking has none (free, or billing was off when it was made).
+func (s *BillingService) BookingReceipt(ctx context.Context, bookingID uuid.UUID) (string, []byte, error) {
+	inv, err := s.repo.GetBySource(ctx, models.InvoiceSourceBooking, bookingID, models.InvoiceKindInvoice)
+	if err != nil || inv == nil {
+		return "", nil, err
+	}
+	b, err := s.PDF(ctx, inv)
+	if err != nil {
+		return "", nil, err
+	}
+	return InvoiceFilename(inv), b, nil
+}
+
 // PDF returns the invoice PDF: the archived copy when there is one, else a
 // fresh render (archived on the way out when S3 is configured).
 func (s *BillingService) PDF(ctx context.Context, inv *models.Invoice) ([]byte, error) {

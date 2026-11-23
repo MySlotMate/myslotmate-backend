@@ -232,3 +232,11 @@ func (r *BillingRepository) SetPDFKey(ctx context.Context, id uuid.UUID, key str
 	_, err := r.db.ExecContext(ctx, `UPDATE invoices SET pdf_key = $2 WHERE id = $1 AND pdf_key IS NULL`, id, key)
 	return err
 }
+
+// ListByUser returns a guest's invoices and credit notes, newest first.
+func (r *BillingRepository) ListByUser(ctx context.Context, userID uuid.UUID, limit int) ([]*models.Invoice, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	return r.list(ctx, `WHERE i.user_id = $1 ORDER BY i.issued_at DESC, i.number DESC LIMIT $2`, userID, limit)
+}

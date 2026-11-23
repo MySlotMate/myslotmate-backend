@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"myslotmate-backend/internal/auth"
@@ -38,6 +37,7 @@ func (c *BillingController) RegisterRoutes(r chi.Router) {
 		r.Use(auth.RequireUserOrAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 		// ?source_type=booking|pass&source_id=<uuid>: the sale's invoice and credit note.
 		r.Get("/documents", c.ListMine)
+		r.Get("/documents/mine", c.ListAllMine)
 		r.Get("/documents/{invoiceID}/pdf", c.MyPDF)
 	})
 	r.Route("/admin/billing", func(r chi.Router) {
@@ -96,6 +96,29 @@ func (c *BillingController) ListMine(w http.ResponseWriter, r *http.Request) {
 	RespondSuccess(w, http.StatusOK, out)
 }
 
+// ListAllMine returns every invoice and credit note of the signed-in guest
+// (My Journey's fee receipts). An admin caller gets an empty list.
+func (c *BillingController) ListAllMine(w http.ResponseWriter, r *http.Request) {
+	caller, err := c.callerUserID(r)
+	if err != nil {
+		RespondError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if caller == uuid.Nil {
+		RespondSuccess(w, http.StatusOK, []*models.Invoice{})
+		return
+	}
+	docs, err := c.billing.ForUser(r.Context(), caller)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if docs == nil {
+		docs = []*models.Invoice{}
+	}
+	RespondSuccess(w, http.StatusOK, docs)
+}
+
 func (c *BillingController) MyPDF(w http.ResponseWriter, r *http.Request) {
 	caller, err := c.callerUserID(r)
 	if err != nil {
@@ -149,7 +172,7 @@ func (c *BillingController) writePDF(w http.ResponseWriter, r *http.Request, inv
 		RespondError(w, http.StatusInternalServerError, "Couldn't build the PDF: "+err.Error())
 		return
 	}
-	name := "MySlotMate-" + strings.ReplaceAll(inv.Number, "/", "-") + ".pdf"
+	name := service.InvoiceFilename(inv)
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, name))
 	w.Header().Set("Cache-Control", "private, no-store")

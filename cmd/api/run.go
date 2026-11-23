@@ -300,6 +300,14 @@ func main() {
 	}
 	billingService := service.NewBillingService(repository.NewBillingRepository(dbConn), invoiceStore)
 	go billingService.RunArchiver(ctx, 5*time.Minute)
+	// The booking confirmation email attaches the fee receipt.
+	notification.BookingFeeReceipt = func(ctx context.Context, bookingID uuid.UUID) (*notification.Attachment, error) {
+		name, pdf, err := billingService.BookingReceipt(ctx, bookingID)
+		if err != nil || pdf == nil {
+			return nil, err
+		}
+		return &notification.Attachment{Filename: name, ContentType: "application/pdf", Data: pdf}, nil
+	}
 	billingController := controller.NewBillingController(billingService, userRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
 
 	// Initialize RAG components

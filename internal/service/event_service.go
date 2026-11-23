@@ -476,6 +476,9 @@ func normalizePasskey(p *string) *string {
 func tierInputsToModels(inputs []PriceTierInput) []models.EventPriceTier {
 	tiers := make([]models.EventPriceTier, 0, len(inputs))
 	for i, in := range inputs {
+		if in.Capacity != nil && *in.Capacity <= 0 {
+			in.Capacity = nil // 0 or less means "no own limit", never "unsellable"
+		}
 		tiers = append(tiers, models.EventPriceTier{
 			Name:       in.Name,
 			PriceCents: in.PriceCents,
@@ -1302,7 +1305,49 @@ func (s *eventService) GetEventAvailability(ctx context.Context, eventID uuid.UU
 		return nil, err
 	}
 
-	return s.calculateAvailabilityInternal(evt, occupancy[eventID], false), nil
+	avail := s.calculateAvailabilityInternal(evt, occupancy[eventID], false)
+	if err := s.addTierRemaining(ctx, eventID, avail); err != nil {
+		return nil, err
+	}
+	return avail, nil
+}
+
+// addTierRemaining fills TierRemaining on each session for ticket types that
+// have their own seat limit, so the tickets page can show "3 left" / "Sold out".
+func (s *eventService) addTierRemaining(ctx context.Context, eventID uuid.UUID, avail []models.OccurrenceAvailability) error {
+	if len(avail) == 0 || s.tierRepo == nil {
+		return nil
+	}
+	tiers, err := s.tierRepo.ListByEventID(ctx, eventID)
+	if err != nil {
+		return err
+	}
+	limited := tiers[:0:0]
+	for _, t := range tiers {
+		if t.Capacity != nil {
+			limited = append(limited, t)
+		}
+	}
+	if len(limited) == 0 {
+		return nil
+	}
+	booked, err := s.tierRepo.BookedByTier(ctx, eventID, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		return err
+	}
+	for i := range avail {
+		key := avail[i].Date.UTC().Format(time.RFC3339)
+		m := make(map[string]int, len(limited))
+		for _, t := range limited {
+			left := *t.Capacity - booked[repository.TierKey(t.Name)][key]
+			if left < 0 {
+				left = 0
+			}
+			m[t.ID.String()] = left
+		}
+		avail[i].TierRemaining = m
+	}
+	return nil
 }
 
 // GetEventOccurrencesForHost returns the full upcoming occurrence list for the host's

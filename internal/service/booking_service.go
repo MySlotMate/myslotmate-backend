@@ -588,9 +588,14 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		if tierCapacity.Valid {
 			var tierBooked int
 			if err := tx.QueryRowContext(ctx,
-				`SELECT COALESCE(SUM(quantity), 0) FROM bookings
-				  WHERE event_id = $1 AND occurrence_date = $2 AND price_tier_id = $3
-				    AND status IN ('pending', 'confirmed')`,
+				// Counted by ticket name, so seats booked on an older row of
+				// the same ticket type (before the host edited the event) count.
+				`SELECT COALESCE(SUM(b.quantity), 0)
+				   FROM bookings b
+				   JOIN event_price_tiers t ON t.id = b.price_tier_id
+				  WHERE b.event_id = $1 AND b.occurrence_date = $2
+				    AND b.status IN ('pending', 'confirmed')
+				    AND lower(trim(t.name)) = (SELECT lower(trim(name)) FROM event_price_tiers WHERE id = $3)`,
 				req.EventID, occurrenceDate, *priceTierID,
 			).Scan(&tierBooked); err != nil {
 				return nil, fmt.Errorf("booking: count ticket seats: %w", err)

@@ -37,28 +37,28 @@ const (
 
 // Booking links a user to an event with quantity and status.
 type Booking struct {
-	ID                               uuid.UUID     `db:"id" json:"id"`
-	EventID                          uuid.UUID     `db:"event_id" json:"event_id"`
-	UserID                           uuid.UUID     `db:"user_id" json:"user_id"`
-	OccurrenceDate                   time.Time     `db:"occurrence_date" json:"occurrence_date"`
-	Quantity                         int           `db:"quantity" json:"quantity"`
-	Status                           BookingStatus `db:"status" json:"status"`
-	PaymentID                        *uuid.UUID    `db:"payment_id" json:"payment_id,omitempty"`
-	IdempotencyKey                   *string       `db:"idempotency_key" json:"idempotency_key,omitempty"`
-	AmountCents                      *int64        `db:"amount_cents" json:"amount_cents,omitempty"`             // total booking value
-	ServiceFeeCents                  *int64        `db:"service_fee_cents" json:"service_fee_cents,omitempty"`   // platform fee (15%)
-	NetEarningCents                  *int64        `db:"net_earning_cents" json:"net_earning_cents,omitempty"`   // host net (85%)
-	PriceTierID                      *uuid.UUID    `db:"price_tier_id" json:"price_tier_id,omitempty"`           // chosen ticket tier (nil = single-price/free)
-	UnitPriceCents                   *int64        `db:"unit_price_cents" json:"unit_price_cents,omitempty"`     // per-ticket price snapshot at booking time
-	CouponID                         *uuid.UUID    `db:"coupon_id" json:"coupon_id,omitempty"`                   // comp coupon used to waive this booking (nil = none)
-	Source                           string        `db:"source" json:"source"`                                   // online | walk_in | bulk_import — see BookingSource* above
-	ImportJobID                      *uuid.UUID    `db:"import_job_id" json:"import_job_id,omitempty"`           // the bulk upload that created this booking (nil otherwise)
-	PassID                           *uuid.UUID    `db:"pass_id" json:"pass_id,omitempty"`                       // monthly pass that covered this seat (nil = ordinary booking)
-	CheckedInCount                   int           `db:"checked_in_count" json:"checked_in_count"`               // guests admitted so far; a group may arrive in waves, capped at Quantity
-	LastCheckedInAt                  *time.Time    `db:"last_checked_in_at" json:"last_checked_in_at,omitempty"` // most recent door scan
-	CreatedAt                        time.Time     `db:"created_at" json:"created_at"`
-	UpdatedAt                        time.Time     `db:"updated_at" json:"updated_at"`
-	CancelledAt                      *time.Time    `db:"cancelled_at" json:"cancelled_at,omitempty"`
+	ID              uuid.UUID     `db:"id" json:"id"`
+	EventID         uuid.UUID     `db:"event_id" json:"event_id"`
+	UserID          uuid.UUID     `db:"user_id" json:"user_id"`
+	OccurrenceDate  time.Time     `db:"occurrence_date" json:"occurrence_date"`
+	Quantity        int           `db:"quantity" json:"quantity"`
+	Status          BookingStatus `db:"status" json:"status"`
+	PaymentID       *uuid.UUID    `db:"payment_id" json:"payment_id,omitempty"`
+	IdempotencyKey  *string       `db:"idempotency_key" json:"idempotency_key,omitempty"`
+	AmountCents     *int64        `db:"amount_cents" json:"amount_cents,omitempty"`             // total booking value
+	ServiceFeeCents *int64        `db:"service_fee_cents" json:"service_fee_cents,omitempty"`   // platform fee (15%)
+	NetEarningCents *int64        `db:"net_earning_cents" json:"net_earning_cents,omitempty"`   // host net (85%)
+	PriceTierID     *uuid.UUID    `db:"price_tier_id" json:"price_tier_id,omitempty"`           // chosen ticket tier (nil = single-price/free)
+	UnitPriceCents  *int64        `db:"unit_price_cents" json:"unit_price_cents,omitempty"`     // per-ticket price snapshot at booking time
+	CouponID        *uuid.UUID    `db:"coupon_id" json:"coupon_id,omitempty"`                   // comp coupon used to waive this booking (nil = none)
+	Source          string        `db:"source" json:"source"`                                   // online | walk_in | bulk_import — see BookingSource* above
+	ImportJobID     *uuid.UUID    `db:"import_job_id" json:"import_job_id,omitempty"`           // the bulk upload that created this booking (nil otherwise)
+	PassID          *uuid.UUID    `db:"pass_id" json:"pass_id,omitempty"`                       // monthly pass that covered this seat (nil = ordinary booking)
+	CheckedInCount  int           `db:"checked_in_count" json:"checked_in_count"`               // guests admitted so far; a group may arrive in waves, capped at Quantity
+	LastCheckedInAt *time.Time    `db:"last_checked_in_at" json:"last_checked_in_at,omitempty"` // most recent door scan
+	CreatedAt       time.Time     `db:"created_at" json:"created_at"`
+	UpdatedAt       time.Time     `db:"updated_at" json:"updated_at"`
+	CancelledAt     *time.Time    `db:"cancelled_at" json:"cancelled_at,omitempty"`
 	// Statutory tax lines (Marketing Boost v2 Phase 1). HostPayoutCents nil =
 	// booked before tax stamping; use NetEarningCents (see PayableCents).
 	TicketCents         *int64 `db:"ticket_cents" json:"ticket_cents,omitempty"`
@@ -67,12 +67,19 @@ type Booking struct {
 	TCSInterstate       bool   `db:"tcs_interstate" json:"-"`
 	TDSCents            int64  `db:"tds_cents" json:"tds_cents"`
 	HostPayoutCents     *int64 `db:"host_payout_cents" json:"host_payout_cents,omitempty"`
-	NotificationSentWhatsapp         bool          `db:"notification_sent_whatsapp" json:"notification_sent_whatsapp"`
-	ReminderNotificationSentEmail    bool          `db:"reminder_notification_sent_email" json:"reminder_notification_sent_email"`
-	ReminderNotificationSentAt       *time.Time    `db:"reminder_notification_sent_at" json:"reminder_notification_sent_at,omitempty"`
-	NotificationSentEmail            bool          `db:"notification_sent_email" json:"notification_sent_email"`
-	ReminderNotificationSentWhatsapp bool          `db:"reminder_notification_sent_whatsapp" json:"reminder_notification_sent_whatsapp"`
-	ReminderWhatsappSentAt           *time.Time    `db:"reminder_whatsapp_sent_at" json:"reminder_whatsapp_sent_at,omitempty"`
+	// Event Boost: set when the booking was paid while the event's Boost was
+	// live. The commission is taken from the host's share; its GST (18/118)
+	// is internal only.
+	BoostID                          *uuid.UUID `db:"boost_id" json:"boost_id,omitempty"`
+	BoostRateBps                     *int       `db:"boost_rate_bps" json:"boost_rate_bps,omitempty"`
+	BoostCommissionCents             int64      `db:"boost_commission_cents" json:"boost_commission_cents"`
+	BoostCommissionGSTCents          int64      `db:"boost_commission_gst_cents" json:"-"`
+	NotificationSentWhatsapp         bool       `db:"notification_sent_whatsapp" json:"notification_sent_whatsapp"`
+	ReminderNotificationSentEmail    bool       `db:"reminder_notification_sent_email" json:"reminder_notification_sent_email"`
+	ReminderNotificationSentAt       *time.Time `db:"reminder_notification_sent_at" json:"reminder_notification_sent_at,omitempty"`
+	NotificationSentEmail            bool       `db:"notification_sent_email" json:"notification_sent_email"`
+	ReminderNotificationSentWhatsapp bool       `db:"reminder_notification_sent_whatsapp" json:"reminder_notification_sent_whatsapp"`
+	ReminderWhatsappSentAt           *time.Time `db:"reminder_whatsapp_sent_at" json:"reminder_whatsapp_sent_at,omitempty"`
 }
 
 // PayableCents is what the host is owed for this booking: host_payout_cents

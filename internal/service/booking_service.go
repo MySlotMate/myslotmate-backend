@@ -356,6 +356,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	//    - no tiers → legacy single event price.
 	var pricePerTicketCents int64 = 0
 	var priceTierID *uuid.UUID
+	var priceTierName *string // matches the ticket type to an Event Boost rate
 	if req.PriceTierID != nil {
 		tier, err := s.tierRepo.GetByID(ctx, *req.PriceTierID)
 		if err != nil {
@@ -366,6 +367,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		}
 		pricePerTicketCents = tier.PriceCents
 		priceTierID = &tier.ID
+		priceTierName = &tier.Name
 	} else {
 		tiers, err := s.tierRepo.ListByEventID(ctx, evt.ID)
 		if err != nil {
@@ -485,6 +487,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	var host *models.Host
 	var platformFee, hostEarning, ticketCents int64
 	var appliedPlatformPercentage int
+	var boostCharge *BoostCharge // set when the event's Event Boost is live
 	var taxSettings *models.TaxSettings
 	if totalAmount > 0 {
 		platformAccount, err = s.accountRepo.GetByOwner(ctx, models.AccountOwnerPlatform, uuid.Nil)
@@ -509,6 +512,22 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		platformFee = totalAmount * int64(feeConfig.PlatformPercentage) / 100
 		hostEarning = totalAmount - platformFee
 		ticketCents = totalAmount // post-coupon ticket value, before the guest fee
+
+		// Event Boost: while the event's Boost is live, its commission replaces
+		// the per-host / global commission above for this booking. Guest
+		// self-serve ticket bookings only: never passes, walk-ins or imports.
+		if bookingSource(req.Source) == models.BookingSourceOnline && req.PassID == nil {
+			charge, err := boostCommissionFor(ctx, s.db, evt.ID, priceTierName, pricePerTicketCents, totalAmount, time.Now())
+			if err != nil {
+				return nil, fmt.Errorf("booking: event boost: %w", err)
+			}
+			if charge != nil {
+				boostCharge = charge
+				appliedPlatformPercentage = charge.RateBps / 100
+				platformFee = charge.CommissionCents
+				hostEarning = totalAmount - platformFee
+			}
+		}
 
 		if taxSettings, err = s.payoutRepo.GetTaxSettings(ctx); err != nil {
 			return nil, fmt.Errorf("load tax settings: %w", err)
@@ -677,6 +696,12 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		PassID:          req.PassID,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
+	}
+	if boostCharge != nil {
+		newBooking.BoostID = &boostCharge.BoostID
+		newBooking.BoostRateBps = &boostCharge.RateBps
+		newBooking.BoostCommissionCents = boostCharge.CommissionCents
+		newBooking.BoostCommissionGSTCents = boostCharge.GSTCents
 	}
 	if totalAmount > 0 {
 		newBooking.TicketCents = &ticketCents

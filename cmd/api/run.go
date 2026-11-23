@@ -266,6 +266,13 @@ func main() {
 	inboxController := controller.NewInboxController(inboxService)
 	payoutController := controller.NewPayoutController(payoutService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	hostController.WithHostRoutes(payoutController)
+
+	// Event Boost: host requests, admin proposals, commission while live.
+	boostService := service.NewBoostService(dbConn, eventRepo, eventPriceTierRepo, hostRepo, userRepo, eventService,
+		boostMailer{notification.NewEmailService(&cfg.SMTP)}, cfg.AdminEmail, cfg.FrontendBaseURL)
+	go boostService.RunAutoEnd(ctx, 15*time.Minute)
+	boostController := controller.NewBoostController(boostService, userRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
+	hostController.WithHostRoutes(boostController)
 	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider)
 	supportController := controller.NewSupportController(supportService, uploadService)
 	uploadController := controller.NewUploadController(uploadService).
@@ -356,6 +363,7 @@ func main() {
 		ragChatCtrl,
 		ragDocCtrl,
 		billingController,
+		boostController,
 	)
 
 	srv := &http.Server{
@@ -573,4 +581,11 @@ func initializeReminderScheduler(
 
 	log.Printf("✓ Reminder scheduler initialized (check every %d min, remind %d min before)", checkIntervalMins, reminderMinsBefore)
 	return scheduler
+}
+
+// boostMailer sends Event Boost emails over SMTP.
+type boostMailer struct{ svc *notification.EmailService }
+
+func (m boostMailer) BoostEmail(to, subject, htmlBody string) error {
+	return m.svc.SendEmail(to, subject, htmlBody)
 }

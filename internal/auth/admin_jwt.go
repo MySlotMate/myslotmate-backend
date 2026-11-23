@@ -17,6 +17,11 @@ const (
 	ContextKeyAdminRole contextKey = "admin_role"
 
 	adminTokenIssuer = "myslotmate-admin"
+
+	// RoleMarketing is a restricted admin-panel role: it may only use the
+	// Event marketing section (see OrStaff). ParseAdminToken rejects it, so
+	// every other admin route is closed to it without per-route changes.
+	RoleMarketing = "marketing"
 )
 
 // ErrAdminSecretMissing is returned when no signing secret is configured.
@@ -60,8 +65,26 @@ func IssueAdminToken(secret, username, name, role string, ttl time.Duration) (st
 	return signed, expiresAt, nil
 }
 
-// ParseAdminToken validates a signed admin token and returns its claims.
+// ErrRoleNotAllowed is returned when a valid staff token's role may not use
+// full-admin routes.
+var ErrRoleNotAllowed = errors.New("this account may not access admin routes")
+
+// ParseAdminToken validates a FULL admin session token. Restricted staff roles
+// (RoleMarketing) are rejected — every admin middleware goes through here.
 func ParseAdminToken(secret, tokenString string) (*AdminClaims, error) {
+	claims, err := ParseStaffToken(secret, tokenString)
+	if err != nil {
+		return nil, err
+	}
+	if claims.Role == RoleMarketing {
+		return nil, ErrRoleNotAllowed
+	}
+	return claims, nil
+}
+
+// ParseStaffToken validates any admin-panel session token, including
+// restricted roles. Only routes meant for those roles should use it (OrStaff).
+func ParseStaffToken(secret, tokenString string) (*AdminClaims, error) {
 	if secret == "" {
 		return nil, ErrAdminSecretMissing
 	}
@@ -110,6 +133,29 @@ func RequireAdminToken(secret string) func(http.Handler) http.Handler {
 			// Mirror into the shared email key so handlers that read it work uniformly.
 			ctx = context.WithValue(ctx, ContextKeyEmail, claims.Username)
 			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// OrStaff lets any valid admin-panel session (full admin or a restricted role
+// such as RoleMarketing) straight through, and sends every other request to
+// gate. Use it only on routes a restricted role is allowed to use.
+func OrStaff(secret string, gate func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		gated := gate(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			header := r.Header.Get("Authorization")
+			token := strings.TrimPrefix(header, "Bearer ")
+			if secret != "" && token != "" && token != header {
+				if claims, err := ParseStaffToken(secret, token); err == nil {
+					ctx := context.WithValue(r.Context(), ContextKeyAdminUser, claims.Username)
+					ctx = context.WithValue(ctx, ContextKeyAdminRole, claims.Role)
+					ctx = context.WithValue(ctx, ContextKeyEmail, claims.Username)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
+			gated.ServeHTTP(w, r)
 		})
 	}
 }

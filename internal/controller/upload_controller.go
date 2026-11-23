@@ -42,7 +42,8 @@ func (c *UploadController) RegisterRoutes(r chi.Router) {
 		// caller has to be someone. RequireUserOrAdmin, not RequireUser: the
 		// admin dashboard uploads host avatars and blog covers here, and its
 		// session token carries a different issuer that RequireUser rejects.
-		r.Use(auth.RequireUserOrAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
+		// OrStaff: the marketing login uploads landing-page images here too.
+		r.Use(auth.OrStaff(c.jwtSecret, auth.RequireUserOrAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret)))
 		r.Post("/", c.Upload) // generic: POST /upload?folder=events/covers
 	})
 }

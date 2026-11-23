@@ -24,6 +24,28 @@ type AdminAuthController struct {
 	// displayName / role are returned to the dashboard for UI rendering.
 	displayName string
 	role        string
+
+	// Optional restricted marketing login (auth.RoleMarketing); empty = off.
+	marketingUsername string
+	marketingPassword string
+}
+
+// WithMarketingLogin enables the restricted marketing login. Both values must
+// be non-empty, otherwise it stays disabled.
+func (c *AdminAuthController) WithMarketingLogin(username, password string) *AdminAuthController {
+	if strings.TrimSpace(username) != "" && password != "" {
+		c.marketingUsername, c.marketingPassword = strings.TrimSpace(username), password
+	}
+	return c
+}
+
+func credentialsMatch(gotUser, gotPass, wantUser, wantPass string) bool {
+	if wantUser == "" || wantPass == "" {
+		return false
+	}
+	userMatch := subtle.ConstantTimeCompare([]byte(strings.ToLower(gotUser)), []byte(strings.ToLower(wantUser))) == 1
+	passMatch := subtle.ConstantTimeCompare([]byte(gotPass), []byte(wantPass)) == 1
+	return userMatch && passMatch
 }
 
 // NewAdminAuthController builds the controller from the configured static
@@ -48,7 +70,8 @@ func (c *AdminAuthController) RegisterRoutes(r chi.Router) {
 
 		// Token introspection — used by the dashboard to validate a stored
 		// session on load.
-		r.With(auth.RequireAdminToken(c.jwtSecret)).Get("/me", c.Me)
+		// Any staff session, so the marketing login can restore itself too.
+		r.With(auth.OrStaff(c.jwtSecret, auth.RequireAdminToken(c.jwtSecret))).Get("/me", c.Me)
 	})
 }
 
@@ -90,15 +113,20 @@ func (c *AdminAuthController) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	username := strings.TrimSpace(req.Username)
-	userMatch := subtle.ConstantTimeCompare([]byte(strings.ToLower(username)), []byte(strings.ToLower(c.username))) == 1
-	passMatch := subtle.ConstantTimeCompare([]byte(req.Password), []byte(c.password)) == 1
+	isAdmin := credentialsMatch(username, req.Password, c.username, c.password)
+	isMarketing := !isAdmin && credentialsMatch(username, req.Password, c.marketingUsername, c.marketingPassword)
 
-	if !userMatch || !passMatch {
+	if !isAdmin && !isMarketing {
 		RespondError(w, http.StatusUnauthorized, "Invalid administrator credentials")
 		return
 	}
 
-	token, expiresAt, err := auth.IssueAdminToken(c.jwtSecret, c.username, c.displayName, c.role, c.tokenTTL)
+	user := c.userPayload()
+	if isMarketing {
+		user = adminUserPayload{Username: c.marketingUsername, Name: "Marketing", Role: auth.RoleMarketing, Scope: "Event marketing"}
+	}
+
+	token, expiresAt, err := auth.IssueAdminToken(c.jwtSecret, user.Username, user.Name, user.Role, c.tokenTTL)
 	if err != nil {
 		RespondError(w, http.StatusInternalServerError, "Failed to issue session token")
 		return
@@ -107,12 +135,17 @@ func (c *AdminAuthController) Login(w http.ResponseWriter, r *http.Request) {
 	RespondSuccess(w, http.StatusOK, adminLoginResponse{
 		Token:     token,
 		ExpiresAt: expiresAt,
-		User:      c.userPayload(),
+		User:      user,
 	})
 }
 
 // Me returns the current admin identity for a valid session token.
 func (c *AdminAuthController) Me(w http.ResponseWriter, r *http.Request) {
+	if role, _ := r.Context().Value(auth.ContextKeyAdminRole).(string); role == auth.RoleMarketing {
+		username, _ := r.Context().Value(auth.ContextKeyAdminUser).(string)
+		RespondSuccess(w, http.StatusOK, adminUserPayload{Username: username, Name: "Marketing", Role: auth.RoleMarketing, Scope: "Event marketing"})
+		return
+	}
 	RespondSuccess(w, http.StatusOK, c.userPayload())
 }
 

@@ -127,6 +127,7 @@ func main() {
 	savedExpRepo := repository.NewSavedExperienceRepository(dbConn)
 	ledgerRepo := repository.NewTransactionLedgerRepository(dbConn)
 	blogRepo := repository.NewBlogRepository(dbConn)
+	marketingPageRepo := repository.NewMarketingPageRepository(dbConn)
 	experienceTemplateRepo := repository.NewExperienceTemplateRepository(dbConn)
 	eventPriceTierRepo := repository.NewEventPriceTierRepository(dbConn)
 	attendeeProfileRepo := repository.NewAttendeeProfileRepository(dbConn)
@@ -276,7 +277,7 @@ func main() {
 		cfg.AdminAuth.Password,
 		cfg.AdminAuth.JWTSecret,
 		cfg.AdminAuth.TokenTTL,
-	)
+	).WithMarketingLogin(cfg.AdminAuth.MarketingUsername, cfg.AdminAuth.MarketingPassword)
 	adminDirectoryController := controller.NewAdminDirectoryController(
 		adminDirectoryRepo,
 		hostRepo,
@@ -289,6 +290,7 @@ func main() {
 	)
 	adminDashboardController := controller.NewAdminDashboardController(adminDirectoryRepo, cfg.AdminAuth.JWTSecret)
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
+	marketingPageController := controller.NewMarketingPageController(marketingPageRepo, eventRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	experienceTemplateController := controller.NewExperienceTemplateController(experienceTemplateRepo)
 
 	// Initialize RAG components
@@ -331,6 +333,7 @@ func main() {
 		adminDirectoryController,
 		adminDashboardController,
 		blogController,
+		marketingPageController,
 		experienceTemplateController,
 		ragChatCtrl,
 		ragDocCtrl,

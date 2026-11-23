@@ -135,6 +135,11 @@ type AdminAuthConfig struct {
 	Password  string        // ADMIN_PASSWORD — static login password
 	JWTSecret string        // ADMIN_JWT_SECRET — HMAC secret used to sign session tokens
 	TokenTTL  time.Duration // session token lifetime (from ADMIN_TOKEN_TTL_HOURS)
+
+	// Optional second login for the marketing team: it can only use the
+	// admin panel's Event marketing section. Disabled unless both are set.
+	MarketingUsername string // MARKETING_USERNAME
+	MarketingPassword string // MARKETING_PASSWORD
 }
 
 type Config struct {
@@ -173,6 +178,9 @@ func Load() (*Config, error) {
 			Password:  getEnv("ADMIN_PASSWORD", "Admin@12345"),
 			JWTSecret: getEnv("ADMIN_JWT_SECRET", "dev-insecure-admin-secret-change-me"),
 			TokenTTL:  time.Duration(parseEnvInt("ADMIN_TOKEN_TTL_HOURS", 12)) * time.Hour,
+
+			MarketingUsername: getEnv("MARKETING_USERNAME", ""),
+			MarketingPassword: getEnv("MARKETING_PASSWORD", ""),
 		},
 		Firebase: FirebaseConfig{
 			CredentialsFile: getEnv("FIREBASE_CREDENTIALS_FILE", "config/firebase-service-account.json"),

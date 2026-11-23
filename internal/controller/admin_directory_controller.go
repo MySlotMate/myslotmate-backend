@@ -63,6 +63,11 @@ func NewAdminDirectoryController(
 }
 
 func (c *AdminDirectoryController) RegisterRoutes(r chi.Router) {
+	// The Event marketing section's event picker. Same data as
+	// /admin/directory/events, but also open to the marketing login, which
+	// every /admin/directory route below rejects.
+	r.With(auth.OrStaff(c.jwtSecret, auth.RequireAdminToken(c.jwtSecret))).Get("/marketing-pages/events", c.ListEvents)
+
 	r.Route("/admin/directory", func(r chi.Router) {
 		r.Use(auth.RequireAdminToken(c.jwtSecret))
 		r.Get("/users", c.ListUsers)

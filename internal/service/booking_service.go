@@ -573,6 +573,34 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		return nil, errors.New("event capacity exceeded")
 	}
 
+	// ── Seat limit per ticket type (e.g. only 10 Gold seats) ──────────────
+	// Checked under the same event-row lock, so two guests cannot both take
+	// the last Gold seat. The limit is per session, like event capacity, and
+	// re-read here so a host changing it mid-flight is respected. A pass
+	// booking that records the basic ticket counts against that ticket too.
+	if priceTierID != nil {
+		var tierCapacity sql.NullInt64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT capacity FROM event_price_tiers WHERE id = $1`, *priceTierID,
+		).Scan(&tierCapacity); err != nil {
+			return nil, fmt.Errorf("booking: read ticket limit: %w", err)
+		}
+		if tierCapacity.Valid {
+			var tierBooked int
+			if err := tx.QueryRowContext(ctx,
+				`SELECT COALESCE(SUM(quantity), 0) FROM bookings
+				  WHERE event_id = $1 AND occurrence_date = $2 AND price_tier_id = $3
+				    AND status IN ('pending', 'confirmed')`,
+				req.EventID, occurrenceDate, *priceTierID,
+			).Scan(&tierBooked); err != nil {
+				return nil, fmt.Errorf("booking: count ticket seats: %w", err)
+			}
+			if int64(tierBooked+req.Quantity) > tierCapacity.Int64 {
+				return nil, errors.New("this ticket type is sold out")
+			}
+		}
+	}
+
 	// ── Statutory tax lines (TCS/TDS) ────────────────────────────────────
 	// Lock order: event row (above), then host row (inside stampTax).
 	var tax TaxLines

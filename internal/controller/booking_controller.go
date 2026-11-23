@@ -278,7 +278,7 @@ func (c *BookingController) CreateBooking(w http.ResponseWriter, r *http.Request
 			RespondError(w, http.StatusPaymentRequired, err.Error())
 		case "event not found", "user account not found":
 			RespondError(w, http.StatusNotFound, err.Error())
-		case "event capacity exceeded", "this coupon has reached its redemption limit":
+		case "event capacity exceeded", "this ticket type is sold out", "this coupon has reached its redemption limit":
 			RespondError(w, http.StatusConflict, err.Error())
 		case "your account is blocked due to suspicious activity":
 			RespondError(w, http.StatusForbidden, err.Error())

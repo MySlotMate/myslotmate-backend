@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,28 +109,11 @@ func (p *CashfreeProvider) RegisterBeneficiary(ctx context.Context, req Transfer
 	}
 	p.cfg.BearerToken = token
 
-	// 2) Beneficiary id must be provided by caller (payout method ID from service layer)
-	beneID := strings.TrimSpace(req.BeneID)
-	if beneID == "" {
-		return fmt.Errorf("beneficiary ID is required (must be provided by service layer)")
-	}
-
-	fmt.Printf("[CASHFREE] RegisterBeneficiary: checking beneficiary ID: %s\n", beneID)
-
-	// Try to create/register the beneficiary
-	// If it already exists, Cashfree will handle the idempotency and return an error we can safely ignore
-	fmt.Printf("[CASHFREE] RegisterBeneficiary: attempting to create beneficiary (idempotent operation)...\n")
-	if err := p.addBeneficiary(ctx, beneID, req); err != nil {
-		// Check if error is "already exists" - if so, continue (idempotent)
-		if strings.Contains(err.Error(), "already") || strings.Contains(err.Error(), "exists") {
-			fmt.Printf("[CASHFREE] RegisterBeneficiary: beneficiary already exists (expected for idempotent operation)\n")
-		} else {
-			// Real error
-			fmt.Printf("[CASHFREE] RegisterBeneficiary addBeneficiary error: %v\n", err)
-			return fmt.Errorf("failed to create beneficiary: %w", err)
-		}
-	} else {
-		fmt.Printf("[CASHFREE] RegisterBeneficiary: beneficiary created successfully\n")
+	// 2) Register it, or find the beneficiary Cashfree already has for this account.
+	beneID, err := p.ensureBeneficiary(ctx, req)
+	if err != nil {
+		fmt.Printf("[CASHFREE] RegisterBeneficiary error: %v\n", err)
+		return fmt.Errorf("failed to create beneficiary: %w", err)
 	}
 
 	fmt.Printf("[CASHFREE] RegisterBeneficiary succeeded: beneId=%s\n", beneID)
@@ -145,29 +129,14 @@ func (p *CashfreeProvider) InitiateTransfer(ctx context.Context, req TransferReq
 	}
 	p.cfg.BearerToken = token
 
-	// 2) Beneficiary id must be provided by caller (payout method ID from service layer)
-	beneID := strings.TrimSpace(req.BeneID)
-	if beneID == "" {
-		return nil, fmt.Errorf("beneficiary ID is required (must be provided by service layer)")
+	// 2) Register the beneficiary, or find the one Cashfree already has for
+	// this account — the transfer must name an id Cashfree knows.
+	beneID, err := p.ensureBeneficiary(ctx, req)
+	if err != nil {
+		fmt.Printf("[CASHFREE] ensureBeneficiary error: %v\n", err)
+		return nil, fmt.Errorf("failed to create beneficiary: %w", err)
 	}
-
-	fmt.Printf("[CASHFREE] Step 2: Checking beneficiary ID: %s\n", beneID)
-
-	// Try to create/register the beneficiary
-	// If it already exists, Cashfree will handle the idempotency and return an error we can safely ignore
-	fmt.Printf("[CASHFREE] Attempting to create beneficiary (idempotent operation)...\n")
-	if err := p.addBeneficiary(ctx, beneID, req); err != nil {
-		// Check if error is "already exists" - if so, continue (idempotent)
-		if strings.Contains(err.Error(), "already") || strings.Contains(err.Error(), "exists") {
-			fmt.Printf("[CASHFREE] Beneficiary already exists (expected for idempotent operation)\n")
-		} else {
-			// Real error
-			fmt.Printf("[CASHFREE] addBeneficiary error: %v\n", err)
-			return nil, fmt.Errorf("failed to create beneficiary: %w", err)
-		}
-	} else {
-		fmt.Printf("[CASHFREE] Beneficiary created/verified successfully\n")
-	}
+	fmt.Printf("[CASHFREE] Paying beneficiary %s\n", beneID)
 
 	// 3) Build transfer request and include the beneId
 	payoutReq, err := buildCashfreeTransferRequest(req)
@@ -579,74 +548,129 @@ func (p *CashfreeProvider) authorize(ctx context.Context) (string, error) {
 	return token, nil
 }
 
-// getBeneficiary queries Cashfree for the provided beneId. Returns true when found.
-func (p *CashfreeProvider) getBeneficiary(ctx context.Context, beneId string) (bool, error) {
-	url := strings.TrimRight(p.cfg.BaseURL, "/") + "/payout/beneficiary/" + beneId
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return false, fmt.Errorf("failed to create getBeneficiary request: %w", err)
+// cashfreeAPIError is a 4xx/5xx answer from Cashfree, with the machine-readable
+// `code` from its body (e.g. "beneficiary_already_exists").
+type cashfreeAPIError struct {
+	op     string
+	status int
+	code   string
+	body   string
+}
+
+func (e *cashfreeAPIError) Error() string {
+	return fmt.Sprintf("%s API error (HTTP %d): %s", e.op, e.status, e.body)
+}
+
+func newCashfreeAPIError(op string, status int, body []byte) *cashfreeAPIError {
+	var payload map[string]interface{}
+	_ = json.Unmarshal(body, &payload)
+	return &cashfreeAPIError{op: op, status: status, code: lookupString(payload, "code"), body: string(body)}
+}
+
+// Beneficiary states Cashfree will not pay out to.
+var unusableBeneficiaryStatuses = map[string]bool{
+	"INVALID": true, "FAILED": true, "DELETED": true, "CANCELLED": true,
+}
+
+// ensureBeneficiary makes sure Cashfree knows the payout method and returns the
+// beneficiary_id to pay.
+//
+// Usually that is req.BeneID (the payout method id without hyphens). But
+// Cashfree keeps ONE beneficiary per bank account + IFSC: when the account was
+// registered before under another id — say an earlier payout method the host
+// deleted and added again — creating it is refused with 409
+// beneficiary_already_exists, and req.BeneID never exists at Cashfree. The old
+// code took any "already exists" answer as success and then paid req.BeneID,
+// which Cashfree rejected with beneficiary_not_found. Here we look the account
+// up and pay the id Cashfree already has.
+func (p *CashfreeProvider) ensureBeneficiary(ctx context.Context, req TransferRequest) (string, error) {
+	beneID := strings.TrimSpace(req.BeneID)
+	if beneID == "" {
+		return "", fmt.Errorf("beneficiary ID is required (must be provided by service layer)")
 	}
 
-	// Set headers
+	err := p.addBeneficiary(ctx, beneID, req)
+	if err == nil {
+		return beneID, nil
+	}
+	var apiErr *cashfreeAPIError
+	if !errors.As(err, &apiErr) {
+		return "", err
+	}
+
+	switch apiErr.code {
+	case "beneficiary_id_already_exists":
+		// Registered on an earlier call (method creation or a past withdrawal).
+		fmt.Printf("[CASHFREE] Beneficiary %s already registered\n", beneID)
+		return beneID, nil
+
+	case "beneficiary_already_exists":
+		account := strings.TrimSpace(req.AccountNumber)
+		ifsc := strings.ToUpper(strings.TrimSpace(req.IFSC))
+		if account == "" || ifsc == "" {
+			return "", err
+		}
+		existingID, status, lookupErr := p.fetchBeneficiary(ctx, url.Values{
+			"bank_account_number": {account},
+			"bank_ifsc":           {ifsc},
+		})
+		if lookupErr != nil {
+			return "", fmt.Errorf("bank account is already registered at Cashfree, but looking it up failed: %w", lookupErr)
+		}
+		if existingID == "" {
+			return "", fmt.Errorf("bank account is already registered at Cashfree, but the lookup returned no beneficiary_id")
+		}
+		if unusableBeneficiaryStatuses[strings.ToUpper(status)] {
+			return "", fmt.Errorf("bank account is registered at Cashfree as beneficiary %s with status %s", existingID, status)
+		}
+		fmt.Printf("[CASHFREE] Bank account already registered as beneficiary %s (status %s); paying that id instead of %s\n",
+			existingID, status, beneID)
+		return existingID, nil
+	}
+	return "", err
+}
+
+// fetchBeneficiary looks a beneficiary up (Get Beneficiary V2) by
+// beneficiary_id, or by bank_account_number + bank_ifsc. Returns its id and
+// beneficiary_status.
+func (p *CashfreeProvider) fetchBeneficiary(ctx context.Context, query url.Values) (string, string, error) {
+	endpoint := strings.TrimRight(p.cfg.BaseURL, "/") + "/payout/beneficiary?" + query.Encode()
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create getBeneficiary request: %w", err)
+	}
+
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-version", p.cfg.APIVersion)
 	httpReq.Header.Set("x-client-id", p.cfg.ClientID)
 	httpReq.Header.Set("x-client-secret", p.cfg.ClientSecret)
-
-	// Attach bearer token if available
 	if strings.TrimSpace(p.cfg.BearerToken) != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(p.cfg.BearerToken))
 	}
-	// include signature for extra safety
-	sig, ts, sigErr := p.generateRSASignature()
-	if sigErr == nil {
+	if sig, ts, sigErr := p.generateRSASignature(); sigErr == nil {
 		httpReq.Header.Set("x-cf-signature", sig)
 		httpReq.Header.Set("x-cf-timestamp", strconv.FormatInt(ts, 10))
 	}
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return false, fmt.Errorf("getBeneficiary API call failed: %w", err)
+		return "", "", fmt.Errorf("getBeneficiary API call failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	fmt.Printf("[CASHFREE] getBeneficiary response: status=%d, body=%s\n", resp.StatusCode, string(body))
-
-	if resp.StatusCode == 404 {
-		fmt.Printf("[CASHFREE] Beneficiary not found: %s\n", string(body))
-		return false, fmt.Errorf("beneficiary not found: %s", string(body))
-	}
 	if resp.StatusCode >= 400 {
-		return false, fmt.Errorf("getBeneficiary API error (HTTP %d): %s", resp.StatusCode, string(body))
+		return "", "", newCashfreeAPIError("getBeneficiary", resp.StatusCode, body)
 	}
 
-	// Parse JSON response and ensure beneficiary status is VERIFIED
 	var payload map[string]interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return false, fmt.Errorf("failed to parse getBeneficiary response: %w", err)
+		return "", "", fmt.Errorf("failed to parse getBeneficiary response: %w", err)
 	}
-
-	// Expected response shape: check both top-level and nested data.beneficiary_status
-	dataStatus := firstNonEmpty(
-		lookupString(payload, "beneficiary_status"),
-		lookupNestedString(payload, "data", "beneficiary_status"),
-	)
-	fmt.Printf("[CASHFREE] Beneficiary status: %s\n", dataStatus)
-
-	if strings.TrimSpace(strings.ToUpper(dataStatus)) == "VERIFIED" {
-		fmt.Printf("[CASHFREE] Beneficiary is VERIFIED\n")
-		return true, nil
-	}
-
-	// If status present but not VERIFIED, return an error so caller can decide
-	if dataStatus != "" {
-		return false, fmt.Errorf("beneficiary exists but not verified: %s", dataStatus)
-	}
-
-	// If no beneficiary_status, treat as found but unknown state
-	fmt.Printf("[CASHFREE] Beneficiary status unknown, treating as found\n")
-	return true, nil
+	id := firstNonEmpty(lookupString(payload, "beneficiary_id"), lookupNestedString(payload, "data", "beneficiary_id"))
+	status := firstNonEmpty(lookupString(payload, "beneficiary_status"), lookupNestedString(payload, "data", "beneficiary_status"))
+	return id, status, nil
 }
 
 // addBeneficiary registers a beneficiary with Cashfree using provided transfer request details.
@@ -715,7 +739,7 @@ func (p *CashfreeProvider) addBeneficiary(ctx context.Context, beneId string, re
 	fmt.Printf("[CASHFREE] addBeneficiary response: status=%d, body=%s\n", resp.StatusCode, string(respBody))
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("addBeneficiary API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		return newCashfreeAPIError("addBeneficiary", resp.StatusCode, respBody)
 	}
 
 	// Parse response to verify beneficiary was created

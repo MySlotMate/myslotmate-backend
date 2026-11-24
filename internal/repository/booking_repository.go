@@ -114,10 +114,12 @@ type HostSale struct {
 	HostPayoutCents *int64 // what the host is paid: net less TCS/TDS (falls back to net for older bookings)
 	TcsCents        int64  // GST TCS stamped on this booking
 	TdsCents        int64  // income-tax TDS stamped on this booking
-	ServiceFeeCents *int64
-	Status          models.BookingStatus
-	CreatedAt       time.Time
-	CancelledAt     *time.Time
+	// Event Boost commission taken from the host's share (0 when not boosted).
+	BoostCommissionCents int64
+	ServiceFeeCents      *int64
+	Status               models.BookingStatus
+	CreatedAt            time.Time
+	CancelledAt          *time.Time
 }
 
 type postgresBookingRepository struct {
@@ -151,7 +153,7 @@ func (r *postgresBookingRepository) ListHostSales(ctx context.Context, hostID uu
 			b.amount_cents, b.net_earning_cents, b.service_fee_cents,
 			b.status,       b.created_at,   b.cancelled_at,
 			COALESCE(b.host_payout_cents, b.net_earning_cents),
-			b.tcs_cents, b.tds_cents
+			b.tcs_cents, b.tds_cents, b.boost_commission_cents
 		FROM bookings b
 		JOIN events e ON e.id = b.event_id
 		JOIN users  u ON u.id = b.user_id
@@ -175,7 +177,7 @@ func (r *postgresBookingRepository) ListHostSales(ctx context.Context, hostID uu
 			&s.OccurrenceDate, &s.Quantity,
 			&amount, &s.NetEarningCents, &s.ServiceFeeCents,
 			&s.Status, &s.CreatedAt, &s.CancelledAt,
-			&s.HostPayoutCents, &s.TcsCents, &s.TdsCents,
+			&s.HostPayoutCents, &s.TcsCents, &s.TdsCents, &s.BoostCommissionCents,
 		); err != nil {
 			return nil, err
 		}

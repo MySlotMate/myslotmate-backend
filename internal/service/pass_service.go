@@ -215,7 +215,7 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 	platformFee := totalAmount * int64(feeConfig.PlatformPercentage) / 100
 	hostEarning := totalAmount - platformFee
 
-	// Guest-paid booking fee (the platform's revenue, e.g. 8%), on top of the
+	// Guest-paid booking fee (the platform's revenue, set in admin), on top of the
 	// pass price — the same fee and the same rule a ticket booking uses
 	// (bookingService.CreateBooking): any host commission above is taken on the
 	// price only, the fee goes to the platform whole, and the buyer pays
@@ -351,6 +351,15 @@ func (s *passService) PurchasePass(ctx context.Context, userID, eventID uuid.UUI
 		return nil, fmt.Errorf("failed to link payment to pass: %w", err)
 	}
 	pass.PaymentID = &payment.ID
+
+	// Fee invoice for the guest booking fee on the pass (billing core).
+	if _, err := issueFeeInvoice(ctx, tx, FeeSale{
+		SourceType: models.InvoiceSourcePass, SourceID: pass.ID, UserID: userID,
+		EventID: &evt.ID, EventTitle: evt.Title, FeeCents: totalAmount - ticketCents, At: now,
+		Description: fmt.Sprintf("Platform fee for monthly pass %s", evt.Title),
+	}); err != nil {
+		return nil, fmt.Errorf("pass: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("pass: commit transaction: %w", err)
@@ -614,6 +623,11 @@ func (s *passService) CancelPass(ctx context.Context, userID, passID uuid.UUID) 
 			return nil, errors.New("this pass has already been refunded")
 		}
 		return nil, err
+	}
+
+	// The fee is refunded with the pass, so its invoice gets a credit note.
+	if _, err := issueCreditNote(ctx, tx, models.InvoiceSourcePass, pass.ID, time.Now()); err != nil {
+		return nil, fmt.Errorf("cancel pass: %w", err)
 	}
 
 	if err := passTx.UpdateStatus(ctx, pass.ID, models.PassRefunded); err != nil {

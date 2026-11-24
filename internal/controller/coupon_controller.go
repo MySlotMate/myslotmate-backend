@@ -251,6 +251,7 @@ func (c *CouponController) BatchCreateCoupons(w http.ResponseWriter, r *http.Req
 		DiscountPercent *int       `json:"discount_percent,omitempty"`
 		MaxRedemptions  *int       `json:"max_redemptions,omitempty"`
 		PerUserLimit    *int       `json:"per_user_limit,omitempty"`
+		ValidFrom       *time.Time `json:"valid_from,omitempty"`
 		ValidUntil      *time.Time `json:"valid_until,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -308,6 +309,7 @@ func (c *CouponController) BatchCreateCoupons(w http.ResponseWriter, r *http.Req
 				DiscountPercent: discountPercent,
 				MaxRedemptions:  maxRedemptions,
 				PerUserLimit:    perUserLimit,
+				ValidFrom:       body.ValidFrom,
 				ValidUntil:      body.ValidUntil,
 				IsActive:        true,
 			}

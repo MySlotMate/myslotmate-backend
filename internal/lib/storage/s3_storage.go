@@ -248,3 +248,35 @@ func cacheControl(folder string) string {
 	}
 	return "public, max-age=86400"
 }
+
+// billingFolder mirrors models.BillingDocsFolder: archived invoice PDFs.
+const billingFolder = "billing/invoices/"
+
+// PutPrivateObject stores a generated document under billing/invoices/,
+// private and never cached. Other keys are refused.
+func (s *UploadService) PutPrivateObject(ctx context.Context, key, contentType string, body []byte) error {
+	if !strings.HasPrefix(key, billingFolder) || strings.Contains(key, "..") {
+		return fmt.Errorf("refusing to write %q outside %s", key, billingFolder)
+	}
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:       aws.String(s.bucket),
+		Key:          aws.String(key),
+		Body:         bytes.NewReader(body),
+		ContentType:  aws.String(contentType),
+		CacheControl: aws.String("private, no-store"),
+	})
+	return err
+}
+
+// GetPrivateObject reads a document stored with PutPrivateObject.
+func (s *UploadService) GetPrivateObject(ctx context.Context, key string) ([]byte, error) {
+	if !strings.HasPrefix(key, billingFolder) || strings.Contains(key, "..") {
+		return nil, fmt.Errorf("refusing to read %q outside %s", key, billingFolder)
+	}
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	if err != nil {
+		return nil, err
+	}
+	defer out.Body.Close()
+	return io.ReadAll(out.Body)
+}

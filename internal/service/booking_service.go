@@ -356,6 +356,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	//    - no tiers → legacy single event price.
 	var pricePerTicketCents int64 = 0
 	var priceTierID *uuid.UUID
+	var priceTierName *string // matches the ticket type to an Event Boost rate
 	if req.PriceTierID != nil {
 		tier, err := s.tierRepo.GetByID(ctx, *req.PriceTierID)
 		if err != nil {
@@ -366,6 +367,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		}
 		pricePerTicketCents = tier.PriceCents
 		priceTierID = &tier.ID
+		priceTierName = &tier.Name
 	} else {
 		tiers, err := s.tierRepo.ListByEventID(ctx, evt.ID)
 		if err != nil {
@@ -485,6 +487,7 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	var host *models.Host
 	var platformFee, hostEarning, ticketCents int64
 	var appliedPlatformPercentage int
+	var boostCharge *BoostCharge // set when the event's Event Boost is live
 	var taxSettings *models.TaxSettings
 	if totalAmount > 0 {
 		platformAccount, err = s.accountRepo.GetByOwner(ctx, models.AccountOwnerPlatform, uuid.Nil)
@@ -509,6 +512,22 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		platformFee = totalAmount * int64(feeConfig.PlatformPercentage) / 100
 		hostEarning = totalAmount - platformFee
 		ticketCents = totalAmount // post-coupon ticket value, before the guest fee
+
+		// Event Boost: while the event's Boost is live, its commission replaces
+		// the per-host / global commission above for this booking. Guest
+		// self-serve ticket bookings only: never passes, walk-ins or imports.
+		if bookingSource(req.Source) == models.BookingSourceOnline && req.PassID == nil {
+			charge, err := boostCommissionFor(ctx, s.db, evt.ID, priceTierName, pricePerTicketCents, totalAmount, time.Now())
+			if err != nil {
+				return nil, fmt.Errorf("booking: event boost: %w", err)
+			}
+			if charge != nil {
+				boostCharge = charge
+				appliedPlatformPercentage = charge.RateBps / 100
+				platformFee = charge.CommissionCents
+				hostEarning = totalAmount - platformFee
+			}
+		}
 
 		if taxSettings, err = s.payoutRepo.GetTaxSettings(ctx); err != nil {
 			return nil, fmt.Errorf("load tax settings: %w", err)
@@ -571,6 +590,39 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 	}
 	if bookedNow+req.Quantity > lockedCapacity {
 		return nil, errors.New("event capacity exceeded")
+	}
+
+	// ── Seat limit per ticket type (e.g. only 10 Gold seats) ──────────────
+	// Checked under the same event-row lock, so two guests cannot both take
+	// the last Gold seat. The limit is per session, like event capacity, and
+	// re-read here so a host changing it mid-flight is respected. A pass
+	// booking that records the basic ticket counts against that ticket too.
+	if priceTierID != nil {
+		var tierCapacity sql.NullInt64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT capacity FROM event_price_tiers WHERE id = $1`, *priceTierID,
+		).Scan(&tierCapacity); err != nil {
+			return nil, fmt.Errorf("booking: read ticket limit: %w", err)
+		}
+		if tierCapacity.Valid {
+			var tierBooked int
+			if err := tx.QueryRowContext(ctx,
+				// Counted by ticket name, so seats booked on an older row of
+				// the same ticket type (before the host edited the event) count.
+				`SELECT COALESCE(SUM(b.quantity), 0)
+				   FROM bookings b
+				   JOIN event_price_tiers t ON t.id = b.price_tier_id
+				  WHERE b.event_id = $1 AND b.occurrence_date = $2
+				    AND b.status IN ('pending', 'confirmed')
+				    AND lower(trim(t.name)) = (SELECT lower(trim(name)) FROM event_price_tiers WHERE id = $3)`,
+				req.EventID, occurrenceDate, *priceTierID,
+			).Scan(&tierBooked); err != nil {
+				return nil, fmt.Errorf("booking: count ticket seats: %w", err)
+			}
+			if int64(tierBooked+req.Quantity) > tierCapacity.Int64 {
+				return nil, errors.New("this ticket type is sold out")
+			}
+		}
 	}
 
 	// ── Statutory tax lines (TCS/TDS) ────────────────────────────────────
@@ -645,6 +697,12 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
 	}
+	if boostCharge != nil {
+		newBooking.BoostID = &boostCharge.BoostID
+		newBooking.BoostRateBps = &boostCharge.RateBps
+		newBooking.BoostCommissionCents = boostCharge.CommissionCents
+		newBooking.BoostCommissionGSTCents = boostCharge.GSTCents
+	}
 	if totalAmount > 0 {
 		newBooking.TicketCents = &ticketCents
 		newBooking.PlatformFeeGSTCents = tax.PlatformFeeGSTCents
@@ -703,6 +761,23 @@ func (s *bookingService) CreateBooking(ctx context.Context, userID uuid.UUID, re
 		return nil, fmt.Errorf("failed to link payment to booking: %w", err)
 	}
 	newBooking.PaymentID = &bookingPayment.ID
+
+	// ── Fee invoice (billing core) ───────────────────────────────────────
+	// The guest booking fee is what was paid on top of the tickets. Written in
+	// this transaction so a booking and its invoice number commit together.
+	if totalAmount > 0 {
+		tickets := "1 ticket"
+		if req.Quantity != 1 {
+			tickets = fmt.Sprintf("%d tickets", req.Quantity)
+		}
+		if _, err := issueFeeInvoice(ctx, tx, FeeSale{
+			SourceType: models.InvoiceSourceBooking, SourceID: newBooking.ID, UserID: userID,
+			EventID: &evt.ID, EventTitle: evt.Title, FeeCents: totalAmount - ticketCents, At: newBooking.CreatedAt,
+			Description: fmt.Sprintf("Platform fee for booking %s (%s)", evt.Title, tickets),
+		}); err != nil {
+			return nil, fmt.Errorf("booking: %w", err)
+		}
+	}
 
 	// ── Commit ───────────────────────────────────────────────────────────
 	if err := tx.Commit(); err != nil {
@@ -1234,6 +1309,11 @@ func (s *bookingService) performCancellation(ctx context.Context, booking *model
 			return nil, errors.New("booking has already been refunded")
 		}
 		return nil, err
+	}
+
+	// The fee is refunded with the booking, so its invoice gets a credit note.
+	if _, err := issueCreditNote(ctx, tx, models.InvoiceSourceBooking, booking.ID, now); err != nil {
+		return nil, fmt.Errorf("cancel: %w", err)
 	}
 
 	// ── Mark the booking ─────────────────────────────────────────────────

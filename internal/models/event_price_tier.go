@@ -14,7 +14,7 @@ type EventPriceTier struct {
 	EventID    uuid.UUID `db:"event_id" json:"event_id"`
 	Name       string    `db:"name" json:"name"`
 	PriceCents int64     `db:"price_cents" json:"price_cents"`
-	Capacity   *int      `db:"capacity" json:"capacity,omitempty"` // reserved; not enforced in v1
+	Capacity   *int      `db:"capacity" json:"capacity,omitempty"` // seats per session for this ticket; nil = no own limit (event capacity still applies)
 	SortOrder  int       `db:"sort_order" json:"sort_order"`
 	IsActive   bool      `db:"is_active" json:"is_active"`
 	CreatedAt  time.Time `db:"created_at" json:"created_at"`

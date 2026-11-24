@@ -248,7 +248,8 @@ func main() {
 	eventController := controller.NewEventController(eventService).
 		WithAuth(userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret).
 		WithAdminEmail(cfg.AdminEmail).
-		WithGalleryNotifier(controller.NewGalleryNotifier(dbConn, notifService, cfg.FrontendBaseURL))
+		WithGalleryNotifier(controller.NewGalleryNotifier(dbConn, notifService, cfg.FrontendBaseURL)).
+		WithAttention(repository.NewAttentionRepository(dbConn))
 	bookingController := controller.NewBookingController(bookingService).
 		WithAuth(userRepo, hostRepo, eventRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
 	passController := controller.NewPassController(passService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
@@ -266,6 +267,13 @@ func main() {
 	inboxController := controller.NewInboxController(inboxService)
 	payoutController := controller.NewPayoutController(payoutService, userRepo, hostRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret)
 	hostController.WithHostRoutes(payoutController)
+
+	// Event Boost: host requests, admin proposals, commission while live.
+	boostService := service.NewBoostService(dbConn, eventRepo, eventPriceTierRepo, hostRepo, userRepo, eventService,
+		boostMailer{notification.NewEmailService(&cfg.SMTP)}, cfg.AdminEmail, cfg.FrontendBaseURL)
+	go boostService.RunAutoEnd(ctx, 15*time.Minute)
+	boostController := controller.NewBoostController(boostService, userRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
+	hostController.WithHostRoutes(boostController)
 	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider)
 	supportController := controller.NewSupportController(supportService, uploadService)
 	uploadController := controller.NewUploadController(uploadService).
@@ -292,6 +300,27 @@ func main() {
 	blogController := controller.NewBlogController(blogRepo, userRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	marketingPageController := controller.NewMarketingPageController(marketingPageRepo, eventRepo, fbApp.Auth, cfg.AdminEmail, cfg.AdminAuth.JWTSecret)
 	experienceTemplateController := controller.NewExperienceTemplateController(experienceTemplateRepo)
+
+	// Billing core: fee invoices and credit notes. PDFs are archived to S3 when
+	// it is configured; otherwise they are rebuilt from the invoice row.
+	var invoiceStore service.InvoiceStore
+	if uploadService != nil {
+		invoiceStore = uploadService
+	}
+	billingService := service.NewBillingService(repository.NewBillingRepository(dbConn), invoiceStore).WithDB(dbConn)
+	go billingService.RunArchiver(ctx, 5*time.Minute)
+	go billingService.RunCommissionInvoicer(ctx, 6*time.Hour) // last month's Boost commission invoices
+	// The booking confirmation email attaches the fee receipt.
+	notification.BookingFeeReceipt = func(ctx context.Context, bookingID uuid.UUID) (*notification.Attachment, error) {
+		name, pdf, err := billingService.BookingReceipt(ctx, bookingID)
+		if err != nil || pdf == nil {
+			return nil, err
+		}
+		return &notification.Attachment{Filename: name, ContentType: "application/pdf", Data: pdf}, nil
+	}
+	billingController := controller.NewBillingController(billingService, userRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail).
+		WithEmail(notification.NewEmailService(&cfg.SMTP).SendEmailWithAttachments).
+		WithHosts(hostRepo)
 
 	// Initialize RAG components
 	ragEngine := rag.NewRAGEngine(
@@ -337,6 +366,8 @@ func main() {
 		experienceTemplateController,
 		ragChatCtrl,
 		ragDocCtrl,
+		billingController,
+		boostController,
 	)
 
 	srv := &http.Server{
@@ -554,4 +585,11 @@ func initializeReminderScheduler(
 
 	log.Printf("✓ Reminder scheduler initialized (check every %d min, remind %d min before)", checkIntervalMins, reminderMinsBefore)
 	return scheduler
+}
+
+// boostMailer sends Event Boost emails over SMTP.
+type boostMailer struct{ svc *notification.EmailService }
+
+func (m boostMailer) BoostEmail(to, subject, htmlBody string) error {
+	return m.svc.SendEmail(to, subject, htmlBody)
 }

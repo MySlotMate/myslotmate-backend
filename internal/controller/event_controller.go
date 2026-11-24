@@ -34,6 +34,14 @@ type EventController struct {
 	adminEmail string
 	// Optional: emails past guests when the host adds photos to a past event.
 	galleryNotifier *GalleryNotifier
+	// Optional: serves the "Needs attention" list for an experience.
+	attentionRepo repository.AttentionRepository
+}
+
+// WithAttention enables GET /events/{eventID}/attention.
+func (c *EventController) WithAttention(repo repository.AttentionRepository) *EventController {
+	c.attentionRepo = repo
+	return c
 }
 
 // WithGalleryNotifier enables the "host shared photos" message to past guests.
@@ -227,6 +235,7 @@ func (c *EventController) RegisterRoutes(r chi.Router) {
 			r.Get("/calendar/{hostID}", c.GetCalendarEvents)
 			r.Get("/today/{hostID}", c.GetTodaySchedule)
 			r.Get("/{eventID}/attendees", c.GetEventAttendees)
+			r.Get("/{eventID}/attention", c.GetEventAttention)
 		})
 
 		// Everything that changes an experience needs a signed-in host, or an
@@ -1095,4 +1104,42 @@ func sameStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// GetEventAttention lists what about an experience needs the host's eye:
+// pending join requests, shared codes nearly or fully used up or ending soon,
+// and monthly passes ending this week. Host (or co-host) of the event, or an
+// admin; the same list shows in the host dashboard and the admin editor.
+func (c *EventController) GetEventAttention(w http.ResponseWriter, r *http.Request) {
+	if c.attentionRepo == nil {
+		RespondError(w, http.StatusNotFound, "not available")
+		return
+	}
+	eventID, err := uuid.Parse(chi.URLParam(r, "eventID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid event ID")
+		return
+	}
+	if !auth.IsAdminCaller(r) {
+		actingHostID, herr := c.hostIDFor(r, uuid.Nil)
+		if herr != nil {
+			RespondError(w, http.StatusUnauthorized, herr.Error())
+			return
+		}
+		canManage, cerr := c.eventService.HostCanManageEvent(r.Context(), eventID, actingHostID)
+		if cerr != nil {
+			RespondError(w, http.StatusInternalServerError, cerr.Error())
+			return
+		}
+		if !canManage {
+			RespondError(w, http.StatusNotFound, "Event not found")
+			return
+		}
+	}
+	items, err := c.attentionRepo.ForEvent(r.Context(), eventID, time.Now())
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, items)
 }

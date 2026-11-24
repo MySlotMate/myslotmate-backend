@@ -11,9 +11,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/twilio/twilio-go"
 	twilioapiv2010 "github.com/twilio/twilio-go/rest/api/v2010"
 )
+
+// BookingFeeReceipt returns a booking's platform fee receipt PDF to attach to
+// its confirmation email, or nil when it has none. Set at startup by the
+// billing service (this package can't import it).
+var BookingFeeReceipt func(ctx context.Context, bookingID uuid.UUID) (*Attachment, error)
 
 // TwilioNotificationService handles SMS and WhatsApp notifications via Twilio
 type TwilioNotificationService struct {
@@ -244,13 +250,29 @@ func (s *TwilioNotificationService) SendBookingConfirmationEmail(ctx context.Con
 		return fmt.Errorf("user email not available")
 	}
 
-	// Send email
+	// The platform fee receipt, when the booking has one. A missing receipt
+	// never blocks the confirmation.
+	var files []Attachment
+	if BookingFeeReceipt != nil {
+		if f, err := BookingFeeReceipt(ctx, booking.ID); err != nil {
+			log.Printf("[EMAIL] fee receipt for booking %s not attached: %v", booking.ID, err)
+		} else if f != nil {
+			files = append(files, *f)
+		}
+	}
+
+	// The booked session's time (a repeating event has many), not the event's first date.
+	when := booking.OccurrenceDate
+	if when.IsZero() {
+		when = event.Time
+	}
 	err := s.emailSvc.SendBookingConfirmationEmail(
 		user.Email,
 		user.Name,
 		event.Title,
-		timeutil.FormatEventTime(event.Time),
+		timeutil.FormatEventTime(when),
 		fmt.Sprintf("%d", booking.Quantity),
+		files...,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to send confirmation email: %w", err)

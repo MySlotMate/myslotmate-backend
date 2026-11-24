@@ -198,4 +198,7 @@ type OccurrenceAvailability struct {
 	Remaining     int       `json:"remaining"`
 	IsFullyBooked bool      `json:"is_fully_booked"`
 	IsPaused      bool      `json:"is_paused,omitempty"`
+	// TierRemaining is seats left per ticket type (tier id → seats) for this
+	// session, only for ticket types that have their own seat limit.
+	TierRemaining map[string]int `json:"tier_remaining,omitempty"`
 }

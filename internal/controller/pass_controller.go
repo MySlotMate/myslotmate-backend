@@ -246,6 +246,7 @@ func passErrorStatus(err error) int {
 	case msg == "you already have an active pass for this experience",
 		msg == "no passes left for this experience",
 		msg == "event capacity exceeded",
+		msg == "this ticket type is sold out",
 		msg == "this pass has already been refunded":
 		return http.StatusConflict
 	case msg == "your account is blocked due to suspicious activity",

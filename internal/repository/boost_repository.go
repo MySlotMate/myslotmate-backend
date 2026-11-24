@@ -136,8 +136,9 @@ func (r *BoostRepository) fill(ctx context.Context, b *models.Boost) error {
 		return err
 	}
 	return r.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(quantity), 0), COALESCE(SUM(boost_commission_cents), 0)
-		  FROM bookings WHERE boost_id = $1 AND status IN ('pending', 'confirmed')`, b.ID).
+		SELECT COALESCE(SUM(quantity) FILTER (WHERE status IN ('pending', 'confirmed')), 0),
+		       COALESCE(SUM(boost_commission_cents) FILTER (WHERE status IN ('pending', 'confirmed') OR boost_commission_kept), 0)
+		  FROM bookings WHERE boost_id = $1 AND (status IN ('pending', 'confirmed') OR boost_commission_kept)`, b.ID).
 		Scan(&b.TicketsSold, &b.CommissionCents)
 }
 

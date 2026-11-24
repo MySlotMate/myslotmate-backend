@@ -120,3 +120,21 @@ func TestBoostAllowsRefundPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestKeptBoostCommission(t *testing.T) {
+	paid := int64(164900)
+	free := int64(0)
+	boosted := &models.Booking{AmountCents: &paid, BoostCommissionCents: 22500}
+	if got := keptBoostCommission(boosted, true); got != 22500 {
+		t.Errorf("host cancel of a boosted booking keeps %d, want 22500", got)
+	}
+	if got := keptBoostCommission(boosted, false); got != 0 {
+		t.Errorf("guest refund keeps %d, want 0", got)
+	}
+	if got := keptBoostCommission(&models.Booking{AmountCents: &paid}, true); got != 0 {
+		t.Errorf("unboosted booking keeps %d, want 0", got)
+	}
+	if got := keptBoostCommission(&models.Booking{AmountCents: &free, BoostCommissionCents: 22500}, true); got != 0 {
+		t.Errorf("free booking keeps %d, want 0", got)
+	}
+}

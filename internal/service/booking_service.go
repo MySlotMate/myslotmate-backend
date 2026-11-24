@@ -1045,7 +1045,7 @@ func (s *bookingService) CancelBooking(ctx context.Context, bookingID uuid.UUID,
 		}
 	}
 
-	cancelled, err := s.performCancellation(ctx, booking)
+	cancelled, err := s.performCancellation(ctx, booking, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1176,7 +1176,7 @@ func (s *bookingService) CancelBookingByHost(ctx context.Context, bookingID uuid
 	}
 
 	// For host-initiated cancellations, we could trigger a specific "Host Cancelled" event
-	return s.performCancellation(ctx, booking)
+	return s.performCancellation(ctx, booking, true)
 }
 
 // performCancellation cancels a booking and reverses its money movements.
@@ -1210,7 +1210,21 @@ func bookingReversalAmounts(b *models.Booking) (hostCents, platformCents int64) 
 	return b.PayableCents(), platformCents + b.TCSCents + b.TDSCents
 }
 
-func (s *bookingService) performCancellation(ctx context.Context, booking *models.Booking) (*models.Booking, error) {
+// hostCancel marks a refund the host chose (cancelling the event, pausing its
+// sessions): the guest is still refunded in full, but a booking's Event Boost
+// commission stays owed by the host, because the ads already ran. It moves from
+// the platform's reversal to the host's, so the books still balance, and the
+// booking is flagged boost_commission_kept for earnings, invoices and reports.
+// keptBoostCommission is the Event Boost commission a cancellation leaves owed
+// by the host: all of it when the host refunds a paid boosted booking, else 0.
+func keptBoostCommission(b *models.Booking, hostCancel bool) int64 {
+	if !hostCancel || b.AmountCents == nil || *b.AmountCents <= 0 || b.BoostCommissionCents <= 0 {
+		return 0
+	}
+	return b.BoostCommissionCents
+}
+
+func (s *bookingService) performCancellation(ctx context.Context, booking *models.Booking, hostCancel bool) (*models.Booking, error) {
 	now := time.Now()
 
 	amountCents := int64(0)
@@ -1219,6 +1233,9 @@ func (s *bookingService) performCancellation(ctx context.Context, booking *model
 	}
 	netEarningCents, serviceFeeCents := bookingReversalAmounts(booking)
 	isRefund := amountCents > 0
+	keptBoost := keptBoostCommission(booking, hostCancel)
+	netEarningCents += keptBoost
+	serviceFeeCents -= keptBoost
 
 	// A paid cancellation becomes `refunded`; a free booking becomes `cancelled`.
 	finalStatus := models.BookingStatusCancelled
@@ -1319,6 +1336,11 @@ func (s *bookingService) performCancellation(ctx context.Context, booking *model
 	// ── Mark the booking ─────────────────────────────────────────────────
 	if err := bookingTx.UpdateStatus(ctx, booking.ID, finalStatus); err != nil {
 		return nil, fmt.Errorf("cancel: update booking status: %w", err)
+	}
+	if keptBoost > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE bookings SET boost_commission_kept = true WHERE id = $1`, booking.ID); err != nil {
+			return nil, fmt.Errorf("cancel: keep boost commission: %w", err)
+		}
 	}
 
 	// ── Hand the session back to the pass ────────────────────────────────

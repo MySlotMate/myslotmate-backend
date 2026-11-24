@@ -151,6 +151,9 @@ type EarningsSummary struct {
 	// Amount currently in flight or already paid out (status pending /
 	// processing / completed on payout-type payments).
 	InFlightPayoutsCents int64 `json:"in_flight_payouts_cents"`
+	// Event Boost commission still owed on bookings the host cancelled. Already
+	// taken off the totals above; shown so the host can see why.
+	BoostCommissionKeptCents int64 `json:"boost_commission_kept_cents"`
 
 	EstimatedClearanceAt *time.Time                `json:"estimated_clearance_at,omitempty"`
 	PlatformFee          *models.PlatformFeeConfig `json:"platform_fee"`
@@ -831,20 +834,21 @@ func (s *payoutService) GetEarningsSummary(ctx context.Context, hostID uuid.UUID
 	}
 
 	summary := &EarningsSummary{
-		TaxDeductedCents:      tcsFY + tdsFY,
-		TCSFYCents:            tcsFY,
-		TDSFYCents:            tdsFY,
-		FYGrossCents:          fyGross,
-		TDSThresholdCents:     taxSettings.TDSThresholdCents,
-		HasTaxProfile:         profile != nil,
-		PANRequired:           taxSettings.RequirePANForWithdrawal,
-		TotalEarningsCents:    breakdown.TotalCents,
-		AvailableBalanceCents: available,
-		PendingClearanceCents: breakdown.EventUpcomingCents,
-		CurrentBalanceCents:   currentBalance,
-		InFlightPayoutsCents:  inFlight,
-		EstimatedClearanceAt:  estimatedClearanceAt,
-		PlatformFee:           feeConfig,
+		TaxDeductedCents:         tcsFY + tdsFY,
+		TCSFYCents:               tcsFY,
+		TDSFYCents:               tdsFY,
+		FYGrossCents:             fyGross,
+		TDSThresholdCents:        taxSettings.TDSThresholdCents,
+		HasTaxProfile:            profile != nil,
+		PANRequired:              taxSettings.RequirePANForWithdrawal,
+		TotalEarningsCents:       breakdown.TotalCents,
+		AvailableBalanceCents:    available,
+		PendingClearanceCents:    breakdown.EventUpcomingCents,
+		CurrentBalanceCents:      currentBalance,
+		InFlightPayoutsCents:     inFlight,
+		BoostCommissionKeptCents: breakdown.BoostKeptCents,
+		EstimatedClearanceAt:     estimatedClearanceAt,
+		PlatformFee:              feeConfig,
 	}
 	fmt.Printf("[PAYOUT] GetEarningsSummary: host=%s total=%d available=%d pending=%d current=%d inflight=%d\n",
 		hostID, summary.TotalEarningsCents, summary.AvailableBalanceCents,

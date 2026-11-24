@@ -92,9 +92,12 @@ type CheckInParams struct {
 //
 //	TotalCents = EventPassedCents + EventUpcomingCents (always).
 type HostEarningsBreakdown struct {
-	TotalCents         int64 // lifetime net (refunds deducted)
-	EventPassedCents   int64 // confirmed bookings whose event has happened — eligible to withdraw
+	TotalCents         int64 // lifetime net (refunds deducted, kept Boost commission deducted)
+	EventPassedCents   int64 // confirmed bookings whose event has happened, less kept Boost commission — eligible to withdraw
 	EventUpcomingCents int64 // confirmed bookings whose event is upcoming — locked
+	// Boost commission the host still owes on bookings they cancelled
+	// (boost_commission_kept). Already taken off TotalCents and EventPassedCents.
+	BoostKeptCents int64
 }
 
 // HostSale is one booking row joined with its buyer + event, used by the
@@ -192,17 +195,21 @@ func (r *postgresBookingRepository) ListHostSales(ctx context.Context, hostID uu
 func (r *postgresBookingRepository) GetHostEarningsBreakdown(ctx context.Context, hostID uuid.UUID) (*HostEarningsBreakdown, error) {
 	const query = `
 		SELECT
-			COALESCE(SUM(COALESCE(b.host_payout_cents, b.net_earning_cents)), 0)::BIGINT AS total,
-			COALESCE(SUM(COALESCE(b.host_payout_cents, b.net_earning_cents)) FILTER (WHERE b.occurrence_date <  NOW()), 0)::BIGINT AS event_passed,
-			COALESCE(SUM(COALESCE(b.host_payout_cents, b.net_earning_cents)) FILTER (WHERE b.occurrence_date >= NOW()), 0)::BIGINT AS event_upcoming
+			COALESCE(SUM(COALESCE(b.host_payout_cents, b.net_earning_cents)) FILTER (WHERE b.status = 'confirmed'), 0)::BIGINT AS total,
+			COALESCE(SUM(COALESCE(b.host_payout_cents, b.net_earning_cents)) FILTER (WHERE b.status = 'confirmed' AND b.occurrence_date <  NOW()), 0)::BIGINT AS event_passed,
+			COALESCE(SUM(COALESCE(b.host_payout_cents, b.net_earning_cents)) FILTER (WHERE b.status = 'confirmed' AND b.occurrence_date >= NOW()), 0)::BIGINT AS event_upcoming,
+			COALESCE(SUM(b.boost_commission_cents) FILTER (WHERE b.boost_commission_kept), 0)::BIGINT AS boost_kept
 		FROM bookings b
 		JOIN events   e ON e.id = b.event_id
 		WHERE e.host_id = $1
-		  AND b.status  = 'confirmed'`
+		  AND (b.status = 'confirmed' OR b.boost_commission_kept)`
 	var b HostEarningsBreakdown
-	if err := r.db.QueryRowContext(ctx, query, hostID).Scan(&b.TotalCents, &b.EventPassedCents, &b.EventUpcomingCents); err != nil {
+	if err := r.db.QueryRowContext(ctx, query, hostID).Scan(&b.TotalCents, &b.EventPassedCents, &b.EventUpcomingCents, &b.BoostKeptCents); err != nil {
 		return nil, err
 	}
+	// Owed now, so it comes off what is withdrawable today and the lifetime net.
+	b.TotalCents -= b.BoostKeptCents
+	b.EventPassedCents -= b.BoostKeptCents
 	return &b, nil
 }
 

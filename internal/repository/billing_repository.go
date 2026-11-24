@@ -354,7 +354,8 @@ type StatementSale struct {
 	PayableCents    int64 // what the host is owed (net − TCS − TDS)
 	BoostCents      int64 // of the commission, the Event Boost part
 	Status          string
-	Returned        bool // refunded / cancelled: no longer owed
+	Returned        bool  // refunded / cancelled: no longer owed
+	BoostKeptCents  int64 // Boost commission still owed on a booking the host cancelled
 }
 
 // StatementSales lists the paid sales (bookings and passes) on the host's
@@ -362,18 +363,19 @@ type StatementSale struct {
 func (r *BillingRepository) StatementSales(ctx context.Context, hostID uuid.UUID, from, to time.Time) ([]StatementSale, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT s.kind, s.id, s.created_at, e.title, s.quantity, s.ticket, s.net, s.tcs_cents, s.tds_cents,
-		       COALESCE(s.host_payout_cents, s.net), s.boost, s.status, s.returned
+		       COALESCE(s.host_payout_cents, s.net), s.boost, s.status, s.returned, s.boost_kept
 		  FROM (
 		    SELECT 'booking' AS kind, id, event_id, created_at, quantity,
 		           COALESCE(ticket_cents, amount_cents, 0) AS ticket, COALESCE(net_earning_cents, 0) AS net,
 		           tcs_cents, tds_cents, host_payout_cents, boost_commission_cents AS boost, status::text AS status,
-		           status IN ('refunded', 'cancelled') AS returned
+		           status IN ('refunded', 'cancelled') AS returned,
+		           CASE WHEN boost_commission_kept THEN boost_commission_cents ELSE 0 END AS boost_kept
 		      FROM bookings
 		    UNION ALL
 		    SELECT 'pass', id, event_id, created_at, 1,
 		           COALESCE(ticket_cents, price_cents, 0), net_earning_cents,
 		           tcs_cents, tds_cents, host_payout_cents, 0::bigint, status::text,
-		           status = 'refunded'
+		           status = 'refunded', 0::bigint
 		      FROM user_passes
 		  ) s
 		  JOIN events e ON e.id = s.event_id
@@ -387,7 +389,7 @@ func (r *BillingRepository) StatementSales(ctx context.Context, hostID uuid.UUID
 	for rows.Next() {
 		var x StatementSale
 		if err := rows.Scan(&x.Kind, &x.ID, &x.CreatedAt, &x.EventTitle, &x.Quantity, &x.TicketCents, &x.NetEarningCents,
-			&x.TCSCents, &x.TDSCents, &x.PayableCents, &x.BoostCents, &x.Status, &x.Returned); err != nil {
+			&x.TCSCents, &x.TDSCents, &x.PayableCents, &x.BoostCents, &x.Status, &x.Returned, &x.BoostKeptCents); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -483,7 +485,7 @@ func (r *BillingRepository) UninvoicedCommission(ctx context.Context, hostID *uu
 	q := `SELECT b.id, e.host_id, e.id, e.title, b.quantity, b.boost_commission_cents, b.boost_invoice_id
 		  FROM bookings b JOIN events e ON e.id = b.event_id
 		 WHERE b.boost_commission_cents > 0 AND b.boost_invoice_id IS NULL
-		   AND b.status IN ('pending', 'confirmed')
+		   AND (b.status IN ('pending', 'confirmed') OR b.boost_commission_kept)
 		   AND b.created_at >= $1 AND b.created_at < $2
 		   AND ($3::uuid IS NULL OR e.host_id = $3)
 		 ORDER BY e.title, b.created_at`
@@ -503,6 +505,7 @@ func (r *BillingRepository) RefundedInvoicedCommission(ctx context.Context, host
 	q := `SELECT b.id, e.host_id, e.id, e.title, b.quantity, b.boost_commission_cents, b.boost_invoice_id
 		  FROM bookings b JOIN events e ON e.id = b.event_id
 		 WHERE b.boost_invoice_id IS NOT NULL AND b.boost_credit_note_id IS NULL AND b.status = 'refunded'
+		   AND NOT b.boost_commission_kept
 		   AND ($1::uuid IS NULL OR e.host_id = $1)
 		 ORDER BY b.boost_invoice_id, e.title, b.created_at`
 	if lock {

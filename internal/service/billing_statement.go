@@ -33,6 +33,9 @@ type StatementLine struct {
 	PayableCents int64     `json:"payable_cents"`
 	Status       string    `json:"status"`
 	Refunded     bool      `json:"refunded"`
+	// Boost commission still owed on a booking the host cancelled (refunded
+	// to the guest in full).
+	BoostKept int64 `json:"boost_commission_kept_cents"`
 }
 
 type StatementPayoutLine struct {
@@ -45,16 +48,17 @@ type StatementPayoutLine struct {
 
 type StatementTotals struct {
 	Sales           int   `json:"sales"`
-	TicketCents     int64 `json:"ticket_cents"`           // every sale made
-	RefundedCents   int64 `json:"refunded_cents"`         // of which refunded / cancelled
-	NetTicketCents  int64 `json:"net_ticket_cents"`       // kept sales
-	CommissionCents int64 `json:"commission_cents"`       // on kept sales, other than Boost
-	BoostCents      int64 `json:"boost_commission_cents"` // Event Boost commission on kept sales (incl. GST)
-	TCSCents        int64 `json:"tcs_cents"`              // on kept sales
-	TDSCents        int64 `json:"tds_cents"`              // on kept sales
-	PayableCents    int64 `json:"payable_cents"`          // owed for the month's kept sales
-	PaidOutCents    int64 `json:"paid_out_cents"`         // payouts completed this month
-	InFlightCents   int64 `json:"in_flight_cents"`        // payouts pending / processing
+	TicketCents     int64 `json:"ticket_cents"`                // every sale made
+	RefundedCents   int64 `json:"refunded_cents"`              // of which refunded / cancelled
+	NetTicketCents  int64 `json:"net_ticket_cents"`            // kept sales
+	CommissionCents int64 `json:"commission_cents"`            // on kept sales, other than Boost
+	BoostCents      int64 `json:"boost_commission_cents"`      // Event Boost commission on kept sales (incl. GST)
+	TCSCents        int64 `json:"tcs_cents"`                   // on kept sales
+	TDSCents        int64 `json:"tds_cents"`                   // on kept sales
+	BoostKeptCents  int64 `json:"boost_commission_kept_cents"` // Boost commission on bookings the host cancelled
+	PayableCents    int64 `json:"payable_cents"`               // owed for the month's kept sales, less BoostKeptCents
+	PaidOutCents    int64 `json:"paid_out_cents"`              // payouts completed this month
+	InFlightCents   int64 `json:"in_flight_cents"`             // payouts pending / processing
 }
 
 type HostStatement struct {
@@ -129,7 +133,7 @@ func buildHostStatement(month string, from, to time.Time, h *repository.Statemen
 	for _, x := range sales {
 		l := StatementLine{Kind: x.Kind, ID: x.ID, Date: x.CreatedAt, EventTitle: x.EventTitle, Quantity: x.Quantity,
 			TicketCents: x.TicketCents, Commission: x.TicketCents - x.NetEarningCents, Boost: x.BoostCents, TCSCents: x.TCSCents,
-			TDSCents: x.TDSCents, PayableCents: x.PayableCents, Status: x.Status, Refunded: x.Returned}
+			TDSCents: x.TDSCents, PayableCents: x.PayableCents, Status: x.Status, Refunded: x.Returned, BoostKept: x.BoostKeptCents}
 		if l.Commission < 0 {
 			l.Commission = 0 // older rows without a ticket split
 		}
@@ -138,6 +142,8 @@ func buildHostStatement(month string, from, to time.Time, h *repository.Statemen
 		t.TicketCents += l.TicketCents
 		if l.Refunded {
 			t.RefundedCents += l.TicketCents
+			t.BoostKeptCents += l.BoostKept
+			t.PayableCents -= l.BoostKept
 			continue
 		}
 		t.NetTicketCents += l.TicketCents
@@ -231,6 +237,10 @@ func RenderHostStatementPDF(st *HostStatement) ([]byte, error) {
 		{"TDS withheld (income tax)", neg(t.TDSCents)},
 		{"Earned this month", "INR " + money(t.PayableCents)},
 		{"Paid out this month", "INR " + money(t.PaidOutCents)},
+	}
+	if t.BoostKeptCents > 0 {
+		// After the Boost commission row: owed on bookings the host cancelled.
+		summary = append(summary[:5], append([][2]string{{"Boost commission on bookings you cancelled", neg(t.BoostKeptCents)}}, summary[5:]...)...)
 	}
 	if t.InFlightCents > 0 {
 		summary = append(summary, [2]string{"Payouts on the way", "INR " + money(t.InFlightCents)})

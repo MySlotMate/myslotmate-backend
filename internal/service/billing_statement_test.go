@@ -52,3 +52,31 @@ func TestBuildHostStatementTotals(t *testing.T) {
 		t.Fatalf("filename %q", StatementFilename(st))
 	}
 }
+
+func TestBuildHostStatementKeptBoostCommission(t *testing.T) {
+	h := &repository.StatementHost{ID: uuid.New(), Name: "Riya Sen"}
+	now := time.Now()
+	sales := []repository.StatementSale{
+		// Kept sale: ₹1,499 ticket, ₹225 Boost commission.
+		{Kind: "booking", ID: uuid.New(), CreatedAt: now, EventTitle: "Pottery", Quantity: 1, TicketCents: 149900,
+			NetEarningCents: 127400, BoostCents: 22500, PayableCents: 127400, Status: "confirmed"},
+		// The host cancelled this one: the guest got everything back, the
+		// ₹225 commission stays owed.
+		{Kind: "booking", ID: uuid.New(), CreatedAt: now, EventTitle: "Pottery", Quantity: 1, TicketCents: 149900,
+			NetEarningCents: 127400, BoostCents: 22500, PayableCents: 127400, Status: "refunded", Returned: true,
+			BoostKeptCents: 22500},
+	}
+	from, to, _ := MonthRange("2026-11")
+	st := buildHostStatement("2026-11", from, to, h, sales, nil)
+	tt := st.Totals
+	if tt.BoostCents != 22500 || tt.BoostKeptCents != 22500 || tt.PayableCents != 127400-22500 {
+		t.Fatalf("kept Boost commission totals %+v", tt)
+	}
+	if st.Lines[1].BoostKept != 22500 {
+		t.Fatalf("line %+v", st.Lines[1])
+	}
+	pdf, err := RenderHostStatementPDF(st)
+	if err != nil || !bytes.HasPrefix(pdf, []byte("%PDF")) {
+		t.Fatalf("pdf: %v", err)
+	}
+}

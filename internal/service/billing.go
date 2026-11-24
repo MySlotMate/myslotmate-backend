@@ -207,6 +207,7 @@ type InvoiceStore interface {
 type BillingService struct {
 	repo  *repository.BillingRepository
 	store InvoiceStore
+	db    *sql.DB // for the commission run's transactions (WithDB)
 }
 
 func NewBillingService(repo *repository.BillingRepository, store InvoiceStore) *BillingService {
@@ -247,6 +248,11 @@ func (s *BillingService) SaveSettings(ctx context.Context, in models.BillingSett
 	if in.CreditNotePrefix == "" {
 		in.CreditNotePrefix = "C"
 	}
+	in.CommissionInvoicePrefix = strings.ToUpper(strings.TrimSpace(in.CommissionInvoicePrefix))
+	in.CommissionSACCode = strings.TrimSpace(in.CommissionSACCode)
+	if in.CommissionInvoicePrefix == "" {
+		in.CommissionInvoicePrefix = "M"
+	}
 	if in.GSTRateBps == 0 {
 		in.GSTRateBps = 1800
 	}
@@ -274,8 +280,14 @@ func (s *BillingService) SaveSettings(ctx context.Context, in models.BillingSett
 	if !prefixRe.MatchString(in.InvoicePrefix) || !prefixRe.MatchString(in.CreditNotePrefix) {
 		return bad("Prefixes should be 1 to 3 capital letters.")
 	}
-	if in.InvoicePrefix == in.CreditNotePrefix {
-		return bad("Invoices and credit notes need different prefixes.")
+	if in.CommissionSACCode != "" && !sacRe.MatchString(in.CommissionSACCode) {
+		return bad("Commission SAC code should be 6 digits starting with 99.")
+	}
+	if !prefixRe.MatchString(in.CommissionInvoicePrefix) {
+		return bad("Prefixes should be 1 to 3 capital letters.")
+	}
+	if in.InvoicePrefix == in.CreditNotePrefix || in.CommissionInvoicePrefix == in.InvoicePrefix || in.CommissionInvoicePrefix == in.CreditNotePrefix {
+		return bad("Fee invoices, commission invoices and credit notes need different prefixes.")
 	}
 	if in.GSTRateBps < 0 || in.GSTRateBps > 2800 {
 		return bad("GST rate should be between 0% and 28%.")

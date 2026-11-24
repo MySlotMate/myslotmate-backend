@@ -305,8 +305,9 @@ func main() {
 	if uploadService != nil {
 		invoiceStore = uploadService
 	}
-	billingService := service.NewBillingService(repository.NewBillingRepository(dbConn), invoiceStore)
+	billingService := service.NewBillingService(repository.NewBillingRepository(dbConn), invoiceStore).WithDB(dbConn)
 	go billingService.RunArchiver(ctx, 5*time.Minute)
+	go billingService.RunCommissionInvoicer(ctx, 6*time.Hour) // last month's Boost commission invoices
 	// The booking confirmation email attaches the fee receipt.
 	notification.BookingFeeReceipt = func(ctx context.Context, bookingID uuid.UUID) (*notification.Attachment, error) {
 		name, pdf, err := billingService.BookingReceipt(ctx, bookingID)

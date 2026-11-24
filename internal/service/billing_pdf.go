@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"time"
 
 	"myslotmate-backend/internal/lib/gststate"
 	"myslotmate-backend/internal/models"
@@ -57,6 +58,11 @@ func RenderInvoicePDF(inv *models.Invoice) ([]byte, error) {
 		{"Date", inv.IssuedAt.In(istZone).Format("02 Jan 2006")},
 		{"Place of supply", placeOfSupply(inv.PlaceOfSupply)},
 	}
+	if inv.Period != nil && *inv.Period != "" {
+		if t, err := time.ParseInLocation("2006-01", *inv.Period, istZone); err == nil {
+			details = append(details, [2]string{"Period", t.Format("January 2006")})
+		}
+	}
 	if inv.Kind == models.InvoiceKindCreditNote && inv.OriginalNumber != "" {
 		details = append(details, [2]string{"Against invoice", inv.OriginalNumber})
 	}
@@ -83,8 +89,18 @@ func RenderInvoicePDF(inv *models.Invoice) ([]byte, error) {
 	if contact != "" {
 		pdf.MultiCell(pageW, 4.5, tr(contact), "", "L", false)
 	}
-	pdf.MultiCell(pageW, 4.5, "Unregistered (consumer)", "", "L", false)
-	if inv.EventTitle != "" {
+	switch {
+	case inv.BuyerGSTIN != nil && *inv.BuyerGSTIN != "":
+		pdf.MultiCell(pageW, 4.5, "GSTIN: "+*inv.BuyerGSTIN, "", "L", false)
+	case inv.SourceType == models.InvoiceSourceHostCommission:
+		pdf.MultiCell(pageW, 4.5, "Unregistered", "", "L", false)
+	default:
+		pdf.MultiCell(pageW, 4.5, "Unregistered (consumer)", "", "L", false)
+	}
+	if inv.SourceType == models.InvoiceSourceHostCommission {
+		pdf.Ln(2)
+		pdf.MultiCell(pageW, 4.5, tr(inv.EventTitle), "", "L", false)
+	} else if inv.EventTitle != "" {
 		pdf.Ln(2)
 		what := "Booking"
 		if inv.SourceType == models.InvoiceSourcePass {
@@ -178,6 +194,15 @@ func RenderInvoicePDF(inv *models.Invoice) ([]byte, error) {
 	note := "This invoice is for the platform fee only. The fee includes GST. The ticket price is paid to the host and is not part of this invoice."
 	if inv.Kind == models.InvoiceKindCreditNote {
 		note = "This credit note reverses the platform fee of the invoice above, which was refunded to the guest."
+	}
+	if inv.SourceType == models.InvoiceSourceHostCommission {
+		note = "Marketing Boost commission on tickets sold while your Boost was live, already deducted from your payouts. The commission includes GST."
+		if inv.BuyerGSTIN != nil && *inv.BuyerGSTIN != "" {
+			note += " As a GST-registered business you can claim this GST as input tax credit."
+		}
+		if inv.Kind == models.InvoiceKindCreditNote {
+			note = "This credit note reverses the Marketing Boost commission on bookings that were refunded after the invoice above."
+		}
 	}
 	pdf.MultiCell(pageW, 4, tr(note), "", "L", false)
 	pdf.MultiCell(pageW, 4, "This is a computer-generated document and needs no signature.", "", "L", false)

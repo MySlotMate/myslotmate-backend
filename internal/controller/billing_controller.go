@@ -59,6 +59,8 @@ func (c *BillingController) RegisterRoutes(r chi.Router) {
 		r.Get("/documents/{invoiceID}/pdf", c.MyPDF)
 		// ?month=2026-11[&format=pdf]. A host gets their own; an admin passes host_id.
 		r.Get("/host-statement", c.HostStatement)
+		// The signed-in host's Boost commission invoices and credit notes.
+		r.Get("/host-commission", c.HostCommission)
 	})
 	r.Route("/admin/billing", func(r chi.Router) {
 		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
@@ -70,6 +72,8 @@ func (c *BillingController) RegisterRoutes(r chi.Router) {
 		r.Post("/invoices/{invoiceID}/resend", c.Resend)
 		// ?month=2026-11 (IST); &format=csv&table=b2cs|hsn|docs|register for a file.
 		r.Get("/reports/gst", c.GSTReport)
+		// Body {month: "2026-11"}: issue that month's Boost commission invoices now.
+		r.Post("/commission-run", c.CommissionRun)
 	})
 }
 
@@ -433,4 +437,48 @@ func (c *BillingController) HostStatement(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(b)
+}
+
+func (c *BillingController) HostCommission(w http.ResponseWriter, r *http.Request) {
+	caller, err := c.callerUserID(r)
+	if err != nil {
+		RespondError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if caller == uuid.Nil || c.hostRepo == nil {
+		RespondSuccess(w, http.StatusOK, []*models.Invoice{})
+		return
+	}
+	h, err := c.hostRepo.GetByUserID(r.Context(), caller)
+	if err != nil || h == nil {
+		RespondError(w, http.StatusForbidden, "Not a host")
+		return
+	}
+	docs, err := c.billing.HostCommissionDocs(r.Context(), h.ID)
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, docs)
+}
+
+func (c *BillingController) CommissionRun(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Month string `json:"month"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	res, err := c.billing.RunCommission(r.Context(), body.Month, time.Now())
+	if err != nil {
+		var bad *service.ErrBillingSettings
+		if errors.As(err, &bad) {
+			RespondError(w, http.StatusBadRequest, bad.Message)
+			return
+		}
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	RespondSuccess(w, http.StatusOK, res)
 }

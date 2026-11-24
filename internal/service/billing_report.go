@@ -62,14 +62,33 @@ type DocRange struct {
 	Count  int    `json:"count"`
 }
 
+// B2BRow is one document to a GST-registered buyer: GSTR-1 table 4 (invoices)
+// or 9B (credit notes).
+type B2BRow struct {
+	Kind          string    `json:"kind"`
+	GSTIN         string    `json:"gstin"`
+	Name          string    `json:"name"`
+	Number        string    `json:"number"`
+	Date          time.Time `json:"date"`
+	Against       string    `json:"against,omitempty"`
+	PlaceOfSupply string    `json:"place_of_supply"`
+	StateName     string    `json:"state_name"`
+	RateBps       int       `json:"rate_bps"`
+	GSTTotals
+}
+
 type GSTReport struct {
 	Month       string     `json:"month"` // "2026-11"
 	From        time.Time  `json:"from"`
 	To          time.Time  `json:"to"` // exclusive
 	Invoices    GSTTotals  `json:"invoices"`
 	CreditNotes GSTTotals  `json:"credit_notes"`
-	Net         GSTTotals  `json:"net"` // invoices − credit notes: the fee revenue to report
-	B2CS        []B2CSRow  `json:"b2cs"`
+	Net         GSTTotals  `json:"net"`       // invoices − credit notes: the revenue to report
+	FeeNet      GSTTotals  `json:"fee_net"`   // of which guest platform fees
+	BoostNet    GSTTotals  `json:"boost_net"` // of which host Boost commission
+	B2CS        []B2CSRow  `json:"b2cs"`      // unregistered buyers, net
+	B2B         []B2BRow   `json:"b2b"`       // registered buyers: invoices
+	CDNR        []B2BRow   `json:"cdnr"`      // registered buyers: credit notes
 	SAC         []SACRow   `json:"sac"`
 	Documents   []DocRange `json:"documents"`
 }
@@ -97,7 +116,36 @@ func (s *BillingService) GSTReport(ctx context.Context, month string) (*GSTRepor
 	if err != nil {
 		return nil, err
 	}
-	return buildGSTReport(month, from, to, rows, ranges), nil
+	rep := buildGSTReport(month, from, to, rows, ranges)
+	docs, err := s.repo.Register(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	addB2B(rep, docs)
+	return rep, nil
+}
+
+// addB2B lists documents to GST-registered buyers, one row per document.
+func addB2B(rep *GSTReport, docs []*models.Invoice) {
+	rep.B2B, rep.CDNR = []B2BRow{}, []B2BRow{}
+	for _, d := range docs {
+		if d.BuyerGSTIN == nil || *d.BuyerGSTIN == "" {
+			continue
+		}
+		rate := 0
+		if len(d.Lines) > 0 {
+			rate = d.Lines[0].GSTRateBps
+		}
+		row := B2BRow{Kind: d.Kind, GSTIN: *d.BuyerGSTIN, Name: d.BuyerName, Number: d.Number, Date: d.IssuedAt,
+			Against: d.OriginalNumber, PlaceOfSupply: d.PlaceOfSupply, StateName: gststate.Name(d.PlaceOfSupply), RateBps: rate,
+			GSTTotals: GSTTotals{Documents: 1, TaxableCents: d.TaxableCents, CGSTCents: d.CGSTCents, SGSTCents: d.SGSTCents,
+				IGSTCents: d.IGSTCents, TotalCents: d.TotalCents}}
+		if d.Kind == models.InvoiceKindCreditNote {
+			rep.CDNR = append(rep.CDNR, row)
+		} else {
+			rep.B2B = append(rep.B2B, row)
+		}
+	}
 }
 
 func buildGSTReport(month string, from, to time.Time, rows []repository.ReportRow, ranges []repository.SeriesRange) *GSTReport {
@@ -123,12 +171,19 @@ func buildGSTReport(month string, from, to time.Time, rows []repository.ReportRo
 			rep.Invoices.add(r, 1)
 		}
 		rep.Net.add(r, sign)
-
-		bk := b2csKey{r.PlaceOfSupply, r.RateBps}
-		if b2cs[bk] == nil {
-			b2cs[bk] = &B2CSRow{PlaceOfSupply: r.PlaceOfSupply, StateName: gststate.Name(r.PlaceOfSupply), RateBps: r.RateBps}
+		if r.Commission {
+			rep.BoostNet.add(r, sign)
+		} else {
+			rep.FeeNet.add(r, sign)
 		}
-		b2cs[bk].add(r, sign)
+
+		if !r.Registered {
+			bk := b2csKey{r.PlaceOfSupply, r.RateBps}
+			if b2cs[bk] == nil {
+				b2cs[bk] = &B2CSRow{PlaceOfSupply: r.PlaceOfSupply, StateName: gststate.Name(r.PlaceOfSupply), RateBps: r.RateBps}
+			}
+			b2cs[bk].add(r, sign)
+		}
 
 		sk := sacKey{r.SACCode, r.RateBps}
 		if sac[sk] == nil {
@@ -195,10 +250,30 @@ func (s *BillingService) GSTReportCSV(ctx context.Context, month, table string) 
 		}
 		return writeCSV(out), nil
 	case "hsn":
+		st, err := s.repo.GetSettings(ctx)
+		if err != nil {
+			return nil, err
+		}
 		out := [][]string{{"HSN", "Description", "UQC", "Total Quantity", "Total Value", "Rate", "Taxable Value", "Integrated Tax Amount", "Central Tax Amount", "State/UT Tax Amount", "Cess Amount"}}
 		for _, r := range rep.SAC {
-			out = append(out, []string{r.SACCode, "Platform fee", "NA", strconv.FormatInt(r.Quantity, 10), rupeesCSV(r.TotalCents),
+			out = append(out, []string{r.SACCode, sacDescription(st, r.SACCode), "NA", strconv.FormatInt(r.Quantity, 10), rupeesCSV(r.TotalCents),
 				rateCSV(r.RateBps), rupeesCSV(r.TaxableCents), rupeesCSV(r.IGSTCents), rupeesCSV(r.CGSTCents), rupeesCSV(r.SGSTCents), "0.00"})
+		}
+		return writeCSV(out), nil
+	case "b2b":
+		out := [][]string{{"GSTIN/UIN of Recipient", "Receiver Name", "Invoice Number", "Invoice date", "Invoice Value", "Place Of Supply",
+			"Reverse Charge", "Applicable % of Tax Rate", "Invoice Type", "E-Commerce GSTIN", "Rate", "Taxable Value", "Cess Amount"}}
+		for _, r := range rep.B2B {
+			out = append(out, []string{r.GSTIN, r.Name, r.Number, r.Date.In(istZone).Format("02-Jan-2006"), rupeesCSV(r.TotalCents),
+				r.PlaceOfSupply + "-" + r.StateName, "N", "", "Regular B2B", "", rateCSV(r.RateBps), rupeesCSV(r.TaxableCents), "0.00"})
+		}
+		return writeCSV(out), nil
+	case "cdnr":
+		out := [][]string{{"GSTIN/UIN of Recipient", "Receiver Name", "Note Number", "Note Date", "Note Type", "Place Of Supply",
+			"Reverse Charge", "Note Supply Type", "Note Value", "Applicable % of Tax Rate", "Rate", "Taxable Value", "Cess Amount"}}
+		for _, r := range rep.CDNR {
+			out = append(out, []string{r.GSTIN, r.Name, r.Number, r.Date.In(istZone).Format("02-Jan-2006"), "C",
+				r.PlaceOfSupply + "-" + r.StateName, "N", "Regular B2B", rupeesCSV(r.TotalCents), "", rateCSV(r.RateBps), rupeesCSV(r.TaxableCents), "0.00"})
 		}
 		return writeCSV(out), nil
 	case "docs":
@@ -227,5 +302,18 @@ func (s *BillingService) GSTReportCSV(ctx context.Context, month, table string) 
 		}
 		return writeCSV(out), nil
 	}
-	return nil, &ErrBillingSettings{Message: "table must be b2cs, hsn, docs or register"}
+	return nil, &ErrBillingSettings{Message: "table must be b2cs, b2b, cdnr, hsn, docs or register"}
+}
+
+// sacDescription names what a SAC code covers on our documents.
+func sacDescription(st *models.BillingSettings, code string) string {
+	fee, boost := st != nil && code == st.SACCode, st != nil && code == st.CommissionSACCode
+	switch {
+	case fee && boost:
+		return "Platform fee and Marketing Boost commission"
+	case boost:
+		return "Marketing Boost commission"
+	default:
+		return "Platform fee"
+	}
 }

@@ -13,25 +13,29 @@ const (
 	InvoiceKindInvoice    = "invoice"
 	InvoiceKindCreditNote = "credit_note"
 
-	InvoiceSourceBooking = "booking"
-	InvoiceSourcePass    = "pass"
+	InvoiceSourceBooking        = "booking"
+	InvoiceSourcePass           = "pass"
+	InvoiceSourceHostCommission = "host_commission" // a host's monthly Boost commission
 )
 
 // BillingSettings is MySlotMate's own details as the supplier (one row).
 type BillingSettings struct {
-	Enabled          bool      `json:"enabled"`
-	LegalName        string    `json:"legal_name"`
-	TradeName        string    `json:"trade_name"`
-	GSTIN            string    `json:"gstin"`
-	PAN              string    `json:"pan"`
-	Address          string    `json:"address"`
-	StateCode        string    `json:"state_code"` // from the GSTIN
-	Email            string    `json:"email"`
-	SACCode          string    `json:"sac_code"`
-	GSTRateBps       int       `json:"gst_rate_bps"`
-	InvoicePrefix    string    `json:"invoice_prefix"`
-	CreditNotePrefix string    `json:"credit_note_prefix"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	Enabled          bool   `json:"enabled"`
+	LegalName        string `json:"legal_name"`
+	TradeName        string `json:"trade_name"`
+	GSTIN            string `json:"gstin"`
+	PAN              string `json:"pan"`
+	Address          string `json:"address"`
+	StateCode        string `json:"state_code"` // from the GSTIN
+	Email            string `json:"email"`
+	SACCode          string `json:"sac_code"`
+	GSTRateBps       int    `json:"gst_rate_bps"`
+	InvoicePrefix    string `json:"invoice_prefix"`
+	CreditNotePrefix string `json:"credit_note_prefix"`
+	// Boost commission invoices to hosts: own series and SAC code.
+	CommissionInvoicePrefix string    `json:"commission_invoice_prefix"`
+	CommissionSACCode       string    `json:"commission_sac_code"`
+	UpdatedAt               time.Time `json:"updated_at"`
 }
 
 // Missing lists the required fields that are still blank.
@@ -51,6 +55,12 @@ func (s *BillingSettings) Missing() []string {
 // Issuing reports whether new sales get an invoice now.
 func (s *BillingSettings) Issuing() bool {
 	return s != nil && s.Enabled && len(s.Missing()) == 0
+}
+
+// IssuingCommission reports whether host commission invoices are issued now:
+// billing is on and the commission SAC code is set.
+func (s *BillingSettings) IssuingCommission() bool {
+	return s.Issuing() && s.CommissionSACCode != ""
 }
 
 // InvoiceSupplier is the supplier block copied onto each invoice.
@@ -80,6 +90,9 @@ type Invoice struct {
 	BuyerName         string          `json:"buyer_name"`
 	BuyerEmail        string          `json:"buyer_email"`
 	BuyerPhone        string          `json:"buyer_phone"`
+	BuyerGSTIN        *string         `json:"buyer_gstin,omitempty"`      // registered buyer (B2B)
+	BuyerStateCode    *string         `json:"buyer_state_code,omitempty"` // from the GSTIN
+	Period            *string         `json:"period,omitempty"`           // month billed ("2026-11"), commission only
 	PlaceOfSupply     string          `json:"place_of_supply"`
 	Supplier          InvoiceSupplier `json:"supplier"`
 	TaxableCents      int64           `json:"taxable_cents"`

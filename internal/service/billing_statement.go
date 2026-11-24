@@ -26,7 +26,8 @@ type StatementLine struct {
 	EventTitle   string    `json:"event_title"`
 	Quantity     int       `json:"quantity"`
 	TicketCents  int64     `json:"ticket_cents"`
-	Commission   int64     `json:"commission_cents"`
+	Commission   int64     `json:"commission_cents"`       // all commission, Boost included
+	Boost        int64     `json:"boost_commission_cents"` // of which Event Boost
 	TCSCents     int64     `json:"tcs_cents"`
 	TDSCents     int64     `json:"tds_cents"`
 	PayableCents int64     `json:"payable_cents"`
@@ -44,15 +45,16 @@ type StatementPayoutLine struct {
 
 type StatementTotals struct {
 	Sales           int   `json:"sales"`
-	TicketCents     int64 `json:"ticket_cents"`     // every sale made
-	RefundedCents   int64 `json:"refunded_cents"`   // of which refunded / cancelled
-	NetTicketCents  int64 `json:"net_ticket_cents"` // kept sales
-	CommissionCents int64 `json:"commission_cents"` // on kept sales
-	TCSCents        int64 `json:"tcs_cents"`        // on kept sales
-	TDSCents        int64 `json:"tds_cents"`        // on kept sales
-	PayableCents    int64 `json:"payable_cents"`    // owed for the month's kept sales
-	PaidOutCents    int64 `json:"paid_out_cents"`   // payouts completed this month
-	InFlightCents   int64 `json:"in_flight_cents"`  // payouts pending / processing
+	TicketCents     int64 `json:"ticket_cents"`           // every sale made
+	RefundedCents   int64 `json:"refunded_cents"`         // of which refunded / cancelled
+	NetTicketCents  int64 `json:"net_ticket_cents"`       // kept sales
+	CommissionCents int64 `json:"commission_cents"`       // on kept sales, other than Boost
+	BoostCents      int64 `json:"boost_commission_cents"` // Event Boost commission on kept sales (incl. GST)
+	TCSCents        int64 `json:"tcs_cents"`              // on kept sales
+	TDSCents        int64 `json:"tds_cents"`              // on kept sales
+	PayableCents    int64 `json:"payable_cents"`          // owed for the month's kept sales
+	PaidOutCents    int64 `json:"paid_out_cents"`         // payouts completed this month
+	InFlightCents   int64 `json:"in_flight_cents"`        // payouts pending / processing
 }
 
 type HostStatement struct {
@@ -126,7 +128,7 @@ func buildHostStatement(month string, from, to time.Time, h *repository.Statemen
 	t := &st.Totals
 	for _, x := range sales {
 		l := StatementLine{Kind: x.Kind, ID: x.ID, Date: x.CreatedAt, EventTitle: x.EventTitle, Quantity: x.Quantity,
-			TicketCents: x.TicketCents, Commission: x.TicketCents - x.NetEarningCents, TCSCents: x.TCSCents,
+			TicketCents: x.TicketCents, Commission: x.TicketCents - x.NetEarningCents, Boost: x.BoostCents, TCSCents: x.TCSCents,
 			TDSCents: x.TDSCents, PayableCents: x.PayableCents, Status: x.Status, Refunded: x.Returned}
 		if l.Commission < 0 {
 			l.Commission = 0 // older rows without a ticket split
@@ -139,7 +141,8 @@ func buildHostStatement(month string, from, to time.Time, h *repository.Statemen
 			continue
 		}
 		t.NetTicketCents += l.TicketCents
-		t.CommissionCents += l.Commission
+		t.CommissionCents += l.Commission - l.Boost
+		t.BoostCents += l.Boost
 		t.TCSCents += l.TCSCents
 		t.TDSCents += l.TDSCents
 		t.PayableCents += l.PayableCents
@@ -223,6 +226,7 @@ func RenderHostStatementPDF(st *HostStatement) ([]byte, error) {
 		{"Refunded or cancelled", neg(t.RefundedCents)},
 		{"Kept sales", money(t.NetTicketCents)},
 		{"MySlotMate commission", neg(t.CommissionCents)},
+		{"Marketing Boost commission (incl. GST)", neg(t.BoostCents)},
 		{"TCS withheld (GST)", neg(t.TCSCents)},
 		{"TDS withheld (income tax)", neg(t.TDSCents)},
 		{"Earned this month", "INR " + money(t.PayableCents)},
@@ -315,7 +319,8 @@ func RenderHostStatementPDF(st *HostStatement) ([]byte, error) {
 	pdf.SetFont("Helvetica", "", 7.5)
 	pdf.SetTextColor(90, 90, 100)
 	for _, n := range []string{
-		"Earned = ticket price - MySlotMate commission (only when one applies) - TCS - TDS. The guest's platform fee is MySlotMate's and is not part of your sales.",
+		"Earned = ticket price - MySlotMate commission (only when one applies) - Marketing Boost commission (while a Boost is live) - TCS - TDS. The guest's platform fee is MySlotMate's and is not part of your sales.",
+		"Marketing Boost commission is invoiced to you each month with GST; download the invoices from Earnings.",
 		"TCS and TDS are deposited with the government against your GSTIN / PAN. Claim them in your GST and income-tax returns.",
 		"Sales are counted in the month they were made. This is a statement of account, not a tax invoice.",
 	} {

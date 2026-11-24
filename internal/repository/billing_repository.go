@@ -11,6 +11,7 @@ import (
 	"myslotmate-backend/internal/models"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // BillingRepository stores billing settings, invoice numbers, invoices and
@@ -26,12 +27,14 @@ func (r *BillingRepository) GetSettings(ctx context.Context) (*models.BillingSet
 	s := &models.BillingSettings{}
 	err := r.db.QueryRowContext(ctx, `
 		SELECT enabled, legal_name, trade_name, gstin, pan, address, state_code, email,
-		       sac_code, gst_rate_bps, invoice_prefix, credit_note_prefix, updated_at
+		       sac_code, gst_rate_bps, invoice_prefix, credit_note_prefix,
+		       commission_invoice_prefix, commission_sac_code, updated_at
 		  FROM billing_settings WHERE id`).
 		Scan(&s.Enabled, &s.LegalName, &s.TradeName, &s.GSTIN, &s.PAN, &s.Address, &s.StateCode, &s.Email,
-			&s.SACCode, &s.GSTRateBps, &s.InvoicePrefix, &s.CreditNotePrefix, &s.UpdatedAt)
+			&s.SACCode, &s.GSTRateBps, &s.InvoicePrefix, &s.CreditNotePrefix,
+			&s.CommissionInvoicePrefix, &s.CommissionSACCode, &s.UpdatedAt)
 	if err == sql.ErrNoRows {
-		return &models.BillingSettings{GSTRateBps: 1800, InvoicePrefix: "F", CreditNotePrefix: "C"}, nil
+		return &models.BillingSettings{GSTRateBps: 1800, InvoicePrefix: "F", CreditNotePrefix: "C", CommissionInvoicePrefix: "M"}, nil
 	}
 	return s, err
 }
@@ -39,16 +42,20 @@ func (r *BillingRepository) GetSettings(ctx context.Context) (*models.BillingSet
 func (r *BillingRepository) SaveSettings(ctx context.Context, s *models.BillingSettings) error {
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO billing_settings (id, enabled, legal_name, trade_name, gstin, pan, address, state_code, email,
-		                              sac_code, gst_rate_bps, invoice_prefix, credit_note_prefix, updated_at)
-		VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+		                              sac_code, gst_rate_bps, invoice_prefix, credit_note_prefix,
+		                              commission_invoice_prefix, commission_sac_code, updated_at)
+		VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
 		ON CONFLICT (id) DO UPDATE SET
 		  enabled = EXCLUDED.enabled, legal_name = EXCLUDED.legal_name, trade_name = EXCLUDED.trade_name,
 		  gstin = EXCLUDED.gstin, pan = EXCLUDED.pan, address = EXCLUDED.address,
 		  state_code = EXCLUDED.state_code, email = EXCLUDED.email, sac_code = EXCLUDED.sac_code,
 		  gst_rate_bps = EXCLUDED.gst_rate_bps, invoice_prefix = EXCLUDED.invoice_prefix,
-		  credit_note_prefix = EXCLUDED.credit_note_prefix, updated_at = now()`,
+		  credit_note_prefix = EXCLUDED.credit_note_prefix,
+		  commission_invoice_prefix = EXCLUDED.commission_invoice_prefix,
+		  commission_sac_code = EXCLUDED.commission_sac_code, updated_at = now()`,
 		s.Enabled, s.LegalName, s.TradeName, s.GSTIN, s.PAN, s.Address, s.StateCode, s.Email,
-		s.SACCode, s.GSTRateBps, s.InvoicePrefix, s.CreditNotePrefix)
+		s.SACCode, s.GSTRateBps, s.InvoicePrefix, s.CreditNotePrefix,
+		s.CommissionInvoicePrefix, s.CommissionSACCode)
 	return err
 }
 
@@ -72,11 +79,13 @@ func (r *BillingRepository) Create(ctx context.Context, inv *models.Invoice) err
 	if _, err := r.db.ExecContext(ctx, `
 		INSERT INTO invoices (id, kind, number, fy, issued_at, source_type, source_id, event_id, event_title,
 		                      original_invoice_id, user_id, buyer_name, buyer_email, buyer_phone, place_of_supply,
-		                      supplier, taxable_cents, cgst_cents, sgst_cents, igst_cents, total_cents, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21, now())`,
+		                      supplier, taxable_cents, cgst_cents, sgst_cents, igst_cents, total_cents,
+		                      buyer_gstin, buyer_state_code, period, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24, now())`,
 		inv.ID, inv.Kind, inv.Number, inv.FY, inv.IssuedAt, inv.SourceType, inv.SourceID, inv.EventID, inv.EventTitle,
 		inv.OriginalInvoiceID, inv.UserID, inv.BuyerName, inv.BuyerEmail, inv.BuyerPhone, inv.PlaceOfSupply,
-		supplier, inv.TaxableCents, inv.CGSTCents, inv.SGSTCents, inv.IGSTCents, inv.TotalCents); err != nil {
+		supplier, inv.TaxableCents, inv.CGSTCents, inv.SGSTCents, inv.IGSTCents, inv.TotalCents,
+		inv.BuyerGSTIN, inv.BuyerStateCode, inv.Period); err != nil {
 		return fmt.Errorf("insert invoice: %w", err)
 	}
 	for _, l := range inv.Lines {
@@ -95,7 +104,7 @@ func (r *BillingRepository) Create(ctx context.Context, inv *models.Invoice) err
 const invoiceCols = `i.id, i.kind, i.number, i.fy, i.issued_at, i.source_type, i.source_id, i.event_id, i.event_title,
 	i.original_invoice_id, COALESCE(o.number, ''), i.user_id, i.buyer_name, i.buyer_email, i.buyer_phone,
 	i.place_of_supply, i.supplier, i.taxable_cents, i.cgst_cents, i.sgst_cents, i.igst_cents, i.total_cents,
-	i.pdf_key, i.created_at`
+	i.pdf_key, i.created_at, i.buyer_gstin, i.buyer_state_code, i.period`
 
 const invoiceFrom = ` FROM invoices i LEFT JOIN invoices o ON o.id = i.original_invoice_id `
 
@@ -105,7 +114,8 @@ func scanInvoice(row interface{ Scan(...any) error }) (*models.Invoice, error) {
 	if err := row.Scan(&inv.ID, &inv.Kind, &inv.Number, &inv.FY, &inv.IssuedAt, &inv.SourceType, &inv.SourceID,
 		&inv.EventID, &inv.EventTitle, &inv.OriginalInvoiceID, &inv.OriginalNumber, &inv.UserID, &inv.BuyerName,
 		&inv.BuyerEmail, &inv.BuyerPhone, &inv.PlaceOfSupply, &supplier, &inv.TaxableCents, &inv.CGSTCents,
-		&inv.SGSTCents, &inv.IGSTCents, &inv.TotalCents, &inv.PDFKey, &inv.CreatedAt); err != nil {
+		&inv.SGSTCents, &inv.IGSTCents, &inv.TotalCents, &inv.PDFKey, &inv.CreatedAt,
+		&inv.BuyerGSTIN, &inv.BuyerStateCode, &inv.Period); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(supplier, &inv.Supplier); err != nil {
@@ -239,12 +249,21 @@ func (r *BillingRepository) ListByUser(ctx context.Context, userID uuid.UUID, li
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	return r.list(ctx, `WHERE i.user_id = $1 ORDER BY i.issued_at DESC, i.number DESC LIMIT $2`, userID, limit)
+	return r.list(ctx, `WHERE i.user_id = $1 AND i.source_type IN ('booking', 'pass')
+		ORDER BY i.issued_at DESC, i.number DESC LIMIT $2`, userID, limit)
+}
+
+// ListHostCommission returns a host's commission invoices and credit notes, newest first.
+func (r *BillingRepository) ListHostCommission(ctx context.Context, hostID uuid.UUID) ([]*models.Invoice, error) {
+	return r.list(ctx, `WHERE i.source_type = 'host_commission' AND i.source_id = $1
+		ORDER BY i.issued_at DESC, i.number DESC`, hostID)
 }
 
 // ReportRow is one group of document lines in a period.
 type ReportRow struct {
 	Kind          string
+	Registered    bool // buyer has a GSTIN (B2B)
+	Commission    bool // a host commission document (else a guest fee)
 	PlaceOfSupply string
 	SACCode       string
 	RateBps       int
@@ -261,12 +280,13 @@ type ReportRow struct {
 // SAC code and GST rate.
 func (r *BillingRepository) ReportRows(ctx context.Context, from, to time.Time) ([]ReportRow, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT i.kind, i.place_of_supply, l.sac_code, l.gst_rate_bps, COUNT(DISTINCT i.id), COALESCE(SUM(l.quantity), 0),
+		SELECT i.kind, COALESCE(i.buyer_gstin, '') <> '', i.source_type = 'host_commission',
+		       i.place_of_supply, l.sac_code, l.gst_rate_bps, COUNT(DISTINCT i.id), COALESCE(SUM(l.quantity), 0),
 		       SUM(l.taxable_cents), SUM(l.cgst_cents), SUM(l.sgst_cents), SUM(l.igst_cents), SUM(l.total_cents)
 		  FROM invoices i JOIN invoice_lines l ON l.invoice_id = i.id
 		 WHERE i.issued_at >= $1 AND i.issued_at < $2
-		 GROUP BY i.kind, i.place_of_supply, l.sac_code, l.gst_rate_bps
-		 ORDER BY i.kind, i.place_of_supply, l.sac_code, l.gst_rate_bps`, from, to)
+		 GROUP BY 1, 2, 3, 4, 5, 6
+		 ORDER BY 1, 2, 3, 4, 5, 6`, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +294,7 @@ func (r *BillingRepository) ReportRows(ctx context.Context, from, to time.Time) 
 	var out []ReportRow
 	for rows.Next() {
 		var x ReportRow
-		if err := rows.Scan(&x.Kind, &x.PlaceOfSupply, &x.SACCode, &x.RateBps, &x.Documents, &x.Quantity,
+		if err := rows.Scan(&x.Kind, &x.Registered, &x.Commission, &x.PlaceOfSupply, &x.SACCode, &x.RateBps, &x.Documents, &x.Quantity,
 			&x.TaxableCents, &x.CGSTCents, &x.SGSTCents, &x.IGSTCents, &x.TotalCents); err != nil {
 			return nil, err
 		}
@@ -332,6 +352,7 @@ type StatementSale struct {
 	TCSCents        int64
 	TDSCents        int64
 	PayableCents    int64 // what the host is owed (net − TCS − TDS)
+	BoostCents      int64 // of the commission, the Event Boost part
 	Status          string
 	Returned        bool // refunded / cancelled: no longer owed
 }
@@ -341,17 +362,17 @@ type StatementSale struct {
 func (r *BillingRepository) StatementSales(ctx context.Context, hostID uuid.UUID, from, to time.Time) ([]StatementSale, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT s.kind, s.id, s.created_at, e.title, s.quantity, s.ticket, s.net, s.tcs_cents, s.tds_cents,
-		       COALESCE(s.host_payout_cents, s.net), s.status, s.returned
+		       COALESCE(s.host_payout_cents, s.net), s.boost, s.status, s.returned
 		  FROM (
 		    SELECT 'booking' AS kind, id, event_id, created_at, quantity,
 		           COALESCE(ticket_cents, amount_cents, 0) AS ticket, COALESCE(net_earning_cents, 0) AS net,
-		           tcs_cents, tds_cents, host_payout_cents, status::text AS status,
+		           tcs_cents, tds_cents, host_payout_cents, boost_commission_cents AS boost, status::text AS status,
 		           status IN ('refunded', 'cancelled') AS returned
 		      FROM bookings
 		    UNION ALL
 		    SELECT 'pass', id, event_id, created_at, 1,
 		           COALESCE(ticket_cents, price_cents, 0), net_earning_cents,
-		           tcs_cents, tds_cents, host_payout_cents, status::text,
+		           tcs_cents, tds_cents, host_payout_cents, 0::bigint, status::text,
 		           status = 'refunded'
 		      FROM user_passes
 		  ) s
@@ -366,7 +387,7 @@ func (r *BillingRepository) StatementSales(ctx context.Context, hostID uuid.UUID
 	for rows.Next() {
 		var x StatementSale
 		if err := rows.Scan(&x.Kind, &x.ID, &x.CreatedAt, &x.EventTitle, &x.Quantity, &x.TicketCents, &x.NetEarningCents,
-			&x.TCSCents, &x.TDSCents, &x.PayableCents, &x.Status, &x.Returned); err != nil {
+			&x.TCSCents, &x.TDSCents, &x.PayableCents, &x.BoostCents, &x.Status, &x.Returned); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -429,4 +450,128 @@ func (r *BillingRepository) StatementHost(ctx context.Context, hostID uuid.UUID)
 		return nil, nil
 	}
 	return h, err
+}
+
+// CommissionBooking is one boosted booking for a commission invoice or credit note.
+type CommissionBooking struct {
+	BookingID       uuid.UUID
+	HostID          uuid.UUID
+	EventID         uuid.UUID
+	EventTitle      string
+	Quantity        int
+	CommissionCents int64
+	InvoiceID       *uuid.UUID // the commission invoice it is on (reversals only)
+}
+
+func scanCommission(rows *sql.Rows) ([]CommissionBooking, error) {
+	defer rows.Close()
+	var out []CommissionBooking
+	for rows.Next() {
+		var x CommissionBooking
+		if err := rows.Scan(&x.BookingID, &x.HostID, &x.EventID, &x.EventTitle, &x.Quantity, &x.CommissionCents, &x.InvoiceID); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+
+// UninvoicedCommission lists kept boosted bookings created in [from, to) that
+// are not on a commission invoice yet. hostID nil = every host. Locks the rows
+// when called inside a transaction, so a refund can't slip in between.
+func (r *BillingRepository) UninvoicedCommission(ctx context.Context, hostID *uuid.UUID, from, to time.Time, lock bool) ([]CommissionBooking, error) {
+	q := `SELECT b.id, e.host_id, e.id, e.title, b.quantity, b.boost_commission_cents, b.boost_invoice_id
+		  FROM bookings b JOIN events e ON e.id = b.event_id
+		 WHERE b.boost_commission_cents > 0 AND b.boost_invoice_id IS NULL
+		   AND b.status IN ('pending', 'confirmed')
+		   AND b.created_at >= $1 AND b.created_at < $2
+		   AND ($3::uuid IS NULL OR e.host_id = $3)
+		 ORDER BY e.title, b.created_at`
+	if lock {
+		q += ` FOR UPDATE OF b`
+	}
+	rows, err := r.db.QueryContext(ctx, q, from, to, hostID)
+	if err != nil {
+		return nil, err
+	}
+	return scanCommission(rows)
+}
+
+// RefundedInvoicedCommission lists boosted bookings that are on a commission
+// invoice but were refunded since, with no credit note yet. hostID nil = all.
+func (r *BillingRepository) RefundedInvoicedCommission(ctx context.Context, hostID *uuid.UUID, lock bool) ([]CommissionBooking, error) {
+	q := `SELECT b.id, e.host_id, e.id, e.title, b.quantity, b.boost_commission_cents, b.boost_invoice_id
+		  FROM bookings b JOIN events e ON e.id = b.event_id
+		 WHERE b.boost_invoice_id IS NOT NULL AND b.boost_credit_note_id IS NULL AND b.status = 'refunded'
+		   AND ($1::uuid IS NULL OR e.host_id = $1)
+		 ORDER BY b.boost_invoice_id, e.title, b.created_at`
+	if lock {
+		q += ` FOR UPDATE OF b`
+	}
+	rows, err := r.db.QueryContext(ctx, q, hostID)
+	if err != nil {
+		return nil, err
+	}
+	return scanCommission(rows)
+}
+
+// MarkCommission stamps bookings with the invoice (or credit note) that covers
+// them. Fails unless every booking was still unstamped.
+func (r *BillingRepository) MarkCommission(ctx context.Context, bookingIDs []uuid.UUID, docID uuid.UUID, creditNote bool) error {
+	col := "boost_invoice_id"
+	if creditNote {
+		col = "boost_credit_note_id"
+	}
+	ids := make([]string, len(bookingIDs))
+	for i, id := range bookingIDs {
+		ids[i] = id.String()
+	}
+	res, err := r.db.ExecContext(ctx, `UPDATE bookings SET `+col+` = $1 WHERE id = ANY($2::uuid[]) AND `+col+` IS NULL`, docID, pq.Array(ids))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); int(n) != len(bookingIDs) {
+		return fmt.Errorf("commission: %d of %d bookings were already stamped", len(bookingIDs)-int(n), len(bookingIDs))
+	}
+	return nil
+}
+
+// CommissionBuyer is the host as the buyer on a commission invoice.
+type CommissionBuyer struct {
+	UserID    uuid.UUID
+	Name      string
+	Email     string
+	Phone     string
+	GSTIN     *string
+	StateCode *string
+}
+
+func (r *BillingRepository) CommissionBuyer(ctx context.Context, hostID uuid.UUID) (*CommissionBuyer, error) {
+	b := &CommissionBuyer{}
+	err := r.db.QueryRowContext(ctx, `
+		SELECT h.user_id,
+		       COALESCE(NULLIF(trim(p.pan_name), ''), trim(concat_ws(' ', h.first_name, h.last_name))),
+		       COALESCE(u.email, ''), COALESCE(NULLIF(h.phn_number, ''), u.phn_number, ''), p.gstin, p.gst_state_code
+		  FROM hosts h LEFT JOIN users u ON u.id = h.user_id LEFT JOIN host_tax_profiles p ON p.host_id = h.id
+		 WHERE h.id = $1`, hostID).Scan(&b.UserID, &b.Name, &b.Email, &b.Phone, &b.GSTIN, &b.StateCode)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return b, err
+}
+
+// RunDone reports whether a billing run finished for a period.
+func (r *BillingRepository) RunDone(ctx context.Context, kind, period string) (bool, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM billing_runs WHERE kind = $1 AND period = $2`, kind, period).Scan(&n)
+	return n > 0, err
+}
+
+func (r *BillingRepository) RecordRun(ctx context.Context, kind, period string, invoices, creditNotes int) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO billing_runs (kind, period, invoices, credit_notes) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (kind, period) DO UPDATE SET ran_at = now(),
+		  invoices = billing_runs.invoices + EXCLUDED.invoices, credit_notes = billing_runs.credit_notes + EXCLUDED.credit_notes`,
+		kind, period, invoices, creditNotes)
+	return err
 }

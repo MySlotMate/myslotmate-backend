@@ -341,7 +341,7 @@ func (s *eventService) CreateEvent(ctx context.Context, hostID uuid.UUID, req Ev
 		MinGroupSize:       req.MinGroupSize,
 		MaxGroupSize:       req.MaxGroupSize,
 		Capacity:           capacity,
-		Languages:          pq.StringArray(req.Languages),
+		Languages:          pq.StringArray(append([]string{}, req.Languages...)), // never nil: the column is NOT NULL
 		Level:              req.Level,
 		PriceCents:         req.PriceCents,
 		IsFree:             req.IsFree,

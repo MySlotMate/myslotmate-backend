@@ -214,7 +214,7 @@ func (r *postgresEventRepository) Create(ctx context.Context, event *models.Even
 		event.Title, event.HookLine, event.Mood, event.Description,
 		event.CoverImageURL, pq.Array(event.GalleryURLs),
 		event.IsOnline, event.MeetingLink, event.Location, event.LocationLat, event.LocationLng, event.GoogleMapsURL, event.DurationMinutes, event.MinGroupSize, event.MaxGroupSize, event.Capacity,
-		pq.Array(event.Languages), event.Level,
+		pq.Array(nonNilStrings(event.Languages)), event.Level,
 		event.PriceCents, event.IsFree, event.Time, event.EndTime, event.IsRecurring, event.RecurrenceRule,
 		event.CancellationPolicy, event.Status, event.PublishedAt, event.PausedFrom, pq.Array(event.PausedDates),
 		event.AISuggestion,
@@ -262,7 +262,7 @@ func (r *postgresEventRepository) Update(ctx context.Context, event *models.Even
 		event.Title, event.HookLine, event.Mood, event.Description,
 		event.CoverImageURL, pq.Array(event.GalleryURLs),
 		event.IsOnline, event.MeetingLink, event.Location, event.LocationLat, event.LocationLng, event.GoogleMapsURL, event.DurationMinutes, event.MinGroupSize, event.MaxGroupSize, event.Capacity,
-		pq.Array(event.Languages), event.Level,
+		pq.Array(nonNilStrings(event.Languages)), event.Level,
 		event.PriceCents, event.IsFree, event.Time, event.EndTime, event.IsRecurring, event.RecurrenceRule,
 		event.CancellationPolicy, event.Status, event.PublishedAt, event.PausedAt, event.PausedFrom, pq.Array(event.PausedDates),
 		event.AISuggestion, event.AvgRating, event.TotalBookings,
@@ -489,4 +489,14 @@ func (r *postgresEventRepository) UpdateAverageRating(ctx context.Context, event
 func (r *postgresEventRepository) SetStateCode(ctx context.Context, id uuid.UUID, code string) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE events SET state_code = NULLIF($1, '') WHERE id = $2`, code, id)
 	return err
+}
+
+// nonNilStrings writes a missing list as an empty array: the column is
+// NOT NULL DEFAULT '{}', but an explicit NULL from pq.Array(nil) bypasses
+// the default and fails the insert (events created without languages).
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }

@@ -34,6 +34,26 @@ const (
 	boostAudienceMax       = 500
 )
 
+// BoostAllowsRefundPolicy reports whether an event with this refund policy
+// may be boosted. The ads are paid for up front and a fully refunded booking
+// returns its commission, so a boosted event needs a policy whose free-cancel
+// window closes well before the event: Moderate (5 days), Strict or No
+// refunds. Flexible (24 hours) and an unset policy (always refunded) are out.
+func BoostAllowsRefundPolicy(p *models.CancellationPolicy) bool {
+	if p == nil {
+		return false
+	}
+	switch *p {
+	case models.CancellationModerate, models.CancellationStrict, models.CancellationNoRefund:
+		return true
+	}
+	return false
+}
+
+// BoostRefundPolicyProblem is what the host is told when the policy rules a
+// Boost out.
+const BoostRefundPolicyProblem = "Boosted events need a Moderate, Strict or No refunds policy. Change it in Refunds & payout first."
+
 // BoostError carries the HTTP status and a stable code for the website.
 type BoostError struct {
 	Status  int
@@ -223,6 +243,9 @@ func (s *BoostService) eligibility(ctx context.Context, h *models.Host, evt *mod
 	}
 	if evt.Status != models.EventStatusLive {
 		return "Publish the event first.", nil
+	}
+	if !BoostAllowsRefundPolicy(evt.CancellationPolicy) {
+		return BoostRefundPolicyProblem, nil
 	}
 	avail, err := s.events.GetEventAvailability(ctx, evt.ID)
 	if err != nil {
@@ -679,6 +702,9 @@ func (s *BoostService) GoLive(ctx context.Context, admin string, boostID uuid.UU
 		}
 		if !pricesUnchanged(b.Rates, types) {
 			return boostErr(http.StatusUnprocessableEntity, "quote_expired", "The host changed ticket prices after accepting. Send a new proposal.")
+		}
+		if !BoostAllowsRefundPolicy(evt.CancellationPolicy) {
+			return boostErr(http.StatusUnprocessableEntity, "refund_policy", "The event's refund policy is Flexible or not set. Ask the host to switch to Moderate, Strict or No refunds before going live.")
 		}
 		end := until
 		if end == nil {

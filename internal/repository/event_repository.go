@@ -89,6 +89,9 @@ type EventRepository interface {
 	// routes through here, so co-hosting does not have to be re-implemented in
 	// each service.
 	HostCanManage(ctx context.Context, eventID, hostID uuid.UUID) (bool, error)
+	// HasOpenBoost reports whether the event has a Boost request, proposal or
+	// live Boost (anything not yet ended, declined or cancelled).
+	HasOpenBoost(ctx context.Context, eventID uuid.UUID) (bool, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status models.EventStatus) error
 	// SetStateCode stores the venue's GST state code; "" clears it.
 	SetStateCode(ctx context.Context, id uuid.UUID, code string) error
@@ -324,6 +327,13 @@ func (r *postgresEventRepository) HostCanManage(ctx context.Context, eventID, ho
 		WHERE events.id = $2 AND ` + hostManagesEvent + `)`
 	var ok bool
 	err := r.db.QueryRowContext(ctx, query, hostID, eventID).Scan(&ok)
+	return ok, err
+}
+
+func (r *postgresEventRepository) HasOpenBoost(ctx context.Context, eventID uuid.UUID) (bool, error) {
+	var ok bool
+	err := r.db.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM event_boosts WHERE event_id = $1 AND status IN ('under_review', 'quote_ready', 'live'))`, eventID).Scan(&ok)
 	return ok, err
 }
 

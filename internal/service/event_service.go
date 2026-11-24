@@ -221,6 +221,11 @@ type eventService struct {
 
 var ErrInvalidEventMood = errors.New("invalid event mood")
 
+// ErrBoostNeedsRefundPolicy is returned when an edit would give an event with
+// an open Boost a refund policy a Boost does not allow (see
+// BoostAllowsRefundPolicy).
+var ErrBoostNeedsRefundPolicy = errors.New("This event has a Boost, so its refund policy must be Moderate, Strict or No refunds. Stop the Boost first to switch to Flexible.")
+
 // ErrSlugTaken is returned when an admin-supplied slug is already used by
 // another event.
 var ErrSlugTaken = errors.New("slug already in use")
@@ -629,6 +634,15 @@ func (s *eventService) UpdateEvent(ctx context.Context, eventID uuid.UUID, hostI
 		}
 	}
 	if req.CancellationPolicy != nil {
+		if !BoostAllowsRefundPolicy(req.CancellationPolicy) && BoostAllowsRefundPolicy(evt.CancellationPolicy) {
+			open, err := s.eventRepo.HasOpenBoost(ctx, evt.ID)
+			if err != nil {
+				return nil, fmt.Errorf("check boost: %w", err)
+			}
+			if open {
+				return nil, ErrBoostNeedsRefundPolicy
+			}
+		}
 		evt.CancellationPolicy = req.CancellationPolicy
 	}
 	if req.RequiresAttendeeDetails != nil {

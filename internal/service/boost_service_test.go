@@ -100,3 +100,23 @@ func TestBoostPricesUnchanged(t *testing.T) {
 		t.Fatal("new ticket type missed")
 	}
 }
+
+func TestBoostAllowsRefundPolicy(t *testing.T) {
+	p := func(c models.CancellationPolicy) *models.CancellationPolicy { return &c }
+	cases := []struct {
+		policy *models.CancellationPolicy
+		want   bool
+	}{
+		{nil, false}, // unset: always refunded
+		{p(models.CancellationFlexible), false},
+		{p(models.CancellationModerate), true},
+		{p(models.CancellationStrict), true},
+		{p(models.CancellationNoRefund), true},
+		{p("something_else"), false},
+	}
+	for _, c := range cases {
+		if got := BoostAllowsRefundPolicy(c.policy); got != c.want {
+			t.Errorf("BoostAllowsRefundPolicy(%v) = %v, want %v", c.policy, got, c.want)
+		}
+	}
+}

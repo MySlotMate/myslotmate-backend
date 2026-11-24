@@ -577,6 +577,10 @@ func (c *EventController) UpdateEvent(w http.ResponseWriter, r *http.Request) {
 			RespondError(w, http.StatusConflict, err.Error())
 			return
 		}
+		if errors.Is(err, service.ErrBoostNeedsRefundPolicy) {
+			RespondError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err.Error() == "unauthorized: you do not own this event" {
 			RespondError(w, http.StatusForbidden, err.Error())
 			return

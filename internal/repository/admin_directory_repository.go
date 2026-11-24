@@ -279,7 +279,13 @@ func (r *AdminDirectoryRepository) ListEvents(ctx context.Context, p ListEventsP
 			e.is_recurring,
 			e.title,
 			e.mood,
-			e.price_cents,
+			-- Events with ticket types keep price_cents at 0; show the
+			-- cheapest active ticket, as the website's "from ₹X" does.
+			COALESCE(
+				(SELECT MIN(t.price_cents) FROM event_price_tiers t
+				  WHERE t.event_id = e.id AND t.is_active = TRUE),
+				e.price_cents
+			) AS price_cents,
 			e.is_free,
 			e.total_bookings,
 			e.avg_rating,

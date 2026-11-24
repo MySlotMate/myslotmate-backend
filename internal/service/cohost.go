@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"regexp"
 	"strings"
+	"time"
 
 	"myslotmate-backend/internal/lib/timeutil"
 
@@ -69,6 +71,9 @@ func (s *payoutService) InviteCoHost(ctx context.Context, ownerHostID, eventID u
 	if email == "" {
 		return nil, errors.New("email is required")
 	}
+	if !emailPattern.MatchString(email) {
+		return nil, errors.New("that doesn't look like an email address")
+	}
 
 	evt, err := s.eventRepo.GetByID(ctx, eventID)
 	if err != nil {
@@ -78,21 +83,37 @@ func (s *payoutService) InviteCoHost(ctx context.Context, ownerHostID, eventID u
 		return nil, errors.New("only the event owner can invite a co-host")
 	}
 
-	// The invite resolves to an existing host account or it fails — no
-	// pending-by-email state to reconcile later.
+	owner, _ := s.hostRepo.GetByID(ctx, ownerHostID)
+	if ownerEmail := s.hostEmail(ctx, owner); ownerEmail != "" && ownerEmail == email {
+		return nil, errors.New("that's your own email; enter the email of the host you want to invite")
+	}
+
 	user, err := s.userRepo.GetByEmail(ctx, email)
 	if err != nil {
 		return nil, err
 	}
-	if user == nil {
-		return nil, errors.New("no MySlotMate account for that email; ask them to sign up and become a host first")
-	}
-	invitee, err := s.hostRepo.GetByUserID(ctx, user.ID)
-	if err != nil {
-		return nil, err
+	var invitee *models.Host
+	if user != nil {
+		if invitee, err = s.hostRepo.GetByUserID(ctx, user.ID); err != nil {
+			return nil, err
+		}
 	}
 	if invitee == nil {
-		return nil, errors.New("that user is not a host yet; ask them to complete host onboarding first")
+		// Not on MySlotMate yet, or not a host yet: the invite waits for that
+		// email and becomes a normal invitation once they are a host
+		// (AttachEmailInvites, run when their dashboard loads).
+		inv := &repository.CoHostEmailInvite{EventID: eventID, Email: email, InvitedByHostID: ownerHostID, CanWithdraw: canWithdraw}
+		if err := s.cohostRepo.CreateEmailInvite(ctx, inv); err != nil {
+			if errors.Is(err, repository.ErrEmailInviteOpen) {
+				return nil, errors.New("you've already invited that email to this event")
+			}
+			return nil, err
+		}
+		s.inBackground("signup invite to "+email, func(ctx context.Context) error {
+			return s.emailCoHostSignupInvite(ctx, inv, evt, owner, user != nil)
+		})
+		return &models.EventCoHost{ID: inv.ID, EventID: eventID, InvitedByHostID: ownerHostID,
+			Status: models.CoHostAwaitingSignup, CanWithdraw: canWithdraw}, nil
 	}
 	if invitee.ID == ownerHostID {
 		return nil, errors.New("you already own this event")
@@ -120,15 +141,85 @@ func (s *payoutService) InviteCoHost(ctx context.Context, ownerHostID, eventID u
 		return nil, err
 	}
 
-	// Tell them. Best-effort: a mail failure must not undo a stored invitation —
-	// the invitee can still find it in their dashboard, and the owner can resend.
-	owner, _ := s.hostRepo.GetByID(ctx, ownerHostID)
-	s.sendCoHostInviteEmail(ctx, ch, evt, owner, user)
+	// Tell them, in the app and by email. Both best-effort and off the request:
+	// a slow mail server must not hold up (or undo) a stored invitation — the
+	// invitee still finds it in their dashboard, and the owner can resend.
+	s.notifyCoHostInvite(ctx, user.ID, owner, evt)
+	s.inBackground("invite email to "+user.Email, func(ctx context.Context) error {
+		return s.emailCoHostInvite(ctx, ch, evt, owner, user)
+	})
 	return ch, nil
 }
 
+// inBackground runs a best-effort job (an email) off the request, with its own
+// time limit, and logs a failure. The caller's context ends with the request.
+func (s *payoutService) inBackground(what string, job func(ctx context.Context) error) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := job(ctx); err != nil {
+			fmt.Printf("[COHOST] %s failed: %v\n", what, err)
+		}
+	}()
+}
+
+// hostEmail is the host's sign-in email, lower-cased ("" when unknown).
+func (s *payoutService) hostEmail(ctx context.Context, h *models.Host) string {
+	if h == nil {
+		return ""
+	}
+	u, err := s.userRepo.GetByID(ctx, h.UserID)
+	if err != nil || u == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(u.Email))
+}
+
+func hostDisplayName(h *models.Host) string {
+	if h != nil {
+		if n := strings.TrimSpace(h.FirstName + " " + h.LastName); n != "" {
+			return n
+		}
+	}
+	return "A host"
+}
+
+// notifyCoHostInvite puts the invitation in the invitee's in-app inbox.
+func (s *payoutService) notifyCoHostInvite(ctx context.Context, userID uuid.UUID, owner *models.Host, evt *models.Event) {
+	title := "an experience"
+	if evt != nil {
+		title = evt.Title
+	}
+	if err := s.cohostRepo.Notify(ctx, userID, "Co-host invitation",
+		fmt.Sprintf("%s invited you to co-host %s. Accept or decline it under Co-hosts in your host dashboard.", hostDisplayName(owner), title), nil); err != nil {
+		fmt.Printf("[COHOST] in-app notice failed: %v\n", err)
+	}
+}
+
+var emailPattern = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+
 // ResendCoHostInvite re-sends the invitation email for a still-pending invite.
 func (s *payoutService) ResendCoHostInvite(ctx context.Context, ownerHostID, cohostID uuid.UUID) error {
+	if s.notif == nil {
+		return errors.New("email is not configured on this server")
+	}
+	if inv, err := s.ownedEmailInvite(ctx, ownerHostID, cohostID); err != nil {
+		return err
+	} else if inv != nil {
+		if inv.Status != "pending" {
+			return fmt.Errorf("invitation is already %s", inv.Status)
+		}
+		evt, err := s.eventRepo.GetByID(ctx, inv.EventID)
+		if err != nil {
+			return err
+		}
+		owner, _ := s.hostRepo.GetByID(ctx, ownerHostID)
+		user, _ := s.userRepo.GetByEmail(ctx, inv.Email)
+		s.inBackground("signup invite to "+inv.Email, func(ctx context.Context) error {
+			return s.emailCoHostSignupInvite(ctx, inv, evt, owner, user != nil)
+		})
+		return nil
+	}
 	ch, err := s.ownedEventCoHost(ctx, ownerHostID, cohostID)
 	if err != nil {
 		return err
@@ -155,17 +246,55 @@ func (s *payoutService) ResendCoHostInvite(ctx context.Context, ownerHostID, coh
 		return errors.New("that host has no email address on file")
 	}
 	owner, _ := s.hostRepo.GetByID(ctx, ownerHostID)
-	if err := s.emailCoHostInvite(ctx, ch, evt, owner, user); err != nil {
-		return fmt.Errorf("could not send the invitation email: %w", err)
-	}
+	s.inBackground("invite email to "+user.Email, func(ctx context.Context) error {
+		return s.emailCoHostInvite(ctx, ch, evt, owner, user)
+	})
 	return nil
 }
 
-// sendCoHostInviteEmail is the fire-and-forget wrapper used on the invite path.
-func (s *payoutService) sendCoHostInviteEmail(ctx context.Context, ch *models.EventCoHost, evt *models.Event, owner *models.Host, user *models.User) {
-	if err := s.emailCoHostInvite(ctx, ch, evt, owner, user); err != nil {
-		fmt.Printf("[COHOST] invite email to %s failed: %v\n", user.Email, err)
+// ownedEmailInvite loads an email invite by id and proves the caller owns its
+// event. (nil, nil) when the id is not an email invite.
+func (s *payoutService) ownedEmailInvite(ctx context.Context, ownerHostID, id uuid.UUID) (*repository.CoHostEmailInvite, error) {
+	inv, err := s.cohostRepo.GetEmailInvite(ctx, id)
+	if err != nil || inv == nil {
+		return nil, err
 	}
+	evt, err := s.eventRepo.GetByID(ctx, inv.EventID)
+	if err != nil {
+		return nil, err
+	}
+	if evt == nil || evt.HostID != ownerHostID {
+		return nil, errors.New("only the event owner can manage its co-hosts")
+	}
+	return inv, nil
+}
+
+// emailCoHostSignupInvite asks someone with no host profile yet to join (or
+// become a host) to co-host the event. hasAccount: they already have a
+// MySlotMate account and only need to become a host.
+func (s *payoutService) emailCoHostSignupInvite(ctx context.Context, inv *repository.CoHostEmailInvite, evt *models.Event, owner *models.Host, hasAccount bool) error {
+	if s.notif == nil {
+		return errors.New("email is not configured on this server")
+	}
+	title, when := "an experience", ""
+	if evt != nil {
+		title = evt.Title
+		when = timeutil.FormatEventTime(evt.Time)
+	}
+	step := "Create your MySlotMate account with this email address, then apply to become a host."
+	if hasAccount {
+		step = "Sign in to MySlotMate with this email address and apply to become a host."
+	}
+	body := fmt.Sprintf(`
+<p>Hi there,</p>
+<p><strong>%s</strong> invited you to co-host <strong>%s</strong>%s on MySlotMate.</p>
+<p>As a co-host you can manage the experience with them: edit it, see who booked, and check guests in.</p>
+<p>%s The invitation will be waiting under <strong>Co-hosts</strong> in your host dashboard, ready to accept.</p>
+<p><a href="%s">Become a host on MySlotMate</a></p>
+<p style="color:#666;font-size:12px">You are seeing this because someone entered this email address as a co-host on MySlotMate.</p>`,
+		htmlEscape(hostDisplayName(owner)), htmlEscape(title), htmlWhen(when), step, s.frontendBaseURL+"/become-host")
+	subject := fmt.Sprintf("%s invited you to co-host %s on MySlotMate", hostDisplayName(owner), title)
+	return s.notif.SendCustomEmail(ctx, inv.Email, subject, body)
 }
 
 func (s *payoutService) emailCoHostInvite(ctx context.Context, ch *models.EventCoHost, evt *models.Event, owner *models.Host, user *models.User) error {
@@ -250,10 +379,23 @@ func (s *payoutService) ListEventCoHosts(ctx context.Context, ownerHostID, event
 			return nil, errors.New("not your event")
 		}
 	}
-	return s.cohostRepo.ListByEvent(ctx, eventID)
+	rows, err := s.cohostRepo.ListByEvent(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	waiting, err := s.cohostRepo.ListEmailInvites(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	return append(waiting, rows...), nil
 }
 
 func (s *payoutService) SetCoHostCanWithdraw(ctx context.Context, ownerHostID, cohostID uuid.UUID, canWithdraw bool) error {
+	if inv, err := s.ownedEmailInvite(ctx, ownerHostID, cohostID); err != nil {
+		return err
+	} else if inv != nil {
+		return s.cohostRepo.SetEmailInviteCanWithdraw(ctx, inv.ID, canWithdraw)
+	}
 	ch, err := s.ownedEventCoHost(ctx, ownerHostID, cohostID)
 	if err != nil {
 		return err
@@ -264,6 +406,11 @@ func (s *payoutService) SetCoHostCanWithdraw(ctx context.Context, ownerHostID, c
 }
 
 func (s *payoutService) RevokeCoHost(ctx context.Context, ownerHostID, cohostID uuid.UUID) error {
+	if inv, err := s.ownedEmailInvite(ctx, ownerHostID, cohostID); err != nil {
+		return err
+	} else if inv != nil {
+		return s.cohostRepo.SetEmailInviteStatus(ctx, inv.ID, "revoked")
+	}
 	ch, err := s.ownedEventCoHost(ctx, ownerHostID, cohostID)
 	if err != nil {
 		return err
@@ -282,13 +429,57 @@ func (s *payoutService) RespondToCoHostInvite(ctx context.Context, hostID, cohos
 	if ch.Status != models.CoHostPending {
 		return fmt.Errorf("invitation is already %s", ch.Status)
 	}
+	status := models.CoHostDeclined
 	if accept {
-		return s.cohostRepo.SetStatus(ctx, ch.ID, models.CoHostAccepted)
+		status = models.CoHostAccepted
 	}
-	return s.cohostRepo.SetStatus(ctx, ch.ID, models.CoHostDeclined)
+	if err := s.cohostRepo.SetStatus(ctx, ch.ID, status); err != nil {
+		return err
+	}
+	// Tell the owner, in the app. Best-effort.
+	if evt, _ := s.eventRepo.GetByID(ctx, ch.EventID); evt != nil {
+		if owner, _ := s.hostRepo.GetByID(ctx, ch.InvitedByHostID); owner != nil {
+			me, _ := s.hostRepo.GetByID(ctx, hostID)
+			verb := "declined"
+			if accept {
+				verb = "accepted"
+			}
+			if err := s.cohostRepo.Notify(ctx, owner.UserID, "Co-host invitation "+verb,
+				fmt.Sprintf("%s %s your invitation to co-host %s.", hostDisplayName(me), verb, evt.Title), nil); err != nil {
+				fmt.Printf("[COHOST] in-app notice failed: %v\n", err)
+			}
+		}
+	}
+	return nil
+}
+
+// attachEmailInvites turns invites sent to this host's email before they were a
+// host into normal invitations, and tells them in the app. Best-effort: it runs
+// on every dashboard load (summary, shared list), so a miss is retried.
+func (s *payoutService) attachEmailInvites(ctx context.Context, hostID uuid.UUID) {
+	attached, err := s.cohostRepo.AttachEmailInvites(ctx, hostID)
+	if err != nil {
+		fmt.Printf("[COHOST] attach email invites for %s: %v\n", hostID, err)
+		return
+	}
+	if len(attached) == 0 {
+		return
+	}
+	me, _ := s.hostRepo.GetByID(ctx, hostID)
+	if me == nil {
+		return
+	}
+	for _, a := range attached {
+		if err := s.cohostRepo.Notify(ctx, me.UserID, "Co-host invitation",
+			fmt.Sprintf("%s invited you to co-host %s. Accept or decline it under Co-hosts in your host dashboard.",
+				firstNonEmpty(a.OwnerName, "A host"), a.EventTitle), nil); err != nil {
+			fmt.Printf("[COHOST] in-app notice failed: %v\n", err)
+		}
+	}
 }
 
 func (s *payoutService) CoHostSummary(ctx context.Context, hostID uuid.UUID) (*CoHostSummary, error) {
+	s.attachEmailInvites(ctx, hostID)
 	received, granted, err := s.cohostRepo.CountsForHost(ctx, hostID)
 	if err != nil {
 		return nil, err
@@ -297,6 +488,7 @@ func (s *payoutService) CoHostSummary(ctx context.Context, hostID uuid.UUID) (*C
 }
 
 func (s *payoutService) ListSharedEvents(ctx context.Context, hostID uuid.UUID) ([]*repository.SharedEventRow, error) {
+	s.attachEmailInvites(ctx, hostID)
 	return s.cohostRepo.ListSharedWithHost(ctx, hostID)
 }
 

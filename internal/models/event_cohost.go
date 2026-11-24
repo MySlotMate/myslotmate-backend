@@ -14,6 +14,10 @@ const (
 	CoHostAccepted CoHostStatus = "accepted"
 	CoHostDeclined CoHostStatus = "declined"
 	CoHostRevoked  CoHostStatus = "revoked"
+	// CoHostAwaitingSignup is shown on the owner's roster for an invite sent to
+	// an email with no host profile yet (event_cohost_email_invites). It is
+	// never stored in event_co_hosts.
+	CoHostAwaitingSignup CoHostStatus = "awaiting_signup"
 )
 
 // EventCoHost is another host sharing ONE event with its owner. An accepted
@@ -27,8 +31,8 @@ const (
 type EventCoHost struct {
 	ID      uuid.UUID `db:"id" json:"id"`
 	EventID uuid.UUID `db:"event_id" json:"event_id"`
-	// HostID is the invited host. Invites resolve to an existing host account —
-	// there is no pending-by-email row.
+	// HostID is the invited host. An invite to an email with no host profile
+	// yet waits in event_cohost_email_invites instead and has no row here.
 	HostID          uuid.UUID    `db:"host_id" json:"host_id"`
 	InvitedByHostID uuid.UUID    `db:"invited_by_host_id" json:"invited_by_host_id"`
 	Status          CoHostStatus `db:"status" json:"status"`

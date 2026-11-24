@@ -55,6 +55,15 @@ type CoHostRepository interface {
 	// granted on their own experiences. Used to decide whether the dashboard
 	// shows a co-hosting tab.
 	CountsForHost(ctx context.Context, hostID uuid.UUID) (received int, granted int, err error)
+
+	// Invites to an email with no host profile yet (cohost_email_repository.go).
+	CreateEmailInvite(ctx context.Context, inv *CoHostEmailInvite) error
+	GetEmailInvite(ctx context.Context, id uuid.UUID) (*CoHostEmailInvite, error)
+	ListEmailInvites(ctx context.Context, eventID uuid.UUID) ([]*CoHostRow, error)
+	SetEmailInviteStatus(ctx context.Context, id uuid.UUID, status string) error
+	SetEmailInviteCanWithdraw(ctx context.Context, id uuid.UUID, canWithdraw bool) error
+	AttachEmailInvites(ctx context.Context, hostID uuid.UUID) ([]AttachedInvite, error)
+	Notify(ctx context.Context, userID uuid.UUID, title, body string, url *string) error
 }
 
 // CoHostRow is one co-host plus who they are, for the owner's manage panel.

@@ -378,7 +378,7 @@ func (r *BillingRepository) StatementSales(ctx context.Context, hostID uuid.UUID
 		  ) s
 		  JOIN events e ON e.id = s.event_id
 		 WHERE e.host_id = $1 AND s.created_at >= $2 AND s.created_at < $3 AND s.ticket > 0
-		 ORDER BY s.created_at`, hostID, from, to)
+		 ORDER BY s.created_at, s.id`, hostID, from, to)
 	if err != nil {
 		return nil, err
 	}

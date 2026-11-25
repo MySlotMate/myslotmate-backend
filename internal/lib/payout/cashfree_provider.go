@@ -579,7 +579,7 @@ var unusableBeneficiaryStatuses = map[string]bool{
 // Cashfree keeps ONE beneficiary per bank account + IFSC: when the account was
 // registered before under another id — say an earlier payout method the host
 // deleted and added again — creating it is refused with 409
-// beneficiary_already_exists, and req.BeneID never exists at Cashfree. The old
+// conflict_with_existing_beneficiary, and req.BeneID never exists at Cashfree. The old
 // code took any "already exists" answer as success and then paid req.BeneID,
 // which Cashfree rejected with beneficiary_not_found. Here we look the account
 // up and pay the id Cashfree already has.
@@ -604,7 +604,11 @@ func (p *CashfreeProvider) ensureBeneficiary(ctx context.Context, req TransferRe
 		fmt.Printf("[CASHFREE] Beneficiary %s already registered\n", beneID)
 		return beneID, nil
 
-	case "beneficiary_already_exists":
+	// The docs name beneficiary_already_exists; the live API answers
+	// conflict_with_existing_beneficiary ("Beneficiary with the given
+	// bank_account_number and bank_ifsc already exists"). Both mean the account
+	// is registered under another id.
+	case "beneficiary_already_exists", "conflict_with_existing_beneficiary":
 		account := strings.TrimSpace(req.AccountNumber)
 		ifsc := strings.ToUpper(strings.TrimSpace(req.IFSC))
 		if account == "" || ifsc == "" {

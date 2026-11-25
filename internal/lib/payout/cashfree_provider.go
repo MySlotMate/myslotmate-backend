@@ -604,7 +604,9 @@ func (p *CashfreeProvider) ensureBeneficiary(ctx context.Context, req TransferRe
 		fmt.Printf("[CASHFREE] Beneficiary %s already registered\n", beneID)
 		return beneID, nil
 
-	case "beneficiary_already_exists":
+	// Cashfree has sent both codes for "this bank account + IFSC is already a
+	// beneficiary under another id"; prod returned conflict_with_existing_beneficiary.
+	case "beneficiary_already_exists", "conflict_with_existing_beneficiary":
 		account := strings.TrimSpace(req.AccountNumber)
 		ifsc := strings.ToUpper(strings.TrimSpace(req.IFSC))
 		if account == "" || ifsc == "" {

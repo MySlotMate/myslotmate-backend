@@ -74,6 +74,20 @@ func TestEnsureBeneficiary_AccountRegisteredUnderOtherID(t *testing.T) {
 	}
 }
 
+// The code prod actually returned on 2026-11-25 for the same situation.
+func TestEnsureBeneficiary_ConflictWithExistingBeneficiary(t *testing.T) {
+	p, _ := fakeCashfree(t,
+		409, `{"type":"invalid_request_error","code":"conflict_with_existing_beneficiary","message":"Beneficiary with the given bank_account_number and bank_ifsc already exists"}`,
+		200, `{"beneficiary_id":"oldmethod0000","beneficiary_status":"VERIFIED"}`)
+	id, err := p.ensureBeneficiary(context.Background(), bankReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "oldmethod0000" {
+		t.Fatalf("paid %q, want the id Cashfree already has", id)
+	}
+}
+
 func TestEnsureBeneficiary_ExistingBeneficiaryUnusable(t *testing.T) {
 	p, _ := fakeCashfree(t,
 		409, `{"code":"beneficiary_already_exists"}`,

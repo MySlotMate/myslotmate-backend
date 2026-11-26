@@ -312,7 +312,41 @@ func (s *BoostService) Request(ctx context.Context, userID, eventID uuid.UUID, r
 	if acc == nil || !acc.Invited {
 		return nil, boostErr(http.StatusForbidden, "boost_not_invited", "Event Boost is in a pilot with invited hosts. Ask the MySlotMate team to add you.")
 	}
+	b, err := s.create(ctx, h, evt, req, "host", h.ID.String(), "requested")
+	if err != nil {
+		return nil, err
+	}
+	s.mailAdmin(fmt.Sprintf("New Boost request: %s", evt.Title),
+		fmt.Sprintf("<p><strong>%s</strong> asked to boost <strong>%s</strong>.</p><p>Review it in the admin under Boosts.</p>",
+			html.EscapeString(strings.TrimSpace(h.FirstName+" "+h.LastName)), html.EscapeString(evt.Title)))
+	return b, nil
+}
 
+// AdminStart opens a Boost on any host's event from the admin, as if the host
+// had asked: it lands in the queue as a new request, the admin sends the
+// proposal, and nothing is charged until the host accepts it and the Boost
+// goes live. The pilot invite is not needed; every other request check is.
+func (s *BoostService) AdminStart(ctx context.Context, admin string, eventID uuid.UUID, req BoostRequest) (*models.Boost, error) {
+	evt, err := s.eventRepo.GetByID(ctx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	if evt == nil {
+		return nil, boostErr(http.StatusNotFound, "event_not_found", "Event not found.")
+	}
+	h, err := s.hostRepo.GetByID(ctx, evt.HostID)
+	if err != nil {
+		return nil, err
+	}
+	if h == nil {
+		return nil, boostErr(http.StatusUnprocessableEntity, "event_not_eligible", "This event has no host.")
+	}
+	return s.create(ctx, h, evt, req, "admin", admin, "started_by_admin")
+}
+
+// create validates a Boost request for the event and stores it as a new
+// request with the guide rates as a preview.
+func (s *BoostService) create(ctx context.Context, h *models.Host, evt *models.Event, req BoostRequest, actorKind, actor, action string) (*models.Boost, error) {
 	seen := map[string]bool{}
 	channels := []string{}
 	for _, c := range req.Channels {
@@ -364,16 +398,13 @@ func (s *BoostService) Request(ctx context.Context, userID, eventID uuid.UUID, r
 		if err := r.Create(ctx, b); err != nil {
 			return err
 		}
-		return r.Log(ctx, b.ID, "host", h.ID.String(), "requested", map[string]any{"channels": channels})
+		return r.Log(ctx, b.ID, actorKind, actor, action, map[string]any{"channels": channels})
 	}); err != nil {
 		if errors.Is(err, repository.ErrBoostOpen) {
 			return nil, boostErr(http.StatusConflict, "boost_already_open", "This event already has a Boost request or a live Boost.")
 		}
 		return nil, err
 	}
-	s.mailAdmin(fmt.Sprintf("New Boost request: %s", evt.Title),
-		fmt.Sprintf("<p><strong>%s</strong> asked to boost <strong>%s</strong>.</p><p>Review it in the admin under Boosts.</p>",
-			html.EscapeString(strings.TrimSpace(h.FirstName+" "+h.LastName)), html.EscapeString(evt.Title)))
 	return s.repo.GetByID(ctx, b.ID)
 }
 

@@ -40,6 +40,7 @@ func (c *BoostController) RegisterRoutes(r chi.Router) {
 	r.Route("/admin/boosts", func(r chi.Router) {
 		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
 		r.Get("/", c.AdminList)
+		r.Post("/", c.AdminStart)
 		r.Get("/{boostID}", c.AdminGet)
 		r.Put("/{boostID}/proposal", c.Propose)
 		r.Post("/{boostID}/decline", c.Decline)
@@ -219,6 +220,29 @@ func (c *BoostController) AdminList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	RespondSuccess(w, http.StatusOK, map[string]any{"items": list, "counts": counts})
+}
+
+// AdminStart opens a Boost on any event from the admin (see BoostService.AdminStart).
+func (c *BoostController) AdminStart(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		EventID string `json:"event_id"`
+		service.BoostRequest
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	eventID, err := uuid.Parse(body.EventID)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid event_id")
+		return
+	}
+	b, err := c.boosts.AdminStart(r.Context(), adminName(r), eventID, body.BoostRequest)
+	if err != nil {
+		respondBoost(w, err)
+		return
+	}
+	RespondSuccess(w, http.StatusCreated, b)
 }
 
 func (c *BoostController) AdminGet(w http.ResponseWriter, r *http.Request) {

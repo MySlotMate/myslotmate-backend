@@ -460,6 +460,64 @@ func (s *BoostService) Accept(ctx context.Context, userID, boostID uuid.UUID, ip
 	return s.repo.GetByID(ctx, boostID)
 }
 
+// AdminAccept accepts the open proposal for the host, when the host agreed
+// to it off the website (on a call, say) and asked the team to handle it.
+// The same checks as the host's own Accept apply. howAgreed says how the
+// host agreed and is kept in the log; the request's IP and browser are
+// stored as the acceptance's, and the host is emailed that the team
+// accepted on their behalf, so they can stop it if that isn't right.
+func (s *BoostService) AdminAccept(ctx context.Context, admin string, boostID uuid.UUID, howAgreed, ip, userAgent string) (*models.Boost, error) {
+	howAgreed = strings.TrimSpace(howAgreed)
+	if howAgreed == "" {
+		return nil, boostErr(http.StatusBadRequest, "how_agreed_required", "Say how the host agreed to the proposal, for example on a call and when.")
+	}
+	if len([]rune(howAgreed)) > 500 {
+		return nil, boostErr(http.StatusBadRequest, "too_long", "Keep it under 500 characters.")
+	}
+	err := s.inTx(ctx, func(r *repository.BoostRepository) error {
+		b, err := r.GetForUpdate(ctx, boostID)
+		if err != nil {
+			return err
+		}
+		if b == nil {
+			return boostErr(http.StatusNotFound, "boost_not_found", "Boost not found.")
+		}
+		if b.Status != models.BoostQuoteReady || b.AcceptedAt != nil {
+			return boostErr(http.StatusConflict, "invalid_state", "There's no proposal waiting to be accepted.")
+		}
+		evt, err := s.eventRepo.GetByID(ctx, b.EventID)
+		if err != nil || evt == nil {
+			return fmt.Errorf("load event: %v", err)
+		}
+		now, err := s.ticketTypes(ctx, evt)
+		if err != nil {
+			return err
+		}
+		if !pricesUnchanged(b.Rates, now) {
+			return boostErr(http.StatusUnprocessableEntity, "quote_expired", "The host changed ticket prices after this proposal. Send a new one first.")
+		}
+		if err := r.SetAccepted(ctx, b.ID, ip, userAgent); err != nil {
+			return err
+		}
+		return r.Log(ctx, b.ID, "admin", admin, "accepted_for_host",
+			map[string]any{"how_agreed": howAgreed, "terms_version": models.BoostTermsVersion})
+	})
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.repo.GetByID(ctx, boostID)
+	if err == nil && out != nil {
+		rates := make([]string, 0, len(out.Rates))
+		for _, rt := range out.Rates {
+			rates = append(rates, fmt.Sprintf("%s: %d.%02d%%", html.EscapeString(rt.TicketName), rt.RateBps/100, rt.RateBps%100))
+		}
+		s.mailHost(ctx, out, "We accepted your Boost proposal for you",
+			fmt.Sprintf("<p>As agreed with you (%s), the MySlotMate team accepted the Boost proposal for <strong>%s</strong> on your behalf.</p><p>Commission per ticket sold while the Boost is live: %s. It comes out of your share; guests pay the same price. Nothing is charged until the ads go live.</p><p>If this isn't what you agreed, stop the Boost from the event page or reply to this email.</p>",
+				html.EscapeString(howAgreed), html.EscapeString(out.EventTitle), strings.Join(rates, ", ")))
+	}
+	return out, err
+}
+
 // Stop withdraws a request, declines a proposal, or stops a live Boost.
 func (s *BoostService) Stop(ctx context.Context, userID, boostID uuid.UUID) (*models.Boost, error) {
 	h, err := s.hostOf(ctx, userID)

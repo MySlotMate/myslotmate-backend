@@ -44,6 +44,7 @@ func (c *BoostController) RegisterRoutes(r chi.Router) {
 		r.Get("/{boostID}", c.AdminGet)
 		r.Put("/{boostID}/proposal", c.Propose)
 		r.Post("/{boostID}/decline", c.Decline)
+		r.Post("/{boostID}/accept", c.AdminAccept)
 		r.Post("/{boostID}/go-live", c.GoLive)
 		r.Post("/{boostID}/end", c.End)
 		r.Patch("/{boostID}/campaign", c.Campaign)
@@ -269,6 +270,31 @@ func (c *BoostController) Propose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b, err := c.boosts.Propose(r.Context(), adminName(r), id, p)
+	if err != nil {
+		respondBoost(w, err)
+		return
+	}
+	RespondSuccess(w, http.StatusOK, b)
+}
+
+// AdminAccept accepts the proposal for the host (see BoostService.AdminAccept).
+func (c *BoostController) AdminAccept(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r, "boostID")
+	if !ok {
+		return
+	}
+	var body struct {
+		HowAgreed string `json:"how_agreed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		RespondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	ua := r.UserAgent()
+	if len(ua) > 500 {
+		ua = ua[:500]
+	}
+	b, err := c.boosts.AdminAccept(r.Context(), adminName(r), id, body.HowAgreed, clientIP(r), ua)
 	if err != nil {
 		respondBoost(w, err)
 		return

@@ -182,6 +182,9 @@ type Event struct {
 	// Calculated fields (not in DB)
 	NextAvailableDate *time.Time `json:"next_available_date,omitempty"`
 	BookingsLastWeek  int        `json:"bookings_last_week,omitempty"`
+	// CoHostIDs are the accepted co-hosts, shown beside the owner under
+	// "Hosted by". Only filled on the single-event read.
+	CoHostIDs []uuid.UUID `json:"co_host_ids,omitempty"`
 
 	// Named ticket tiers loaded from event_price_tiers (not a column). Empty
 	// slice = single-price event driven by PriceCents.

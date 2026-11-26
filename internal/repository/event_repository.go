@@ -89,6 +89,9 @@ type EventRepository interface {
 	// routes through here, so co-hosting does not have to be re-implemented in
 	// each service.
 	HostCanManage(ctx context.Context, eventID, hostID uuid.UUID) (bool, error)
+	// AcceptedCoHostIDs lists the hosts who accepted a co-host invite for the
+	// event, oldest first, for the public "Hosted by" section.
+	AcceptedCoHostIDs(ctx context.Context, eventID uuid.UUID) ([]uuid.UUID, error)
 	// HasOpenBoost reports whether the event has a Boost request, proposal or
 	// live Boost (anything not yet ended, declined or cancelled).
 	HasOpenBoost(ctx context.Context, eventID uuid.UUID) (bool, error)
@@ -320,6 +323,24 @@ func (r *postgresEventRepository) GetByID(ctx context.Context, id uuid.UUID) (*m
 const hostManagesEvent = `(events.host_id = $1 OR EXISTS (
 	SELECT 1 FROM event_co_hosts ch
 	WHERE ch.event_id = events.id AND ch.host_id = $1 AND ch.status = 'accepted'))`
+
+func (r *postgresEventRepository) AcceptedCoHostIDs(ctx context.Context, eventID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT host_id FROM event_co_hosts WHERE event_id = $1 AND status = 'accepted' ORDER BY created_at`, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
 
 func (r *postgresEventRepository) HostCanManage(ctx context.Context, eventID, hostID uuid.UUID) (bool, error) {
 	const query = `SELECT EXISTS (

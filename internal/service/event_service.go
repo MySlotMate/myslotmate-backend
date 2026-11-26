@@ -894,6 +894,12 @@ func (s *eventService) enrichEvent(ctx context.Context, evt *models.Event) (*mod
 		return nil, err
 	}
 
+	if ids, err := s.eventRepo.AcceptedCoHostIDs(ctx, evt.ID); err == nil {
+		evt.CoHostIDs = ids
+	} else {
+		fmt.Printf("[EVENT_SERVICE] Error fetching co-hosts for %s: %v\n", evt.ID, err)
+	}
+
 	return evt, nil
 }
 

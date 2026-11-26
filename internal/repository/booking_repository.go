@@ -475,7 +475,11 @@ func (r *postgresBookingRepository) ListRecentCancelledByEventIDs(ctx context.Co
 		return nil, nil
 	}
 	query := `SELECT ` + bookingColumns + `
-		FROM bookings WHERE event_id = ANY($1) AND status = 'cancelled' ORDER BY cancelled_at DESC LIMIT $2`
+		FROM bookings WHERE event_id = ANY($1) AND status = 'cancelled'
+		  -- "Recent" = last 7 days; otherwise one old cancellation stayed in the host's
+		  -- notifications forever.
+		  AND cancelled_at > now() - interval '7 days'
+		ORDER BY cancelled_at DESC LIMIT $2`
 	rows, err := r.db.QueryContext(ctx, query, pq.Array(eventIDs), limit)
 	if err != nil {
 		return nil, err

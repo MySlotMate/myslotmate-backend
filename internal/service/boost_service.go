@@ -237,8 +237,12 @@ type BoostRequest struct {
 }
 
 // eligibility returns the first reason the event can't be boosted, or "".
-// byAdmin drops the BoostMinDaysAhead lead time: how close to the date the
-// team runs a Boost is the team's call. Host requests keep it.
+// byAdmin keeps only what a Boost can't run without (paid tickets, a
+// published event, the refund policy, an upcoming date) and drops the rest:
+// the BoostMinDaysAhead lead time, the unsold-ticket minimum, host approval
+// and a payout method are the team's call. Commission is taken from each
+// booking, so a host without a payout method still owes it; their earnings
+// simply wait until they add one. Host requests keep every rule.
 func (s *BoostService) eligibility(ctx context.Context, h *models.Host, evt *models.Event, types []models.BoostRate, now time.Time, byAdmin bool) (string, error) {
 	if evt.IsFree || len(types) == 0 {
 		return "Free events can't be boosted.", nil
@@ -268,7 +272,10 @@ func (s *BoostService) eligibility(ctx context.Context, h *models.Host, evt *mod
 	if next == nil {
 		return "This event has no upcoming dates.", nil
 	}
-	if !byAdmin && next.Sub(now) < BoostMinDaysAhead*24*time.Hour {
+	if byAdmin {
+		return "", nil
+	}
+	if next.Sub(now) < BoostMinDaysAhead*24*time.Hour {
 		return fmt.Sprintf("The next date is less than %d days away.", BoostMinDaysAhead), nil
 	}
 	allCheap := true

@@ -237,7 +237,9 @@ type BoostRequest struct {
 }
 
 // eligibility returns the first reason the event can't be boosted, or "".
-func (s *BoostService) eligibility(ctx context.Context, h *models.Host, evt *models.Event, types []models.BoostRate, now time.Time) (string, error) {
+// byAdmin drops the BoostMinDaysAhead lead time: how close to the date the
+// team runs a Boost is the team's call. Host requests keep it.
+func (s *BoostService) eligibility(ctx context.Context, h *models.Host, evt *models.Event, types []models.BoostRate, now time.Time, byAdmin bool) (string, error) {
 	if evt.IsFree || len(types) == 0 {
 		return "Free events can't be boosted.", nil
 	}
@@ -266,7 +268,7 @@ func (s *BoostService) eligibility(ctx context.Context, h *models.Host, evt *mod
 	if next == nil {
 		return "This event has no upcoming dates.", nil
 	}
-	if next.Sub(now) < BoostMinDaysAhead*24*time.Hour {
+	if !byAdmin && next.Sub(now) < BoostMinDaysAhead*24*time.Hour {
 		return fmt.Sprintf("The next date is less than %d days away.", BoostMinDaysAhead), nil
 	}
 	allCheap := true
@@ -372,7 +374,7 @@ func (s *BoostService) create(ctx context.Context, h *models.Host, evt *models.E
 		return nil, err
 	}
 	now := time.Now()
-	if reason, err := s.eligibility(ctx, h, evt, types, now); err != nil {
+	if reason, err := s.eligibility(ctx, h, evt, types, now, actorKind == "admin"); err != nil {
 		return nil, err
 	} else if reason != "" {
 		return nil, boostErr(http.StatusUnprocessableEntity, "event_not_eligible", reason)
@@ -545,7 +547,7 @@ func (s *BoostService) AdminGet(ctx context.Context, boostID uuid.UUID) (*BoostD
 	}
 	d := &BoostDetail{Boost: b, Event: evt, CurrentRates: cur, Bands: bands}
 	if h, err := s.hostRepo.GetByID(ctx, b.HostID); err == nil && h != nil {
-		if reason, err := s.eligibility(ctx, h, evt, types, time.Now()); err == nil {
+		if reason, err := s.eligibility(ctx, h, evt, types, time.Now(), true); err == nil {
 			d.Eligibility = reason
 		}
 	}

@@ -122,3 +122,35 @@ func TestBudgetBandRange(t *testing.T) {
 	}
 }
 
+
+func TestCreativeSizeLimit(t *testing.T) {
+	st := &models.BoostSettings{CreativeImageMaxMB: 20, CreativeVideoMaxMB: 200, CreativeOtherMaxMB: 50}
+	for _, c := range []struct {
+		typ, mime string
+		want      int64
+	}{
+		{models.CreativeReel, "video/mp4", 200 * mb},
+		{models.CreativePost, "image/png", 20 * mb},
+		{models.CreativeBrand, "image/png", 50 * mb}, // brand material: 50 MB whatever the file
+		{models.CreativeBrand, "application/zip", 50 * mb},
+		{"", "image/jpeg", 50 * mb}, // upload URL: the type isn't known yet
+	} {
+		if got := creativeSizeLimit(st, c.typ, c.mime); got != c.want {
+			t.Errorf("%s %s: %d, want %d", c.typ, c.mime, got, c.want)
+		}
+	}
+}
+
+func TestWeeklySummary(t *testing.T) {
+	b := &models.Boost{EventTitle: "Jam <night>", PaidCents: 700000}
+	res := &Results{Totals: ResultsDay{SpendCents: 300000, Reach: 5000, Clicks: 200, TicketsSold: 30}}
+	got := weeklySummary(b, res)
+	for _, want := range []string{"Jam &lt;night&gt;", "₹3000 of ₹7000", "Tickets sold: 30", "cost per ticket: ₹100"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary missing %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(weeklySummary(b, &Results{}), "cost per ticket: –") {
+		t.Error("no tickets should show a dash, not divide by zero")
+	}
+}

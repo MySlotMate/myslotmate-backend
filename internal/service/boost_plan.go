@@ -33,6 +33,12 @@ type BoostPayments interface {
 	CreatePaymentLink(ctx context.Context, req payment.PaymentLinkRequest) (*payment.PaymentLinkResponse, error)
 }
 
+// BoostWhatsApp sends a budget payment link on WhatsApp. Optional: the
+// notifier may implement it (a no-op when no template is configured).
+type BoostWhatsApp interface {
+	BoostPaymentWhatsApp(ctx context.Context, phone string, params map[string]string) error
+}
+
 // BoostFiles is the storage the creatives and reports use (storage.UploadService).
 type BoostFiles interface {
 	PresignBoostUpload(ctx context.Context, key, contentType string, size int64) (string, error)
@@ -53,10 +59,6 @@ const (
 	boostTitleMax    = 200
 	spendEntriesMax  = 200
 	budgetWarnBps    = 8000 // email the host once 80% of the budget is spent
-	creativeImageMax = 20 * mb
-	creativeVideoMax = 200 * mb
-	creativeOtherMax = 50 * mb
-	reportMax        = 50 * mb
 )
 
 /* ------------------------------------------------------------------ */
@@ -327,8 +329,25 @@ func (s *BoostService) proposeBudget(ctx context.Context, r *repository.BoostRep
 			return err
 		}
 	}
-	if b.PricingModel != models.BoostPricingBudget || (p.DailyBudgetCents == nil && p.BudgetFrom == "" && p.BudgetUntil == "") {
+	if p.DailyBudgetCents == nil && p.BudgetFrom == "" && p.BudgetUntil == "" {
 		return nil
+	}
+	if b.PricingModel != models.BoostPricingBudget {
+		// Launch: an open no_upfront request re-proposed with a budget plan
+		// moves to the new model (version 2 rates, budget paid upfront).
+		if b.AcceptedAt != nil {
+			return boostErr(http.StatusConflict, "already_accepted", "An accepted Boost keeps its terms until it ends.")
+		}
+		if err := s.requirePremium(ctx, r, b.HostID); err != nil {
+			return err
+		}
+		if err := r.SetPricingModel(ctx, b.ID, models.BoostPricingBudget, models.BudgetUnpaid); err != nil {
+			return err
+		}
+		b.PricingModel, b.BudgetStatus = models.BoostPricingBudget, models.BudgetUnpaid
+		if err := r.Log(ctx, b.ID, "system", "", "moved_to_budget_model", nil); err != nil {
+			return err
+		}
 	}
 	daily, from, until := p.DailyBudgetCents, p.BudgetFrom, p.BudgetUntil
 	if daily == nil {
@@ -853,6 +872,15 @@ func (s *BoostService) AdminPaymentLink(ctx context.Context, admin string, boost
 	}
 	_ = s.repo.Log(ctx, b.ID, "admin", admin, "payment_link_sent", map[string]any{"payment_id": p.ID, "kind": p.Kind,
 		"total_cents": p.TotalCents(), "expires": expire})
+	if wa, ok := s.notify.(BoostWhatsApp); ok && phone != "" {
+		params := map[string]string{"name": strings.TrimSpace(h.FirstName), "event_name": b.EventTitle,
+			"amount": rupeesText(p.TotalCents()), "link": link.ShortURL, "expires": expire.In(istZone).Format("2 Jan 2006")}
+		go func() {
+			if err := wa.BoostPaymentWhatsApp(context.Background(), phone, params); err != nil {
+				log.Printf("[BOOST] payment link WhatsApp %s: %v", b.ID, err)
+			}
+		}()
+	}
 	s.mailHost(ctx, b, "Pay your Boost budget", fmt.Sprintf(
 		"<p>%s for your Boost on <strong>%s</strong>: %s (%s plus %s GST).</p><p><a href=\"%s\">Pay now</a>. The link expires on %s.</p>",
 		what, html.EscapeString(b.EventTitle), rupeesText(p.TotalCents()), rupeesText(p.AmountCents), rupeesText(p.GSTCents),
@@ -1237,30 +1265,45 @@ var creativeRules = map[string]struct {
 	models.CreativeBrand: {map[string]bool{"image/jpeg": true, "image/png": true, "application/pdf": true, "application/zip": true}, 10},
 }
 
-// creativeSizeLimit is the most one file may weigh.
-// ponytail: video length and aspect ratio aren't checked server-side; the
-// website warns, and the team marks a wrong one Needs changes.
-func creativeSizeLimit(typ, mime string) int64 {
+// creativeSizeLimit is the most one file may weigh (boost_settings).
+// typ "" is the upload-URL check, before the creative's type is known.
+func creativeSizeLimit(st *models.BoostSettings, typ, mime string) int64 {
 	switch {
 	case typ == models.CreativeBrand:
-		return creativeOtherMax
+		return int64(st.CreativeOtherMaxMB) * mb
 	case strings.HasPrefix(mime, "video/"):
-		return creativeVideoMax
+		return int64(st.CreativeVideoMaxMB) * mb
 	case strings.HasPrefix(mime, "image/"):
-		return creativeImageMax
+		if typ == "" && st.CreativeOtherMaxMB > st.CreativeImageMaxMB {
+			return int64(st.CreativeOtherMaxMB) * mb // could still be brand material
+		}
+		return int64(st.CreativeImageMaxMB) * mb
 	}
-	return creativeOtherMax
+	return int64(st.CreativeOtherMaxMB) * mb
 }
 
 func creativeFolder(boostID uuid.UUID) string { return "boosts/" + boostID.String() + "/creatives/" }
 func reportFolder(boostID uuid.UUID) string   { return "boosts/" + boostID.String() + "/reports/" }
 
-func (s *BoostService) signUpload(ctx context.Context, folder string, req UploadRequest, mimes map[string]bool, maxSize int64) (*UploadURL, error) {
+// signUpload signs one upload. report picks the report limits, else the creative ones.
+func (s *BoostService) signUpload(ctx context.Context, folder string, req UploadRequest, report bool) (*UploadURL, error) {
 	if s.files == nil {
 		return nil, errPlanOff
 	}
+	mimes := creativeMimes
+	if report {
+		mimes = reportMimes
+	}
 	if !mimes[req.MimeType] {
 		return nil, boostErr(http.StatusBadRequest, "invalid_file_type", "This file type isn't accepted here.")
+	}
+	st, err := s.repo.Settings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	maxSize := int64(st.ReportMaxMB) * mb
+	if !report {
+		maxSize = creativeSizeLimit(st, "", req.MimeType)
 	}
 	if req.Size <= 0 || req.Size > maxSize {
 		return nil, boostErr(http.StatusBadRequest, "file_too_large", fmt.Sprintf("Files can be up to %d MB.", maxSize/mb))
@@ -1321,7 +1364,7 @@ func (s *BoostService) CreativeUploadURL(ctx context.Context, userID, boostID uu
 	if !creativesOpen(b) {
 		return nil, boostErr(http.StatusConflict, "invalid_state", "Creatives can be added until the Boost ends.")
 	}
-	return s.signUpload(ctx, creativeFolder(b.ID), req, creativeMimes, creativeVideoMax)
+	return s.signUpload(ctx, creativeFolder(b.ID), req, false)
 }
 
 func (s *BoostService) AdminCreativeUploadURL(ctx context.Context, boostID uuid.UUID, req UploadRequest) (*UploadURL, error) {
@@ -1329,7 +1372,7 @@ func (s *BoostService) AdminCreativeUploadURL(ctx context.Context, boostID uuid.
 	if err != nil {
 		return nil, err
 	}
-	return s.signUpload(ctx, creativeFolder(b.ID), req, creativeMimes, creativeVideoMax)
+	return s.signUpload(ctx, creativeFolder(b.ID), req, false)
 }
 
 // saveCreative validates the files against the type's rules and stores it.
@@ -1355,6 +1398,10 @@ func (s *BoostService) saveCreative(ctx context.Context, b *models.Boost, in Cre
 		}
 		chans = append(chans, c)
 	}
+	st, err := s.repo.Settings(ctx)
+	if err != nil {
+		return nil, err
+	}
 	c := &models.BoostCreative{ID: uuid.New(), BoostID: b.ID, Type: in.Type, Caption: trimmedPtr(in.Caption), Channels: chans,
 		UploadedByKind: byKind, UploadedBy: by, CreatedAt: time.Now(), Status: models.CreativeSubmitted}
 	if c.Channels == nil {
@@ -1369,8 +1416,8 @@ func (s *BoostService) saveCreative(ctx context.Context, b *models.Boost, in Cre
 		if !rule.mimes[f.MimeType] {
 			return nil, boostErr(http.StatusBadRequest, "invalid_file_type", fmt.Sprintf("%s isn't accepted for a %s.", f.Name, in.Type))
 		}
-		if f.Size > creativeSizeLimit(in.Type, f.MimeType) {
-			return nil, boostErr(http.StatusBadRequest, "file_too_large", fmt.Sprintf("%s is over %d MB.", f.Name, creativeSizeLimit(in.Type, f.MimeType)/mb))
+		if limit := creativeSizeLimit(st, in.Type, f.MimeType); f.Size > limit {
+			return nil, boostErr(http.StatusBadRequest, "file_too_large", fmt.Sprintf("%s is over %d MB.", f.Name, limit/mb))
 		}
 		if strings.HasPrefix(f.MimeType, "video/") {
 			videos++
@@ -1595,7 +1642,7 @@ func (s *BoostService) AdminReportUploadURL(ctx context.Context, boostID uuid.UU
 	if err != nil {
 		return nil, err
 	}
-	return s.signUpload(ctx, reportFolder(b.ID), req, reportMimes, reportMax)
+	return s.signUpload(ctx, reportFolder(b.ID), req, true)
 }
 
 func checkReportFields(kind, title string, from, until *string) error {
@@ -1614,6 +1661,17 @@ func checkReportFields(kind, title string, from, until *string) error {
 	}
 	if from != nil && until != nil && *from != "" && *until != "" && *until < *from {
 		return boostErr(http.StatusBadRequest, "invalid_window", "The end date is before the start.")
+	}
+	return nil
+}
+
+func (s *BoostService) checkReportFile(ctx context.Context, f *models.StoredFile) error {
+	st, err := s.repo.Settings(ctx)
+	if err != nil {
+		return err
+	}
+	if !reportMimes[f.MimeType] || f.Size > int64(st.ReportMaxMB)*mb {
+		return boostErr(http.StatusBadRequest, "invalid_file_type", fmt.Sprintf("Reports are CSV, XLSX, PDF, PNG or JPG, up to %d MB.", st.ReportMaxMB))
 	}
 	return nil
 }
@@ -1648,8 +1706,8 @@ func (s *BoostService) AdminAddReport(ctx context.Context, admin string, boostID
 	if err != nil {
 		return nil, err
 	}
-	if !reportMimes[f.MimeType] || f.Size > reportMax {
-		return nil, boostErr(http.StatusBadRequest, "invalid_file_type", "Reports are CSV, XLSX, PDF, PNG or JPG, up to 50 MB.")
+	if err := s.checkReportFile(ctx, f); err != nil {
+		return nil, err
 	}
 	x := &models.BoostReport{ID: uuid.New(), BoostID: b.ID, Kind: in.Kind, Title: in.Title, CoversFrom: in.CoversFrom,
 		CoversUntil: in.CoversUntil, Note: in.Note, File: *f, UploadedBy: admin, CreatedAt: time.Now()}
@@ -1675,8 +1733,8 @@ func (s *BoostService) AdminReplaceReport(ctx context.Context, admin string, boo
 		if f, err = s.storedFile(ctx, reportFolder(boostID), in.FileKey); err != nil {
 			return nil, err
 		}
-		if !reportMimes[f.MimeType] || f.Size > reportMax {
-			return nil, boostErr(http.StatusBadRequest, "invalid_file_type", "Reports are CSV, XLSX, PDF, PNG or JPG, up to 50 MB.")
+		if err := s.checkReportFile(ctx, f); err != nil {
+			return nil, err
 		}
 	}
 	var x *models.BoostReport
@@ -2049,10 +2107,101 @@ func (s *BoostService) SaveSettings(ctx context.Context, in models.BoostSettings
 		in.PaymentWindowDays <= 0 || in.PaymentWindowDays > 60 || in.BudgetGSTBps < 0 || in.BudgetGSTBps > 2800 {
 		return nil, boostErr(http.StatusBadRequest, "invalid_settings", "Budget minimums, step, days and the payment window must be positive; GST 0–28%.")
 	}
+	for _, v := range []int{in.CreativeImageMaxMB, in.CreativeVideoMaxMB, in.CreativeOtherMaxMB, in.ReportMaxMB} {
+		if v < 1 || v > 1000 {
+			return nil, boostErr(http.StatusBadRequest, "invalid_settings", "Upload limits are 1 to 1,000 MB.")
+		}
+	}
 	if err := s.repo.SaveSettings(ctx, &in); err != nil {
 		return nil, err
 	}
 	return s.repo.Settings(ctx)
+}
+
+/* ------------------------------------------------------------------ */
+/*  Reminders and the weekly summary                                   */
+/* ------------------------------------------------------------------ */
+
+// IsPremium reports whether the host is an Active Premium host (the public
+// profile's badge). Errors read as false.
+func (s *BoostService) IsPremium(ctx context.Context, hostID uuid.UUID) bool {
+	ok, err := s.repo.PremiumActive(ctx, hostID)
+	return err == nil && ok
+}
+
+// sendReminders sends each reminder once: payment 2 and 6 days after
+// accepting, creatives 2 days before the planned start, and a weekly summary
+// while live. The log entry is written first, so a reminder is never sent
+// twice (at worst a failed email is skipped).
+func (s *BoostService) sendReminders(ctx context.Context, now time.Time) {
+	c, err := s.repo.ReminderCandidates(ctx, now)
+	if err != nil {
+		log.Printf("[BOOST] reminders: %v", err)
+		return
+	}
+	once := func(id uuid.UUID, action string) *models.Boost {
+		b, err := s.repo.GetByID(ctx, id)
+		if err != nil || b == nil {
+			return nil
+		}
+		if ok, err := s.repo.LogOnce(ctx, id, action); err != nil || !ok {
+			return nil
+		}
+		return b
+	}
+	for _, id := range c.Unpaid {
+		b, err := s.repo.GetByID(ctx, id)
+		if err != nil || b == nil || b.AcceptedAt == nil {
+			continue
+		}
+		key := "reminder_payment_2d"
+		if now.Sub(*b.AcceptedAt) >= 6*24*time.Hour {
+			key = "reminder_payment_6d"
+		}
+		if b = once(id, key); b != nil {
+			due := ""
+			if b.PaymentDueBy != nil {
+				due = " The plan expires on " + b.PaymentDueBy.In(istZone).Format("2 Jan 2006") + "."
+			}
+			s.mailHost(ctx, b, "Reminder: pay your Boost budget", fmt.Sprintf(
+				"<p>The ad budget for your Boost on <strong>%s</strong> (%s incl. GST) isn't paid yet.%s Pay it from the event page to go live.</p>",
+				html.EscapeString(b.EventTitle), rupeesText(b.BudgetTotalCents+b.BudgetGSTCents), due))
+		}
+	}
+	for _, id := range c.NoCreatives {
+		if b := once(id, "reminder_no_creatives"); b != nil {
+			s.mailHost(ctx, b, "Upload your Boost creatives", fmt.Sprintf(
+				"<p>Your Boost on <strong>%s</strong> starts soon and has no creatives yet. Upload the reels, posts or stories to run from the event page, or tell the team to make them.</p>",
+				html.EscapeString(b.EventTitle)))
+		}
+	}
+	y, w := now.In(istZone).ISOWeek()
+	for _, id := range c.Live {
+		if b := once(id, fmt.Sprintf("weekly_summary_%d_%02d", y, w)); b != nil {
+			s.mailWeeklySummary(ctx, b)
+		}
+	}
+}
+
+// weeklySummary is the text of a live Boost's weekly email.
+func weeklySummary(b *models.Boost, res *Results) string {
+	cpt := "–"
+	if res.Totals.TicketsSold > 0 {
+		cpt = rupeesText(res.Totals.SpendCents / int64(res.Totals.TicketsSold))
+	}
+	return fmt.Sprintf(`<p>Your Boost on <strong>%s</strong> so far:</p><ul>
+<li>Spent: %s of %s</li><li>Reach: %d · Clicks: %d</li><li>Tickets sold: %d</li><li>Ad cost per ticket: %s</li></ul>`,
+		html.EscapeString(b.EventTitle), rupeesText(res.Totals.SpendCents), rupeesText(b.PaidCents),
+		res.Totals.Reach, res.Totals.Clicks, res.Totals.TicketsSold, cpt)
+}
+
+func (s *BoostService) mailWeeklySummary(ctx context.Context, b *models.Boost) {
+	res, err := s.results(ctx, b.ID)
+	if err != nil {
+		log.Printf("[BOOST] weekly summary %s: %v", b.ID, err)
+		return
+	}
+	s.mailHost(ctx, b, "Your weekly Boost summary", weeklySummary(b, res))
 }
 
 /* ------------------------------------------------------------------ */

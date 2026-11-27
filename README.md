@@ -4,6 +4,8 @@
 
 MySlotMate allows users to discover and book event slots, and enables hosts to apply, get admin-approved, and then create and manage events, track earnings, and communicate with attendees — with optional Aadhar-based identity verification, real-time WebSocket updates, and a wallet-based payment/payout system powered by Razorpay (collections) and Cashfree (payouts).
 
+Feature docs: [Premium Hosts and paid Boost](docs/premium-and-paid-boost.md).
+
 ---
 
 ## Table of Contents

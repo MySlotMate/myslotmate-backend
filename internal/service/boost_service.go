@@ -749,6 +749,7 @@ func (s *BoostService) Propose(ctx context.Context, admin string, boostID uuid.U
 		return nil, boostErr(http.StatusBadRequest, "invalid_window", "The planned end must be after the start.")
 	}
 	var b *models.Boost
+	pricingChanged := false
 	err := s.inTx(ctx, func(r *repository.BoostRepository) error {
 		var err error
 		b, err = r.GetForUpdate(ctx, boostID)
@@ -769,11 +770,16 @@ func (s *BoostService) Propose(ctx context.Context, admin string, boostID uuid.U
 		if err != nil {
 			return err
 		}
-		bands, err := r.Bands(ctx, b.PricingModel)
-		if err != nil {
+		movedToBudget := b.PricingModel != models.BoostPricingBudget
+		if err := s.proposeBudget(ctx, r, b, evt, p); err != nil {
 			return err
 		}
-		if err := s.proposeBudget(ctx, r, b, evt, p); err != nil {
+		movedToBudget = movedToBudget && b.PricingModel == models.BoostPricingBudget
+		if movedToBudget {
+			pricingChanged = true
+		}
+		bands, err := r.Bands(ctx, b.PricingModel)
+		if err != nil {
 			return err
 		}
 		guide, err := guideRates(types, bands)
@@ -802,7 +808,8 @@ func (s *BoostService) Propose(ctx context.Context, admin string, boostID uuid.U
 	out, err := s.repo.GetByID(ctx, boostID)
 	if err == nil && out != nil {
 		s.mailHost(ctx, out, "Your Boost proposal is ready",
-			fmt.Sprintf("<p>The MySlotMate team sent a proposal to boost <strong>%s</strong>. Open the event in your host dashboard to see the commission per ticket and accept or decline it.%s</p>", html.EscapeString(out.EventTitle), budgetLine(out)))
+			fmt.Sprintf("<p>The MySlotMate team sent a proposal to boost <strong>%s</strong>. Open the event in your host dashboard to see the commission per ticket and accept or decline it.%s</p>%s", html.EscapeString(out.EventTitle), budgetLine(out),
+				map[bool]string{true: "<p>Boost pricing has changed: you now pay the ad budget upfront and a lower marketing fee (5–10%) on tickets sold while it's live.</p>", false: ""}[pricingChanged]))
 	}
 	return out, err
 }
@@ -1001,6 +1008,7 @@ func (s *BoostService) SetHostInvited(ctx context.Context, hostID uuid.UUID, inv
 func (s *BoostService) AutoEnd(ctx context.Context) (int, error) {
 	s.expireUnpaid(ctx)
 	s.invoicePending(ctx)
+	s.sendReminders(ctx, time.Now())
 	due, err := s.repo.DueToEnd(ctx, time.Now())
 	if err != nil {
 		return 0, err

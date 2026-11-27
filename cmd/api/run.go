@@ -270,10 +270,10 @@ func main() {
 
 	// Event Boost: host requests, admin proposals, commission while live.
 	boostService := service.NewBoostService(dbConn, eventRepo, eventPriceTierRepo, hostRepo, userRepo, eventService,
-		boostMailer{notification.NewEmailService(&cfg.SMTP)}, cfg.AdminEmail, cfg.FrontendBaseURL)
+		newBoostMailer(cfg), cfg.AdminEmail, cfg.FrontendBaseURL)
 	go boostService.RunAutoEnd(ctx, 15*time.Minute)
 	boostController := controller.NewBoostController(boostService, userRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
-	hostController.WithHostRoutes(boostController)
+	hostController.WithHostRoutes(boostController).WithPremium(boostService.IsPremium)
 	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider).WithBoost(boostService)
 	supportController := controller.NewSupportController(supportService, uploadService)
 	uploadController := controller.NewUploadController(uploadService).
@@ -593,9 +593,36 @@ func initializeReminderScheduler(
 	return scheduler
 }
 
-// boostMailer sends Event Boost emails over SMTP.
-type boostMailer struct{ svc *notification.EmailService }
+// boostMailer sends Event Boost emails over SMTP and, when a template is
+// configured, budget payment links on WhatsApp (Kapso).
+type boostMailer struct {
+	svc          *notification.EmailService
+	kapso        *notification.KapsoClient
+	template     string
+	templateLang string
+}
 
 func (m boostMailer) BoostEmail(to, subject, htmlBody string) error {
 	return m.svc.SendEmail(to, subject, htmlBody)
+}
+
+func (m boostMailer) BoostPaymentWhatsApp(ctx context.Context, phone string, params map[string]string) error {
+	if m.kapso == nil || m.template == "" {
+		return nil
+	}
+	var ps []notification.TemplateParameter
+	for _, k := range []string{"name", "event_name", "amount", "link", "expires"} {
+		ps = append(ps, notification.TemplateParameter{Type: "text", ParameterName: k, Text: params[k]})
+	}
+	return m.kapso.SendTemplateMessage(ctx, phone, m.template, m.templateLang,
+		[]notification.TemplateComponent{{Type: "body", Parameters: ps}})
+}
+
+func newBoostMailer(cfg *config.Config) boostMailer {
+	m := boostMailer{svc: notification.NewEmailService(&cfg.SMTP), template: cfg.Kapso.BoostPaymentTemplateName,
+		templateLang: cfg.Kapso.BoostPaymentTemplateLang}
+	if cfg.Kapso.APIKey != "" && cfg.Kapso.PhoneNumberID != "" {
+		m.kapso = notification.NewKapsoClient(cfg.Kapso.APIKey, cfg.Kapso.PhoneNumberID)
+	}
+	return m
 }

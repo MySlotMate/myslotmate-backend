@@ -31,7 +31,12 @@ type BoostSettings struct {
 	PaymentWindowDays   int       `json:"payment_window_days"`
 	BudgetGSTBps        int       `json:"budget_gst_bps"`
 	BudgetRequired      bool      `json:"budget_required"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	// Upload limits, MB per file.
+	CreativeImageMaxMB int       `json:"creative_image_max_mb"`
+	CreativeVideoMaxMB int       `json:"creative_video_max_mb"`
+	CreativeOtherMaxMB int       `json:"creative_other_max_mb"`
+	ReportMaxMB        int       `json:"report_max_mb"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 const (

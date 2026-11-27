@@ -171,6 +171,11 @@ CREATE TABLE IF NOT EXISTS boost_settings (
     payment_window_days    INTEGER NOT NULL DEFAULT 7 CHECK (payment_window_days > 0),
     budget_gst_bps         INTEGER NOT NULL DEFAULT 1800 CHECK (budget_gst_bps BETWEEN 0 AND 2800),
     budget_required        BOOLEAN NOT NULL DEFAULT false,
+    -- Upload limits, MB per file.
+    creative_image_max_mb  INTEGER NOT NULL DEFAULT 20  CHECK (creative_image_max_mb BETWEEN 1 AND 1000),
+    creative_video_max_mb  INTEGER NOT NULL DEFAULT 200 CHECK (creative_video_max_mb BETWEEN 1 AND 1000),
+    creative_other_max_mb  INTEGER NOT NULL DEFAULT 50  CHECK (creative_other_max_mb BETWEEN 1 AND 1000),
+    report_max_mb          INTEGER NOT NULL DEFAULT 50  CHECK (report_max_mb BETWEEN 1 AND 1000),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO boost_settings (id) VALUES (true) ON CONFLICT DO NOTHING;

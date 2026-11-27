@@ -21,13 +21,16 @@ func (r *BoostRepository) Settings(ctx context.Context) (*models.BoostSettings, 
 	s := &models.BoostSettings{}
 	err := r.db.QueryRowContext(ctx, `
 		SELECT min_daily_budget_cents, budget_step_cents, min_days, payment_window_days, budget_gst_bps,
-		       budget_required, updated_at
+		       budget_required, creative_image_max_mb, creative_video_max_mb, creative_other_max_mb, report_max_mb,
+		       updated_at
 		  FROM boost_settings WHERE id`).
 		Scan(&s.MinDailyBudgetCents, &s.BudgetStepCents, &s.MinDays, &s.PaymentWindowDays, &s.BudgetGSTBps,
-			&s.BudgetRequired, &s.UpdatedAt)
+			&s.BudgetRequired, &s.CreativeImageMaxMB, &s.CreativeVideoMaxMB, &s.CreativeOtherMaxMB, &s.ReportMaxMB,
+			&s.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return &models.BoostSettings{MinDailyBudgetCents: 50000, BudgetStepCents: 10000, MinDays: 3,
-			PaymentWindowDays: 7, BudgetGSTBps: 1800}, nil
+			PaymentWindowDays: 7, BudgetGSTBps: 1800, CreativeImageMaxMB: 20, CreativeVideoMaxMB: 200,
+			CreativeOtherMaxMB: 50, ReportMaxMB: 50}, nil
 	}
 	return s, err
 }
@@ -35,13 +38,17 @@ func (r *BoostRepository) Settings(ctx context.Context) (*models.BoostSettings, 
 func (r *BoostRepository) SaveSettings(ctx context.Context, s *models.BoostSettings) error {
 	return r.exec(ctx, `
 		INSERT INTO boost_settings (id, min_daily_budget_cents, budget_step_cents, min_days, payment_window_days,
-		                            budget_gst_bps, budget_required, updated_at)
-		VALUES (true, $1, $2, $3, $4, $5, $6, now())
+		                            budget_gst_bps, budget_required, creative_image_max_mb, creative_video_max_mb,
+		                            creative_other_max_mb, report_max_mb, updated_at)
+		VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
 		ON CONFLICT (id) DO UPDATE SET min_daily_budget_cents = EXCLUDED.min_daily_budget_cents,
 		  budget_step_cents = EXCLUDED.budget_step_cents, min_days = EXCLUDED.min_days,
 		  payment_window_days = EXCLUDED.payment_window_days, budget_gst_bps = EXCLUDED.budget_gst_bps,
-		  budget_required = EXCLUDED.budget_required, updated_at = now()`,
-		s.MinDailyBudgetCents, s.BudgetStepCents, s.MinDays, s.PaymentWindowDays, s.BudgetGSTBps, s.BudgetRequired)
+		  budget_required = EXCLUDED.budget_required, creative_image_max_mb = EXCLUDED.creative_image_max_mb,
+		  creative_video_max_mb = EXCLUDED.creative_video_max_mb, creative_other_max_mb = EXCLUDED.creative_other_max_mb,
+		  report_max_mb = EXCLUDED.report_max_mb, updated_at = now()`,
+		s.MinDailyBudgetCents, s.BudgetStepCents, s.MinDays, s.PaymentWindowDays, s.BudgetGSTBps, s.BudgetRequired,
+		s.CreativeImageMaxMB, s.CreativeVideoMaxMB, s.CreativeOtherMaxMB, s.ReportMaxMB)
 }
 
 /* ---- bands ---- */
@@ -111,6 +118,68 @@ func (r *BoostRepository) ApplyTopUp(ctx context.Context, id uuid.UUID, amount, 
 // SetCancelledFor cancels a Boost that never went live, with a reason.
 func (r *BoostRepository) SetCancelledFor(ctx context.Context, id uuid.UUID, reason string) error {
 	return r.exec(ctx, `UPDATE event_boosts SET status = 'cancelled', ended_reason = $2, updated_at = now() WHERE id = $1`, id, reason)
+}
+
+// SetPricingModel moves a Boost to another pricing model (an open
+// no_upfront request re-proposed with a budget plan).
+func (r *BoostRepository) SetPricingModel(ctx context.Context, id uuid.UUID, model, budgetStatus string) error {
+	return r.exec(ctx, `UPDATE event_boosts SET pricing_model = $2, budget_status = $3, updated_at = now() WHERE id = $1`, id, model, budgetStatus)
+}
+
+// LogOnce appends action to the Boost's log unless it is already there, and
+// reports whether it did (reminders and summaries go out once).
+func (r *BoostRepository) LogOnce(ctx context.Context, boostID uuid.UUID, action string) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		INSERT INTO event_boost_log (boost_id, actor_kind, action)
+		SELECT $1, 'system', $2 WHERE NOT EXISTS (SELECT 1 FROM event_boost_log WHERE boost_id = $1 AND action = $2)`, boostID, action)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// ReminderCandidates are budget Boosts a reminder or summary may be due for.
+type ReminderCandidates struct {
+	Unpaid      []uuid.UUID // accepted, unpaid, still within the window
+	NoCreatives []uuid.UUID // planned start within 2 days, no creatives yet
+	Live        []uuid.UUID // live for a week or more
+}
+
+func (r *BoostRepository) ReminderCandidates(ctx context.Context, now time.Time) (*ReminderCandidates, error) {
+	out := &ReminderCandidates{}
+	for _, q := range []struct {
+		dst *[]uuid.UUID
+		sql string
+	}{
+		{&out.Unpaid, `SELECT id FROM event_boosts WHERE pricing_model = 'budget' AND status = 'quote_ready'
+			AND budget_status = 'unpaid' AND accepted_at IS NOT NULL AND accepted_at <= $1 - interval '2 days'
+			AND payment_due_by > $1`},
+		{&out.NoCreatives, `SELECT b.id FROM event_boosts b WHERE b.pricing_model = 'budget'
+			AND b.status IN ('under_review', 'quote_ready') AND b.budget_from IS NOT NULL
+			AND b.budget_from BETWEEN ($1 AT TIME ZONE 'Asia/Kolkata')::date AND ($1 AT TIME ZONE 'Asia/Kolkata')::date + 2
+			AND NOT EXISTS (SELECT 1 FROM boost_creatives c WHERE c.boost_id = b.id)`},
+		{&out.Live, `SELECT id FROM event_boosts WHERE pricing_model = 'budget' AND status = 'live'
+			AND live_from <= $1 - interval '7 days'`},
+	} {
+		rows, err := r.db.QueryContext(ctx, q.sql, now)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			*q.dst = append(*q.dst, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (r *BoostRepository) SetChannels(ctx context.Context, id uuid.UUID, channels []string) error {

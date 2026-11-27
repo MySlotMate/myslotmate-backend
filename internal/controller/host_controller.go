@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,14 @@ import (
 type HostController struct {
 	extra       []hostRoutes
 	hostService service.HostService
-	profile     *ProfileController // optional: public events + albums under /hosts
+	profile     *ProfileController                               // optional: public events + albums under /hosts
+	isPremium   func(ctx context.Context, hostID uuid.UUID) bool // optional: the Premium host badge
+}
+
+// WithPremium adds the "Premium host" badge to the public profile.
+func (c *HostController) WithPremium(fn func(ctx context.Context, hostID uuid.UUID) bool) *HostController {
+	c.isPremium = fn
+	return c
 }
 
 // WithProfile mounts the public profile routes (events, albums) under /hosts.
@@ -54,6 +62,7 @@ type PublicHostProfile struct {
 	IsSuperHost         bool      `json:"is_super_host"`
 	IsCommunityChamp    bool      `json:"is_community_champ"`
 	IsProfessional      bool      `json:"is_professional"`
+	IsPremium           bool      `json:"is_premium"` // an Active Premium host: the badge
 	ExpertiseTags       []string  `json:"expertise_tags"`
 	SocialInstagram     *string   `json:"social_instagram,omitempty"`
 	SocialLinkedin      *string   `json:"social_linkedin,omitempty"`
@@ -261,6 +270,9 @@ func (c *HostController) GetPublicHostProfile(w http.ResponseWriter, r *http.Req
 		if n, err := c.profile.connRepo.CountForHost(r.Context(), host.ID); err == nil {
 			profile.ConnectionsCount = n
 		}
+	}
+	if c.isPremium != nil {
+		profile.IsPremium = c.isPremium(r.Context(), host.ID)
 	}
 
 	RespondSuccess(w, http.StatusOK, profile)

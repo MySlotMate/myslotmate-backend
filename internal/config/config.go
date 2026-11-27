@@ -102,6 +102,11 @@ type KapsoConfig struct {
 	ReminderTemplateLang  string
 	HostAlertTemplateName string
 	HostAlertTemplateLang string
+	// Boost budget payment links on WhatsApp. Empty name = email only. The
+	// approved template takes named body parameters name, event_name,
+	// amount, link and expires.
+	BoostPaymentTemplateName string
+	BoostPaymentTemplateLang string
 	// Marketing blasts to users who have no open 24-hour session window: only an
 	// approved marketing template can reach them.
 	MarketingTemplateName string
@@ -260,6 +265,8 @@ func Load() (*Config, error) {
 			ReminderTemplateLang:      getEnv("KAPSO_REMINDER_TEMPLATE_LANG", "en_US"),
 			HostAlertTemplateName:     getEnv("KAPSO_HOST_ALERT_TEMPLATE_NAME", "host_application_alert"),
 			HostAlertTemplateLang:     getEnv("KAPSO_HOST_ALERT_TEMPLATE_LANG", "en_US"),
+			BoostPaymentTemplateName:  getEnv("KAPSO_BOOST_PAYMENT_TEMPLATE_NAME", ""),
+			BoostPaymentTemplateLang:  getEnv("KAPSO_BOOST_PAYMENT_TEMPLATE_LANG", "en_US"),
 			MarketingTemplateName:     getEnv("KAPSO_MARKETING_TEMPLATE_NAME", "event_promo"),
 			MarketingTemplateLang:     getEnv("KAPSO_MARKETING_TEMPLATE_LANG", "en_US"),
 			MarketingTemplateHasImage: getEnv("KAPSO_MARKETING_TEMPLATE_HAS_IMAGE", "false") == "true",

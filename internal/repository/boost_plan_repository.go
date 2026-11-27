@@ -153,14 +153,14 @@ func (r *BoostRepository) ReminderCandidates(ctx context.Context, now time.Time)
 		sql string
 	}{
 		{&out.Unpaid, `SELECT id FROM event_boosts WHERE pricing_model = 'budget' AND status = 'quote_ready'
-			AND budget_status = 'unpaid' AND accepted_at IS NOT NULL AND accepted_at <= $1 - interval '2 days'
-			AND payment_due_by > $1`},
+			AND budget_status = 'unpaid' AND accepted_at IS NOT NULL AND accepted_at <= $1::timestamptz - interval '2 days'
+			AND payment_due_by > $1::timestamptz`},
 		{&out.NoCreatives, `SELECT b.id FROM event_boosts b WHERE b.pricing_model = 'budget'
 			AND b.status IN ('under_review', 'quote_ready') AND b.budget_from IS NOT NULL
-			AND b.budget_from BETWEEN ($1 AT TIME ZONE 'Asia/Kolkata')::date AND ($1 AT TIME ZONE 'Asia/Kolkata')::date + 2
+			AND b.budget_from BETWEEN ($1::timestamptz AT TIME ZONE 'Asia/Kolkata')::date AND ($1::timestamptz AT TIME ZONE 'Asia/Kolkata')::date + 2
 			AND NOT EXISTS (SELECT 1 FROM boost_creatives c WHERE c.boost_id = b.id)`},
 		{&out.Live, `SELECT id FROM event_boosts WHERE pricing_model = 'budget' AND status = 'live'
-			AND live_from <= $1 - interval '7 days'`},
+			AND live_from <= $1::timestamptz - interval '7 days'`},
 	} {
 		rows, err := r.db.QueryContext(ctx, q.sql, now)
 		if err != nil {

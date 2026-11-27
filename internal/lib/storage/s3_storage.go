@@ -301,7 +301,8 @@ func (s *UploadService) PresignBoostUpload(ctx context.Context, key, contentType
 		Key:           aws.String(key),
 		ContentType:   aws.String(contentType),
 		ContentLength: aws.Int64(size),
-		CacheControl:  aws.String("private, no-store"),
+		// No CacheControl: presigning would make it a signed header the
+		// browser doesn't send. Downloads are signed GETs anyway.
 	}, s3.WithPresignExpires(30*time.Minute))
 	if err != nil {
 		return "", err

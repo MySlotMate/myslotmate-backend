@@ -83,6 +83,10 @@ type BoostService struct {
 	notify    BoostNotifier
 	adminTo   string // admin inbox for new requests
 	siteURL   string
+	// Paid-budget Boost (WithPlan); nil until wired.
+	payments BoostPayments
+	files    BoostFiles
+	billing  *BillingService
 }
 
 func NewBoostService(db *sql.DB, er repository.EventRepository, tr repository.EventPriceTierRepository,
@@ -234,6 +238,11 @@ type BoostRequest struct {
 	GoalText      string   `json:"goal_text"`
 	AudienceNotes string   `json:"audience_notes"`
 	Channels      []string `json:"channels"`
+	// The budget plan. With it the Boost is a paid-budget one; without it a
+	// no_upfront one (refused once boost_settings.budget_required is on).
+	DailyBudgetCents *int64 `json:"daily_budget_cents"`
+	BudgetFrom       string `json:"budget_from"`  // YYYY-MM-DD
+	BudgetUntil      string `json:"budget_until"` // YYYY-MM-DD, included
 }
 
 // eligibility returns the first reason the event can't be boosted, or "".
@@ -314,12 +323,8 @@ func (s *BoostService) Request(ctx context.Context, userID, eventID uuid.UUID, r
 	if err != nil {
 		return nil, err
 	}
-	acc, err := s.repo.HostAccess(ctx, h.ID)
-	if err != nil {
+	if err := s.requirePremium(ctx, s.repo, h.ID); err != nil {
 		return nil, err
-	}
-	if acc == nil || !acc.Invited {
-		return nil, boostErr(http.StatusForbidden, "boost_not_invited", "Event Boost is in a pilot with invited hosts. Ask the MySlotMate team to add you.")
 	}
 	b, err := s.create(ctx, h, evt, req, "host", h.ID.String(), "requested")
 	if err != nil {
@@ -349,6 +354,9 @@ func (s *BoostService) AdminStart(ctx context.Context, admin string, eventID uui
 	}
 	if h == nil {
 		return nil, boostErr(http.StatusUnprocessableEntity, "event_not_eligible", "This event has no host.")
+	}
+	if err := s.requirePremium(ctx, s.repo, h.ID); err != nil {
+		return nil, err
 	}
 	return s.create(ctx, h, evt, req, "admin", admin, "started_by_admin")
 }
@@ -386,17 +394,33 @@ func (s *BoostService) create(ctx context.Context, h *models.Host, evt *models.E
 	} else if reason != "" {
 		return nil, boostErr(http.StatusUnprocessableEntity, "event_not_eligible", reason)
 	}
-	bands, err := s.repo.Bands(ctx)
-	if err != nil {
-		return nil, err
-	}
-	rates, err := guideRates(types, bands)
-	if err != nil {
-		return nil, err
-	}
-
 	b := &models.Boost{ID: uuid.New(), EventID: evt.ID, HostID: h.ID, Status: models.BoostUnderReview,
-		Channels: channels, RequestedAt: now, Rates: rates}
+		Channels: channels, RequestedAt: now, PricingModel: models.BoostPricingNoUpfront, BudgetStatus: models.BudgetNotRequired}
+	st, err := s.repo.Settings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.DailyBudgetCents != nil || req.BudgetFrom != "" || req.BudgetUntil != "" {
+		est, err := s.estimate(ctx, st, evt, req.DailyBudgetCents, req.BudgetFrom, req.BudgetUntil, now)
+		if err != nil {
+			return nil, err
+		}
+		if len(est.Problems) > 0 {
+			return nil, boostErr(http.StatusBadRequest, "invalid_budget", strings.Join(est.Problems, " "))
+		}
+		b.PricingModel, b.BudgetStatus = models.BoostPricingBudget, models.BudgetUnpaid
+		b.DailyBudgetCents, b.BudgetFrom, b.BudgetUntil = req.DailyBudgetCents, &req.BudgetFrom, &req.BudgetUntil
+		b.BudgetTotalCents, b.BudgetGSTCents = est.BudgetTotalCents, est.BudgetGSTCents
+	} else if st.BudgetRequired {
+		return nil, boostErr(http.StatusBadRequest, "budget_required", "Plan the ad budget: a daily amount and the dates to run it.")
+	}
+	bands, err := s.repo.Bands(ctx, b.PricingModel)
+	if err != nil {
+		return nil, err
+	}
+	if b.Rates, err = guideRates(types, bands); err != nil {
+		return nil, err
+	}
 	if goal != "" {
 		b.GoalText = &goal
 	}
@@ -407,7 +431,8 @@ func (s *BoostService) create(ctx context.Context, h *models.Host, evt *models.E
 		if err := r.Create(ctx, b); err != nil {
 			return err
 		}
-		return r.Log(ctx, b.ID, actorKind, actor, action, map[string]any{"channels": channels})
+		return r.Log(ctx, b.ID, actorKind, actor, action, map[string]any{"channels": channels, "pricing_model": b.PricingModel,
+			"daily_budget_cents": b.DailyBudgetCents, "budget_from": b.BudgetFrom, "budget_until": b.BudgetUntil})
 	}); err != nil {
 		if errors.Is(err, repository.ErrBoostOpen) {
 			return nil, boostErr(http.StatusConflict, "boost_already_open", "This event already has a Boost request or a live Boost.")
@@ -447,11 +472,20 @@ func (s *BoostService) Accept(ctx context.Context, userID, boostID uuid.UUID, ip
 		if !pricesUnchanged(b.Rates, now) {
 			return boostErr(http.StatusUnprocessableEntity, "quote_expired", "Your ticket prices changed after this proposal. The MySlotMate team will send a new one.")
 		}
+		if b.PricingModel == models.BoostPricingBudget {
+			if err := s.requirePremium(ctx, r, h.ID); err != nil {
+				return err
+			}
+		}
 		evtTitle = evt.Title
-		if err := r.SetAccepted(ctx, b.ID, ip, userAgent); err != nil {
+		terms, due, err := s.acceptTerms(ctx, r, b)
+		if err != nil {
 			return err
 		}
-		return r.Log(ctx, b.ID, "host", h.ID.String(), "accepted", map[string]any{"terms_version": models.BoostTermsVersion})
+		if err := r.SetAccepted(ctx, b.ID, ip, userAgent, terms, due); err != nil {
+			return err
+		}
+		return r.Log(ctx, b.ID, "host", h.ID.String(), "accepted", map[string]any{"terms_version": terms, "payment_due_by": due})
 	})
 	if err != nil {
 		return nil, err
@@ -496,11 +530,20 @@ func (s *BoostService) AdminAccept(ctx context.Context, admin string, boostID uu
 		if !pricesUnchanged(b.Rates, now) {
 			return boostErr(http.StatusUnprocessableEntity, "quote_expired", "The host changed ticket prices after this proposal. Send a new one first.")
 		}
-		if err := r.SetAccepted(ctx, b.ID, ip, userAgent); err != nil {
+		if b.PricingModel == models.BoostPricingBudget {
+			if err := s.requirePremium(ctx, r, b.HostID); err != nil {
+				return err
+			}
+		}
+		terms, due, err := s.acceptTerms(ctx, r, b)
+		if err != nil {
+			return err
+		}
+		if err := r.SetAccepted(ctx, b.ID, ip, userAgent, terms, due); err != nil {
 			return err
 		}
 		return r.Log(ctx, b.ID, "admin", admin, "accepted_for_host",
-			map[string]any{"how_agreed": howAgreed, "terms_version": models.BoostTermsVersion})
+			map[string]any{"how_agreed": howAgreed, "terms_version": terms, "payment_due_by": due})
 	})
 	if err != nil {
 		return nil, err
@@ -512,8 +555,8 @@ func (s *BoostService) AdminAccept(ctx context.Context, admin string, boostID uu
 			rates = append(rates, fmt.Sprintf("%s: %d.%02d%%", html.EscapeString(rt.TicketName), rt.RateBps/100, rt.RateBps%100))
 		}
 		s.mailHost(ctx, out, "We accepted your Boost proposal for you",
-			fmt.Sprintf("<p>As agreed with you (%s), the MySlotMate team accepted the Boost proposal for <strong>%s</strong> on your behalf.</p><p>Commission per ticket sold while the Boost is live: %s. It comes out of your share; guests pay the same price. Nothing is charged until the ads go live.</p><p>If this isn't what you agreed, stop the Boost from the event page or reply to this email.</p>",
-				html.EscapeString(howAgreed), html.EscapeString(out.EventTitle), strings.Join(rates, ", ")))
+			fmt.Sprintf("<p>As agreed with you (%s), the MySlotMate team accepted the Boost proposal for <strong>%s</strong> on your behalf.</p><p>Commission per ticket sold while the Boost is live: %s. It comes out of your share; guests pay the same price.%s</p><p>If this isn't what you agreed, stop the Boost from the event page or reply to this email.</p>",
+				html.EscapeString(howAgreed), html.EscapeString(out.EventTitle), strings.Join(rates, ", "), budgetLine(out)))
 	}
 	return out, err
 }
@@ -572,10 +615,14 @@ type BoostDetail struct {
 	Eligibility  string                 `json:"eligibility_problem"` // "" = passes the request checks today
 	Invited      bool                   `json:"host_invited"`
 	Log          []models.BoostLogEntry `json:"log"`
+	// Paid-budget Boost.
+	Premium  *models.PremiumMembership `json:"premium"`
+	Payments []*models.BoostPayment    `json:"payments"`
+	Spend    []models.BoostSpendEntry  `json:"spend"`
 }
 
-func (s *BoostService) AdminList(ctx context.Context, status string) ([]*models.Boost, map[string]int, error) {
-	list, err := s.repo.ListByStatus(ctx, status, 200)
+func (s *BoostService) AdminList(ctx context.Context, status, budgetStatus string) ([]*models.Boost, map[string]int, error) {
+	list, err := s.repo.ListByStatus(ctx, status, budgetStatus, 200)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -602,7 +649,7 @@ func (s *BoostService) AdminGet(ctx context.Context, boostID uuid.UUID) (*BoostD
 	if err != nil {
 		return nil, err
 	}
-	bands, err := s.repo.Bands(ctx)
+	bands, err := s.repo.Bands(ctx, b.PricingModel)
 	if err != nil {
 		return nil, err
 	}
@@ -625,6 +672,15 @@ func (s *BoostService) AdminGet(ctx context.Context, boostID uuid.UUID) (*BoostD
 	if d.Log == nil {
 		d.Log = []models.BoostLogEntry{}
 	}
+	if d.Premium, err = s.repo.Premium(ctx, b.HostID); err != nil {
+		return nil, err
+	}
+	if d.Payments, err = s.repo.ListPayments(ctx, b.ID); err != nil {
+		return nil, err
+	}
+	if d.Spend, err = s.repo.SpendEntries(ctx, b.ID); err != nil {
+		return nil, err
+	}
 	return d, nil
 }
 
@@ -640,6 +696,11 @@ type Proposal struct {
 	Note         string         `json:"note"`
 	PlannedFrom  *time.Time     `json:"planned_from"`
 	PlannedUntil *time.Time     `json:"planned_until"`
+	// The final budget plan (budget Boosts). Left out: the plan stays.
+	Channels         []string `json:"channels"`
+	DailyBudgetCents *int64   `json:"daily_budget_cents"`
+	BudgetFrom       string   `json:"budget_from"`
+	BudgetUntil      string   `json:"budget_until"`
 }
 
 // applyProposal checks the admin's rates against the bands: within the band's
@@ -708,8 +769,11 @@ func (s *BoostService) Propose(ctx context.Context, admin string, boostID uuid.U
 		if err != nil {
 			return err
 		}
-		bands, err := r.Bands(ctx)
+		bands, err := r.Bands(ctx, b.PricingModel)
 		if err != nil {
+			return err
+		}
+		if err := s.proposeBudget(ctx, r, b, evt, p); err != nil {
 			return err
 		}
 		guide, err := guideRates(types, bands)
@@ -738,7 +802,7 @@ func (s *BoostService) Propose(ctx context.Context, admin string, boostID uuid.U
 	out, err := s.repo.GetByID(ctx, boostID)
 	if err == nil && out != nil {
 		s.mailHost(ctx, out, "Your Boost proposal is ready",
-			fmt.Sprintf("<p>The MySlotMate team sent a proposal to boost <strong>%s</strong>. Open the event in your host dashboard to see the commission per ticket and accept or decline it.</p>", html.EscapeString(out.EventTitle)))
+			fmt.Sprintf("<p>The MySlotMate team sent a proposal to boost <strong>%s</strong>. Open the event in your host dashboard to see the commission per ticket and accept or decline it.%s</p>", html.EscapeString(out.EventTitle), budgetLine(out)))
 	}
 	return out, err
 }
@@ -805,6 +869,14 @@ func (s *BoostService) GoLive(ctx context.Context, admin string, boostID uuid.UU
 			return boostErr(http.StatusUnprocessableEntity, "refund_policy", "The event's refund policy is Flexible or not set. Ask the host to switch to Moderate, Strict or No refunds before going live.")
 		}
 		end := until
+		if b.PricingModel == models.BoostPricingBudget {
+			if err := goLiveBudgetCheck(ctx, r, b); err != nil {
+				return err
+			}
+			if end == nil {
+				end = budgetEnd(b)
+			}
+		}
 		if end == nil {
 			end = b.PlannedUntil
 		}
@@ -826,13 +898,18 @@ func (s *BoostService) GoLive(ctx context.Context, admin string, boostID uuid.UU
 	out, err := s.repo.GetByID(ctx, boostID)
 	if err == nil && out != nil {
 		s.mailHost(ctx, out, "Your Boost is live",
-			fmt.Sprintf("<p>Your Boost for <strong>%s</strong> is live. The agreed commission applies to tickets sold from now until it ends. You can stop it any time from the event page.</p>", html.EscapeString(out.EventTitle)))
+			fmt.Sprintf("<p>Your Boost for <strong>%s</strong> is live. The agreed commission applies to tickets sold from now until it ends. You can stop it any time from the event page.%s</p>", html.EscapeString(out.EventTitle), liveBudgetLine(out)))
 	}
 	return out, err
 }
 
 // End stops a live Boost now.
 func (s *BoostService) End(ctx context.Context, actorKind, actor string, boostID uuid.UUID, at time.Time, reason string) (*models.Boost, error) {
+	return s.EndWithNote(ctx, actorKind, actor, boostID, at, reason, "")
+}
+
+// EndWithNote is End with a note the host sees (the team ending it early).
+func (s *BoostService) EndWithNote(ctx context.Context, actorKind, actor string, boostID uuid.UUID, at time.Time, reason, note string) (*models.Boost, error) {
 	err := s.inTx(ctx, func(r *repository.BoostRepository) error {
 		b, err := r.GetForUpdate(ctx, boostID)
 		if err != nil {
@@ -847,16 +924,24 @@ func (s *BoostService) End(ctx context.Context, actorKind, actor string, boostID
 		if err := r.SetEnded(ctx, b.ID, at, reason); err != nil {
 			return err
 		}
-		return r.Log(ctx, b.ID, actorKind, actor, "ended", map[string]any{"reason": reason})
+		return r.Log(ctx, b.ID, actorKind, actor, "ended", map[string]any{"reason": reason, "note": note})
 	})
 	if err != nil {
 		return nil, err
 	}
 	out, err := s.repo.GetByID(ctx, boostID)
 	if err == nil && out != nil {
+		extra := ""
+		if note != "" {
+			extra = "<p>" + html.EscapeString(note) + "</p>"
+		}
+		if out.PricingModel == models.BoostPricingBudget {
+			extra += fmt.Sprintf("<p>Ad spend so far: %s of %s paid. The team will share the final report within 2 days.</p>",
+				rupeesText(out.SpentCents), rupeesText(out.PaidCents))
+		}
 		s.mailHost(ctx, out, "Your Boost has ended",
-			fmt.Sprintf("<p>Your Boost for <strong>%s</strong> has ended: %d tickets sold while it was live. Tickets sold from now on carry no Boost commission.</p>",
-				html.EscapeString(out.EventTitle), out.TicketsSold))
+			fmt.Sprintf("<p>Your Boost for <strong>%s</strong> has ended: %d tickets sold while it was live. Tickets sold from now on carry no Boost commission.</p>%s",
+				html.EscapeString(out.EventTitle), out.TicketsSold, extra))
 	}
 	return out, err
 }
@@ -896,12 +981,26 @@ func (s *BoostService) HostInvited(ctx context.Context, hostID uuid.UUID) (bool,
 }
 
 // SetHostInvited adds or removes a host from the Boost pilot.
+// Premium replaces the invite: inviting a host also makes them Premium (a
+// grant), so the admin's existing toggle keeps working.
 func (s *BoostService) SetHostInvited(ctx context.Context, hostID uuid.UUID, invited bool) error {
-	return s.repo.SetInvited(ctx, hostID, invited)
+	if err := s.repo.SetInvited(ctx, hostID, invited); err != nil {
+		return err
+	}
+	if !invited {
+		return nil
+	}
+	if ok, err := s.repo.PremiumActive(ctx, hostID); err != nil || ok {
+		return err
+	}
+	_, err := s.PremiumGrant(ctx, "boost_invite", hostID, PremiumDecision{})
+	return err
 }
 
 // AutoEnd ends live Boosts whose window is over. Returns how many ended.
 func (s *BoostService) AutoEnd(ctx context.Context) (int, error) {
+	s.expireUnpaid(ctx)
+	s.invoicePending(ctx)
 	due, err := s.repo.DueToEnd(ctx, time.Now())
 	if err != nil {
 		return 0, err
@@ -968,8 +1067,12 @@ func (s *BoostService) PayoutEligibility(ctx context.Context, userID, hostID uui
 	if err != nil || acc == nil {
 		return nil, err
 	}
+	premium, err := s.repo.PremiumActive(ctx, h.ID)
+	if err != nil {
+		return nil, err
+	}
 	return &PayoutEligibility{Reasons: []string{"Weekly payouts aren't available yet."}, CompletedEvents: acc.CompletedEvents,
-		BoostInvited: acc.Invited, EarlyBackstopCents: 5000000}, nil
+		BoostInvited: premium, EarlyBackstopCents: 5000000}, nil
 }
 
 /* ------------------------------------------------------------------ */

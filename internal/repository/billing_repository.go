@@ -28,13 +28,13 @@ func (r *BillingRepository) GetSettings(ctx context.Context) (*models.BillingSet
 	err := r.db.QueryRowContext(ctx, `
 		SELECT enabled, legal_name, trade_name, gstin, pan, address, state_code, email,
 		       sac_code, gst_rate_bps, invoice_prefix, credit_note_prefix,
-		       commission_invoice_prefix, commission_sac_code, updated_at
+		       commission_invoice_prefix, commission_sac_code, budget_invoice_prefix, budget_sac_code, updated_at
 		  FROM billing_settings WHERE id`).
 		Scan(&s.Enabled, &s.LegalName, &s.TradeName, &s.GSTIN, &s.PAN, &s.Address, &s.StateCode, &s.Email,
 			&s.SACCode, &s.GSTRateBps, &s.InvoicePrefix, &s.CreditNotePrefix,
-			&s.CommissionInvoicePrefix, &s.CommissionSACCode, &s.UpdatedAt)
+			&s.CommissionInvoicePrefix, &s.CommissionSACCode, &s.BudgetInvoicePrefix, &s.BudgetSACCode, &s.UpdatedAt)
 	if err == sql.ErrNoRows {
-		return &models.BillingSettings{GSTRateBps: 1800, InvoicePrefix: "F", CreditNotePrefix: "C", CommissionInvoicePrefix: "M"}, nil
+		return &models.BillingSettings{GSTRateBps: 1800, InvoicePrefix: "F", CreditNotePrefix: "C", CommissionInvoicePrefix: "M", BudgetInvoicePrefix: "B"}, nil
 	}
 	return s, err
 }
@@ -43,8 +43,8 @@ func (r *BillingRepository) SaveSettings(ctx context.Context, s *models.BillingS
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO billing_settings (id, enabled, legal_name, trade_name, gstin, pan, address, state_code, email,
 		                              sac_code, gst_rate_bps, invoice_prefix, credit_note_prefix,
-		                              commission_invoice_prefix, commission_sac_code, updated_at)
-		VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+		                              commission_invoice_prefix, commission_sac_code, budget_invoice_prefix, budget_sac_code, updated_at)
+		VALUES (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
 		ON CONFLICT (id) DO UPDATE SET
 		  enabled = EXCLUDED.enabled, legal_name = EXCLUDED.legal_name, trade_name = EXCLUDED.trade_name,
 		  gstin = EXCLUDED.gstin, pan = EXCLUDED.pan, address = EXCLUDED.address,
@@ -52,10 +52,11 @@ func (r *BillingRepository) SaveSettings(ctx context.Context, s *models.BillingS
 		  gst_rate_bps = EXCLUDED.gst_rate_bps, invoice_prefix = EXCLUDED.invoice_prefix,
 		  credit_note_prefix = EXCLUDED.credit_note_prefix,
 		  commission_invoice_prefix = EXCLUDED.commission_invoice_prefix,
-		  commission_sac_code = EXCLUDED.commission_sac_code, updated_at = now()`,
+		  commission_sac_code = EXCLUDED.commission_sac_code, budget_invoice_prefix = EXCLUDED.budget_invoice_prefix,
+		  budget_sac_code = EXCLUDED.budget_sac_code, updated_at = now()`,
 		s.Enabled, s.LegalName, s.TradeName, s.GSTIN, s.PAN, s.Address, s.StateCode, s.Email,
 		s.SACCode, s.GSTRateBps, s.InvoicePrefix, s.CreditNotePrefix,
-		s.CommissionInvoicePrefix, s.CommissionSACCode)
+		s.CommissionInvoicePrefix, s.CommissionSACCode, s.BudgetInvoicePrefix, s.BudgetSACCode)
 	return err
 }
 
@@ -280,7 +281,7 @@ type ReportRow struct {
 // SAC code and GST rate.
 func (r *BillingRepository) ReportRows(ctx context.Context, from, to time.Time) ([]ReportRow, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT i.kind, COALESCE(i.buyer_gstin, '') <> '', i.source_type = 'host_commission',
+		SELECT i.kind, COALESCE(i.buyer_gstin, '') <> '', i.source_type IN ('host_commission', 'boost_budget'),
 		       i.place_of_supply, l.sac_code, l.gst_rate_bps, COUNT(DISTINCT i.id), COALESCE(SUM(l.quantity), 0),
 		       SUM(l.taxable_cents), SUM(l.cgst_cents), SUM(l.sgst_cents), SUM(l.igst_cents), SUM(l.total_cents)
 		  FROM invoices i JOIN invoice_lines l ON l.invoice_id = i.id

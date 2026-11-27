@@ -223,3 +223,62 @@ func (p *RazorpayProvider) CreateRefund(ctx context.Context, req RefundRequest) 
 		Status:      rr.Status,
 	}, nil
 }
+
+// CreatePaymentLink creates a payment link (POST /v1/payment_links) and has
+// Razorpay send it by SMS and email.
+func (p *RazorpayProvider) CreatePaymentLink(ctx context.Context, req PaymentLinkRequest) (*PaymentLinkResponse, error) {
+	customer := map[string]string{}
+	if req.Name != "" {
+		customer["name"] = req.Name
+	}
+	if req.Email != "" {
+		customer["email"] = req.Email
+	}
+	if req.Phone != "" {
+		customer["contact"] = req.Phone
+	}
+	payload := map[string]any{
+		"amount":          req.AmountCents,
+		"currency":        "INR",
+		"reference_id":    req.ReferenceID,
+		"description":     req.Description,
+		"customer":        customer,
+		"notify":          map[string]bool{"sms": req.Phone != "", "email": req.Email != ""},
+		"reminder_enable": true,
+		"notes":           req.Notes,
+	}
+	if !req.ExpireBy.IsZero() {
+		payload["expire_by"] = req.ExpireBy.Unix()
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, razorpayBaseURL+"/payment_links", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.SetBasicAuth(p.cfg.KeyID, p.cfg.KeySecret)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("razorpay API call failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("razorpay payment link error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+	var out struct {
+		ID       string `json:"id"`
+		ShortURL string `json:"short_url"`
+		Status   string `json:"status"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return nil, err
+	}
+	return &PaymentLinkResponse{ID: out.ID, ShortURL: out.ShortURL, Status: out.Status}, nil
+}

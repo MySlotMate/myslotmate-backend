@@ -1,6 +1,9 @@
 package payment
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // OrderRequest contains everything needed to create a payment order.
 type OrderRequest struct {
@@ -63,4 +66,26 @@ type Provider interface {
 	// CreateRefund initiates a refund of a captured payment back to its
 	// original source. Status is async — final outcome arrives via webhook.
 	CreateRefund(ctx context.Context, req RefundRequest) (*RefundResponse, error)
+
+	// CreatePaymentLink creates a hosted payment page and lets Razorpay send
+	// it to the customer by SMS and email.
+	CreatePaymentLink(ctx context.Context, req PaymentLinkRequest) (*PaymentLinkResponse, error)
+}
+
+// PaymentLinkRequest is a Razorpay payment link for a known customer.
+type PaymentLinkRequest struct {
+	AmountCents int64
+	ReferenceID string // our id, unique per link
+	Description string
+	Name        string
+	Email       string
+	Phone       string // with country code, e.g. +919876543210
+	ExpireBy    time.Time
+	Notes       map[string]string
+}
+
+type PaymentLinkResponse struct {
+	ID       string // plink_xxxxx
+	ShortURL string
+	Status   string
 }

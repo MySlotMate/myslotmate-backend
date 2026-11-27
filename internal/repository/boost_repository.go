@@ -23,13 +23,17 @@ func (r *BoostRepository) WithTx(tx DBTX) *BoostRepository { return &BoostReposi
 // ErrBoostOpen is returned when the event already has an open Boost.
 var ErrBoostOpen = errors.New("boost_already_open")
 
-// Bands returns the newest version of the host-guide bands, cheapest first.
-func (r *BoostRepository) Bands(ctx context.Context) ([]models.BoostBand, error) {
+// Bands returns the bands a Boost of this pricing model is priced on,
+// cheapest first: version 1 for no_upfront Boosts, the newest version from 2
+// up for budget Boosts.
+func (r *BoostRepository) Bands(ctx context.Context, pricingModel string) ([]models.BoostBand, error) {
+	where := `version = 1`
+	if pricingModel == models.BoostPricingBudget {
+		where = `version = (SELECT MAX(version) FROM boost_rate_bands WHERE version >= 2 AND active_from <= now())`
+	}
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT version, min_price_cents, max_price_cents, guide_rate_bps, min_rate_bps, max_rate_bps
-		  FROM boost_rate_bands
-		 WHERE version = (SELECT MAX(version) FROM boost_rate_bands WHERE active_from <= now())
-		 ORDER BY min_price_cents`)
+		  FROM boost_rate_bands WHERE `+where+` ORDER BY min_price_cents`)
 	if err != nil {
 		return nil, err
 	}
@@ -47,9 +51,12 @@ func (r *BoostRepository) Bands(ctx context.Context) ([]models.BoostBand, error)
 
 func (r *BoostRepository) Create(ctx context.Context, b *models.Boost) error {
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO event_boosts (id, event_id, host_id, status, goal_text, audience_notes, channels, requested_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		b.ID, b.EventID, b.HostID, b.Status, b.GoalText, b.AudienceNotes, pq.Array(b.Channels), b.RequestedAt)
+		INSERT INTO event_boosts (id, event_id, host_id, status, goal_text, audience_notes, channels, requested_at,
+		                          pricing_model, daily_budget_cents, budget_from, budget_until, budget_total_cents,
+		                          budget_gst_cents, budget_status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+		b.ID, b.EventID, b.HostID, b.Status, b.GoalText, b.AudienceNotes, pq.Array(b.Channels), b.RequestedAt,
+		b.PricingModel, b.DailyBudgetCents, b.BudgetFrom, b.BudgetUntil, b.BudgetTotalCents, b.BudgetGSTCents, b.BudgetStatus)
 	if isUniqueViolation(err) {
 		return ErrBoostOpen
 	}
@@ -76,7 +83,9 @@ func (r *BoostRepository) ReplaceRates(ctx context.Context, boostID uuid.UUID, r
 
 const boostCols = `b.id, b.event_id, b.host_id, b.status, b.goal_text, b.audience_notes, b.channels, b.requested_at,
 	b.proposed_at, b.admin_note, b.decline_reason, b.planned_from, b.planned_until, b.accepted_at, b.live_from,
-	b.live_until, b.ended_reason, b.reach, b.clicks, e.title, trim(concat_ws(' ', h.first_name, h.last_name))`
+	b.live_until, b.ended_reason, b.reach, b.clicks, e.title, trim(concat_ws(' ', h.first_name, h.last_name)),
+	b.pricing_model, b.daily_budget_cents, to_char(b.budget_from, 'YYYY-MM-DD'), to_char(b.budget_until, 'YYYY-MM-DD'),
+	b.budget_total_cents, b.budget_gst_cents, b.budget_status, b.payment_due_by, b.spent_cents, b.closed_at`
 
 const boostFrom = ` FROM event_boosts b JOIN events e ON e.id = b.event_id JOIN hosts h ON h.id = b.host_id `
 
@@ -90,7 +99,9 @@ func (r *BoostRepository) query(ctx context.Context, tail string, args ...any) (
 		b := &models.Boost{}
 		if err := rows.Scan(&b.ID, &b.EventID, &b.HostID, &b.Status, &b.GoalText, &b.AudienceNotes, pq.Array(&b.Channels),
 			&b.RequestedAt, &b.ProposedAt, &b.AdminNote, &b.DeclineReason, &b.PlannedFrom, &b.PlannedUntil, &b.AcceptedAt,
-			&b.LiveFrom, &b.LiveUntil, &b.EndedReason, &b.Reach, &b.Clicks, &b.EventTitle, &b.HostName); err != nil {
+			&b.LiveFrom, &b.LiveUntil, &b.EndedReason, &b.Reach, &b.Clicks, &b.EventTitle, &b.HostName,
+			&b.PricingModel, &b.DailyBudgetCents, &b.BudgetFrom, &b.BudgetUntil, &b.BudgetTotalCents, &b.BudgetGSTCents,
+			&b.BudgetStatus, &b.PaymentDueBy, &b.SpentCents, &b.ClosedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -135,11 +146,20 @@ func (r *BoostRepository) fill(ctx context.Context, b *models.Boost) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	return r.db.QueryRowContext(ctx, `
+	if err := r.db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(quantity) FILTER (WHERE status IN ('pending', 'confirmed')), 0),
 		       COALESCE(SUM(boost_commission_cents) FILTER (WHERE status IN ('pending', 'confirmed') OR boost_commission_kept), 0)
 		  FROM bookings WHERE boost_id = $1 AND (status IN ('pending', 'confirmed') OR boost_commission_kept)`, b.ID).
-		Scan(&b.TicketsSold, &b.CommissionCents)
+		Scan(&b.TicketsSold, &b.CommissionCents); err != nil {
+		return err
+	}
+	return r.db.QueryRowContext(ctx, `
+		SELECT (SELECT COALESCE(SUM(amount_cents), 0) FROM boost_payments WHERE boost_id = $1 AND status = 'paid'),
+		       (SELECT COUNT(*) FROM boost_creatives WHERE boost_id = $1),
+		       (SELECT COUNT(*) FROM boost_creatives WHERE boost_id = $1 AND status = 'awaiting_approval'),
+		       (SELECT COUNT(*) FROM boost_creatives WHERE boost_id = $1 AND status = 'submitted'),
+		       (SELECT COUNT(*) FROM boost_reports WHERE boost_id = $1 AND replaced_at IS NULL)`, b.ID).
+		Scan(&b.PaidCents, &b.CreativesCount, &b.CreativesNeedAction, &b.CreativesToReview, &b.ReportsCount)
 }
 
 func (r *BoostRepository) one(ctx context.Context, tail string, args ...any) (*models.Boost, error) {
@@ -175,15 +195,13 @@ func (r *BoostRepository) ListByHost(ctx context.Context, hostID uuid.UUID) ([]*
 	return r.query(ctx, `WHERE b.host_id = $1 ORDER BY b.requested_at DESC`, hostID)
 }
 
-// ListByStatus is the admin queue; "" lists every status.
-func (r *BoostRepository) ListByStatus(ctx context.Context, status string, limit int) ([]*models.Boost, error) {
+// ListByStatus is the admin queue; "" lists every status or budget status.
+func (r *BoostRepository) ListByStatus(ctx context.Context, status, budgetStatus string, limit int) ([]*models.Boost, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	if status == "" {
-		return r.query(ctx, `ORDER BY b.requested_at DESC LIMIT $1`, limit)
-	}
-	return r.query(ctx, `WHERE b.status = $1 ORDER BY b.requested_at DESC LIMIT $2`, status, limit)
+	return r.query(ctx, `WHERE ($1 = '' OR b.status = $1) AND ($2 = '' OR b.budget_status = $2)
+		ORDER BY b.requested_at DESC LIMIT $3`, status, budgetStatus, limit)
 }
 
 // CountByStatus is the admin queue's tab counts.
@@ -220,9 +238,11 @@ func (r *BoostRepository) SetDeclined(ctx context.Context, id uuid.UUID, reason 
 	return r.exec(ctx, `UPDATE event_boosts SET status = 'declined', decline_reason = $2, updated_at = now() WHERE id = $1`, id, reason)
 }
 
-func (r *BoostRepository) SetAccepted(ctx context.Context, id uuid.UUID, ip, ua string) error {
+// SetAccepted records the acceptance. paymentDue is set for a budget Boost
+// (the budget must be paid by then), nil otherwise.
+func (r *BoostRepository) SetAccepted(ctx context.Context, id uuid.UUID, ip, ua, terms string, paymentDue *time.Time) error {
 	return r.exec(ctx, `UPDATE event_boosts SET accepted_at = now(), accepted_ip = $2, accepted_user_agent = $3,
-		terms_version = $4, updated_at = now() WHERE id = $1`, id, ip, ua, models.BoostTermsVersion)
+		terms_version = $4, payment_due_by = $5, updated_at = now() WHERE id = $1`, id, ip, ua, terms, paymentDue)
 }
 
 func (r *BoostRepository) SetCancelled(ctx context.Context, id uuid.UUID) error {

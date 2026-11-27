@@ -36,6 +36,7 @@ func (c *BoostController) RegisterRoutes(r chi.Router) {
 	r.With(user).Post("/boosts/{boostID}/accept", c.Accept)
 	r.With(user).Post("/boosts/{boostID}/stop", c.Stop)
 	r.With(user).Get("/host/boosts", c.HostBoosts)
+	c.registerPlanRoutes(r, user)
 
 	r.Route("/admin/boosts", func(r chi.Router) {
 		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
@@ -48,6 +49,11 @@ func (c *BoostController) RegisterRoutes(r chi.Router) {
 		r.Post("/{boostID}/go-live", c.GoLive)
 		r.Post("/{boostID}/end", c.End)
 		r.Patch("/{boostID}/campaign", c.Campaign)
+		c.registerAdminPlanRoutes(r)
+	})
+	r.Group(func(r chi.Router) {
+		r.Use(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret))
+		c.registerAdminPremiumRoutes(r)
 	})
 	r.With(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret)).Put("/admin/boost-invites/{hostID}", c.SetInvite)
 	r.With(auth.RequireAdmin(c.firebaseAuth, c.adminEmail, c.jwtSecret)).Get("/admin/boost-invites/{hostID}", c.GetInvite)
@@ -215,7 +221,8 @@ func (c *BoostController) PayoutEligibility(w http.ResponseWriter, r *http.Reque
 /* ---- admin ---- */
 
 func (c *BoostController) AdminList(w http.ResponseWriter, r *http.Request) {
-	list, counts, err := c.boosts.AdminList(r.Context(), r.URL.Query().Get("status"))
+	q := r.URL.Query()
+	list, counts, err := c.boosts.AdminList(r.Context(), q.Get("status"), q.Get("budget_status"))
 	if err != nil {
 		respondBoost(w, err)
 		return
@@ -341,7 +348,19 @@ func (c *BoostController) End(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	b, err := c.boosts.End(r.Context(), "admin", adminName(r), id, time.Now(), "admin_ended")
+	var body struct {
+		Reason string `json:"reason"` // admin_ended (default) or budget_spent
+		Note   string `json:"note"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body.Reason != "budget_spent" {
+		body.Reason = "admin_ended"
+	}
+	if len([]rune(body.Note)) > 1000 {
+		RespondError(w, http.StatusBadRequest, "Keep the note under 1,000 characters.")
+		return
+	}
+	b, err := c.boosts.EndWithNote(r.Context(), "admin", adminName(r), id, time.Now(), body.Reason, body.Note)
 	if err != nil {
 		respondBoost(w, err)
 		return

@@ -274,7 +274,7 @@ func main() {
 	go boostService.RunAutoEnd(ctx, 15*time.Minute)
 	boostController := controller.NewBoostController(boostService, userRepo, fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
 	hostController.WithHostRoutes(boostController)
-	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider)
+	webhookController := controller.NewWebhookController(payoutService, userService, payoutProvider, paymentProvider).WithBoost(boostService)
 	supportController := controller.NewSupportController(supportService, uploadService)
 	uploadController := controller.NewUploadController(uploadService).
 		WithAuth(fbApp.Auth, cfg.AdminAuth.JWTSecret, cfg.AdminEmail)
@@ -308,6 +308,12 @@ func main() {
 		invoiceStore = uploadService
 	}
 	billingService := service.NewBillingService(repository.NewBillingRepository(dbConn), invoiceStore).WithDB(dbConn)
+	// Paid-budget Boost: Razorpay for the budget, S3 for creatives and reports, budget invoices.
+	var boostFiles service.BoostFiles
+	if uploadService != nil {
+		boostFiles = uploadService
+	}
+	boostService.WithPlan(paymentProvider, boostFiles, billingService)
 	go billingService.RunArchiver(ctx, 5*time.Minute)
 	go billingService.RunCommissionInvoicer(ctx, 6*time.Hour) // last month's Boost commission invoices
 	// The booking confirmation email attaches the fee receipt.

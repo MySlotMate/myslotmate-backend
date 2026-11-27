@@ -80,6 +80,23 @@ type Boost struct {
 	// Derived from bookings stamped with this Boost, net of refunds.
 	TicketsSold     int   `json:"tickets_sold"`
 	CommissionCents int64 `json:"commission_cents"`
+	// Paid-budget Boost (pricing_model "budget"). Days are IST, YYYY-MM-DD.
+	PricingModel     string     `json:"pricing_model"`
+	DailyBudgetCents *int64     `json:"daily_budget_cents"`
+	BudgetFrom       *string    `json:"budget_from"`
+	BudgetUntil      *string    `json:"budget_until"`
+	BudgetTotalCents int64      `json:"budget_total_cents"`
+	BudgetGSTCents   int64      `json:"budget_gst_cents"`
+	BudgetStatus     string     `json:"budget_status"`
+	PaymentDueBy     *time.Time `json:"payment_due_by"`
+	SpentCents       int64      `json:"spent_cents"`
+	PaidCents        int64      `json:"paid_cents"` // budget paid so far, before GST: the spend cap
+	ClosedAt         *time.Time `json:"closed_at"`
+	CreativesCount   int        `json:"creatives_count"`
+	// Host side: team creatives waiting for the host. Admin side: see CreativesToReview.
+	CreativesNeedAction int `json:"creatives_need_action"`
+	CreativesToReview   int `json:"creatives_to_review"` // host creatives the team hasn't reviewed
+	ReportsCount        int `json:"reports_count"`
 	// Admin views.
 	EventTitle string `json:"event_title,omitempty"`
 	HostName   string `json:"host_name,omitempty"`

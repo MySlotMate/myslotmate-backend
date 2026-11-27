@@ -92,12 +92,12 @@ func RenderInvoicePDF(inv *models.Invoice) ([]byte, error) {
 	switch {
 	case inv.BuyerGSTIN != nil && *inv.BuyerGSTIN != "":
 		pdf.MultiCell(pageW, 4.5, "GSTIN: "+*inv.BuyerGSTIN, "", "L", false)
-	case inv.SourceType == models.InvoiceSourceHostCommission:
+	case inv.SourceType == models.InvoiceSourceHostCommission || inv.SourceType == models.InvoiceSourceBoostBudget:
 		pdf.MultiCell(pageW, 4.5, "Unregistered", "", "L", false)
 	default:
 		pdf.MultiCell(pageW, 4.5, "Unregistered (consumer)", "", "L", false)
 	}
-	if inv.SourceType == models.InvoiceSourceHostCommission {
+	if inv.SourceType == models.InvoiceSourceHostCommission || inv.SourceType == models.InvoiceSourceBoostBudget {
 		pdf.Ln(2)
 		pdf.MultiCell(pageW, 4.5, tr(inv.EventTitle), "", "L", false)
 	} else if inv.EventTitle != "" {
@@ -202,6 +202,15 @@ func RenderInvoicePDF(inv *models.Invoice) ([]byte, error) {
 		}
 		if inv.Kind == models.InvoiceKindCreditNote {
 			note = "This credit note reverses the Marketing Boost commission on bookings that were refunded after the invoice above."
+		}
+	}
+	if inv.SourceType == models.InvoiceSourceBoostBudget {
+		note = "Ad budget for your Marketing Boost, spent in full on your event's ads. GST is added on top. The budget is not refundable."
+		if inv.BuyerGSTIN != nil && *inv.BuyerGSTIN != "" {
+			note += " As a GST-registered business you can claim this GST as input tax credit."
+		}
+		if inv.Kind == models.InvoiceKindCreditNote {
+			note = "This credit note reverses the ad budget invoice above: the payment it recorded was reversed."
 		}
 	}
 	pdf.MultiCell(pageW, 4, tr(note), "", "L", false)

@@ -33,9 +33,12 @@ type BillingSettings struct {
 	InvoicePrefix    string `json:"invoice_prefix"`
 	CreditNotePrefix string `json:"credit_note_prefix"`
 	// Boost commission invoices to hosts: own series and SAC code.
-	CommissionInvoicePrefix string    `json:"commission_invoice_prefix"`
-	CommissionSACCode       string    `json:"commission_sac_code"`
-	UpdatedAt               time.Time `json:"updated_at"`
+	CommissionInvoicePrefix string `json:"commission_invoice_prefix"`
+	CommissionSACCode       string `json:"commission_sac_code"`
+	// Boost ad budget invoices to hosts: own series and SAC code.
+	BudgetInvoicePrefix string    `json:"budget_invoice_prefix"`
+	BudgetSACCode       string    `json:"budget_sac_code"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 // Missing lists the required fields that are still blank.
@@ -61,6 +64,12 @@ func (s *BillingSettings) Issuing() bool {
 // billing is on and the commission SAC code is set.
 func (s *BillingSettings) IssuingCommission() bool {
 	return s.Issuing() && s.CommissionSACCode != ""
+}
+
+// IssuingBudget reports whether Boost ad budget invoices are issued now:
+// billing is on and the budget SAC code is set (pending the CA's sign-off).
+func (s *BillingSettings) IssuingBudget() bool {
+	return s.Issuing() && s.BudgetSACCode != ""
 }
 
 // InvoiceSupplier is the supplier block copied onto each invoice.

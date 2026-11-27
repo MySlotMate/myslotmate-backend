@@ -253,6 +253,11 @@ func (s *BillingService) SaveSettings(ctx context.Context, in models.BillingSett
 	if in.CommissionInvoicePrefix == "" {
 		in.CommissionInvoicePrefix = "M"
 	}
+	in.BudgetInvoicePrefix = strings.ToUpper(strings.TrimSpace(in.BudgetInvoicePrefix))
+	in.BudgetSACCode = strings.TrimSpace(in.BudgetSACCode)
+	if in.BudgetInvoicePrefix == "" {
+		in.BudgetInvoicePrefix = "B"
+	}
 	if in.GSTRateBps == 0 {
 		in.GSTRateBps = 1800
 	}
@@ -286,8 +291,18 @@ func (s *BillingService) SaveSettings(ctx context.Context, in models.BillingSett
 	if !prefixRe.MatchString(in.CommissionInvoicePrefix) {
 		return bad("Prefixes should be 1 to 3 capital letters.")
 	}
-	if in.InvoicePrefix == in.CreditNotePrefix || in.CommissionInvoicePrefix == in.InvoicePrefix || in.CommissionInvoicePrefix == in.CreditNotePrefix {
-		return bad("Fee invoices, commission invoices and credit notes need different prefixes.")
+	if in.BudgetSACCode != "" && !sacRe.MatchString(in.BudgetSACCode) {
+		return bad("Budget SAC code should be 6 digits starting with 99.")
+	}
+	if !prefixRe.MatchString(in.BudgetInvoicePrefix) {
+		return bad("Prefixes should be 1 to 3 capital letters.")
+	}
+	seen := map[string]bool{}
+	for _, p := range []string{in.InvoicePrefix, in.CreditNotePrefix, in.CommissionInvoicePrefix, in.BudgetInvoicePrefix} {
+		if seen[p] {
+			return bad("Fee invoices, commission invoices, budget invoices and credit notes need different prefixes.")
+		}
+		seen[p] = true
 	}
 	if in.GSTRateBps < 0 || in.GSTRateBps > 2800 {
 		return bad("GST rate should be between 0% and 28%.")

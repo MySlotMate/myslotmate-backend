@@ -24,6 +24,22 @@ type WebhookController struct {
 	userService     service.UserService
 	payoutProvider  payout.Provider
 	paymentProvider payment.Provider
+	boosts          *service.BoostService // Boost ad budget payments; nil = none
+}
+
+// WithBoost routes Boost budget payments (checkout orders and payment links)
+// to the Boost service before the wallet.
+func (c *WebhookController) WithBoost(b *service.BoostService) *WebhookController {
+	c.boosts = b
+	return c
+}
+
+// paymentNotes decodes a payment's notes, which Razorpay sends as an object,
+// or as [] when there are none.
+func paymentNotes(raw json.RawMessage) map[string]string {
+	out := map[string]string{}
+	_ = json.Unmarshal(raw, &out)
+	return out
 }
 
 func NewWebhookController(ps service.PayoutService, us service.UserService, payoutProv payout.Provider, paymentProv payment.Provider) *WebhookController {
@@ -277,8 +293,20 @@ type RazorpayPaymentWebhookEvent struct {
 				OrderID string `json:"order_id"` // order_xxxxx
 				Amount  int64  `json:"amount"`
 				Status  string `json:"status"` // captured, failed
+				// Razorpay sends {} or [] here, so it's decoded leniently (paymentNotes).
+				Notes json.RawMessage `json:"notes"`
 			} `json:"entity"`
 		} `json:"payment"`
+		PaymentLink struct {
+			Entity struct {
+				ID string `json:"id"` // plink_xxxxx
+			} `json:"entity"`
+		} `json:"payment_link"`
+		Order struct {
+			Entity struct {
+				ID string `json:"id"`
+			} `json:"entity"`
+		} `json:"order"`
 		Refund struct {
 			Entity struct {
 				ID                   string `json:"id"`         // rfnd_xxxxx
@@ -321,12 +349,48 @@ func (c *WebhookController) HandlePaymentWebhook(w http.ResponseWriter, r *http.
 			RespondError(w, http.StatusBadRequest, "Missing order_id or payment id in webhook payload")
 			return
 		}
+		if c.boosts != nil {
+			handled, err := c.boosts.HandleGatewayPayment(r.Context(), orderID, "", paymentID,
+				event.Payload.Payment.Entity.Amount, paymentNotes(event.Payload.Payment.Entity.Notes))
+			if err != nil {
+				log.Printf("[webhook/payment] boost payment for order %s: %v", orderID, err)
+				RespondError(w, http.StatusInternalServerError, "Failed to process payment webhook")
+				return
+			}
+			if handled {
+				RespondSuccess(w, http.StatusOK, map[string]string{"message": "boost payment processed"})
+				return
+			}
+		}
 		if err := c.userService.CreditWalletFromWebhook(r.Context(), orderID, paymentID); err != nil {
 			log.Printf("[webhook/payment] error crediting wallet for order %s: %v", orderID, err)
 			RespondError(w, http.StatusInternalServerError, "Failed to process payment webhook")
 			return
 		}
 		RespondSuccess(w, http.StatusOK, map[string]string{"message": "payment webhook processed"})
+
+	case "payment_link.paid":
+		// Only Boost budgets use payment links.
+		linkID := event.Payload.PaymentLink.Entity.ID
+		if c.boosts == nil || linkID == "" {
+			RespondSuccess(w, http.StatusOK, map[string]string{"message": "event ignored"})
+			return
+		}
+		orderID := event.Payload.Order.Entity.ID
+		if orderID == "" {
+			orderID = event.Payload.Payment.Entity.OrderID
+		}
+		handled, err := c.boosts.HandleGatewayPayment(r.Context(), orderID, linkID, event.Payload.Payment.Entity.ID,
+			event.Payload.Payment.Entity.Amount, paymentNotes(event.Payload.Payment.Entity.Notes))
+		if err != nil {
+			log.Printf("[webhook/payment] boost payment link %s: %v", linkID, err)
+			RespondError(w, http.StatusInternalServerError, "Failed to process payment webhook")
+			return
+		}
+		if !handled {
+			log.Printf("[webhook/payment] payment link %s is not a Boost payment; ignored", linkID)
+		}
+		RespondSuccess(w, http.StatusOK, map[string]string{"message": "payment link processed"})
 
 	case "refund.processed", "refund.failed":
 		refundID := event.Payload.Refund.Entity.ID

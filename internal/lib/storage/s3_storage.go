@@ -280,3 +280,61 @@ func (s *UploadService) GetPrivateObject(ctx context.Context, key string) ([]byt
 	defer out.Body.Close()
 	return io.ReadAll(out.Body)
 }
+
+// boostFolder holds Boost creatives and reports: private, read through
+// short-lived signed links, uploaded straight from the browser.
+const boostFolder = "boosts/"
+
+func boostKeyOK(key string) bool {
+	return strings.HasPrefix(key, boostFolder) && !strings.Contains(key, "..")
+}
+
+// PresignBoostUpload returns a signed PUT URL for one file under boosts/.
+// The content type and length are signed, so the browser must send exactly
+// those (the bucket's CORS must allow PUT from the website).
+func (s *UploadService) PresignBoostUpload(ctx context.Context, key, contentType string, size int64) (string, error) {
+	if !boostKeyOK(key) {
+		return "", fmt.Errorf("refusing to sign %q outside %s", key, boostFolder)
+	}
+	req, err := s3.NewPresignClient(s.client).PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(key),
+		ContentType:   aws.String(contentType),
+		ContentLength: aws.Int64(size),
+		CacheControl:  aws.String("private, no-store"),
+	}, s3.WithPresignExpires(30*time.Minute))
+	if err != nil {
+		return "", err
+	}
+	return req.URL, nil
+}
+
+// SignBoostDownload returns a one-hour signed GET link for a file under
+// boosts/, served as an attachment named name.
+func (s *UploadService) SignBoostDownload(key, name string) string {
+	if !boostKeyOK(key) {
+		return ""
+	}
+	in := &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)}
+	if name != "" {
+		in.ResponseContentDisposition = aws.String(fmt.Sprintf("inline; filename=%q", sanitizeFilename(name)))
+	}
+	req, err := s3.NewPresignClient(s.client).PresignGetObject(context.Background(), in, s3.WithPresignExpires(time.Hour))
+	if err != nil {
+		return ""
+	}
+	return req.URL
+}
+
+// HeadBoostObject returns the size and content type of an uploaded file
+// under boosts/, or an error when it isn't there.
+func (s *UploadService) HeadBoostObject(ctx context.Context, key string) (int64, string, error) {
+	if !boostKeyOK(key) {
+		return 0, "", fmt.Errorf("refusing to read %q outside %s", key, boostFolder)
+	}
+	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	if err != nil {
+		return 0, "", err
+	}
+	return aws.ToInt64(out.ContentLength), aws.ToString(out.ContentType), nil
+}

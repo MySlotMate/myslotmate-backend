@@ -47,6 +47,9 @@ type EventService interface {
 	// accepted co-host invitation for it — the check the roster and every
 	// mutating action share.
 	HostCanManageEvent(ctx context.Context, eventID, hostID uuid.UUID) (bool, error)
+	// UserHasConfirmedBooking reports whether this user holds a confirmed
+	// booking for the event: the check behind the online join link.
+	UserHasConfirmedBooking(ctx context.Context, eventID, userID uuid.UUID) (bool, error)
 	ListPublishedEvents(ctx context.Context, limit, offset int) ([]*models.Event, error)
 	GetEventAvailability(ctx context.Context, eventID uuid.UUID) ([]models.OccurrenceAvailability, error)
 	GetEventOccurrencesForHost(ctx context.Context, eventID uuid.UUID, hostID uuid.UUID) ([]models.OccurrenceAvailability, error)
@@ -1167,6 +1170,19 @@ func (s *eventService) ResumeEvent(ctx context.Context, eventID uuid.UUID, hostI
 
 func (s *eventService) HostCanManageEvent(ctx context.Context, eventID, hostID uuid.UUID) (bool, error) {
 	return s.eventRepo.HostCanManage(ctx, eventID, hostID)
+}
+
+func (s *eventService) UserHasConfirmedBooking(ctx context.Context, eventID, userID uuid.UUID) (bool, error) {
+	bookings, err := s.bookingRepo.ListByUserID(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	for _, b := range bookings {
+		if b.EventID == eventID && b.Status == models.BookingStatusConfirmed {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *eventService) GetEventAttendees(ctx context.Context, eventID uuid.UUID, occurrenceDate *time.Time) ([]*models.Attendee, error) {

@@ -32,6 +32,9 @@ func (c *BoostController) registerPlanRoutes(r chi.Router, user func(http.Handle
 		r.Get("/reports", c.Reports)
 		r.Get("/documents", c.Documents)
 	})
+	// The budget rules and upload limits the admin sets, so the website's
+	// planner checks what the backend will.
+	r.With(user).Get("/boost/settings", c.GetSettings)
 	r.With(user).Get("/host/premium", c.HostPremium)
 	r.With(user).Post("/host/premium/apply", c.ApplyPremium)
 }

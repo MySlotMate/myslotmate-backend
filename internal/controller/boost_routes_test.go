@@ -15,10 +15,11 @@ func TestBoostPlanRoutesRegister(t *testing.T) {
 	c := NewBoostController(nil, nil, nil, "secret", "admin@example.com")
 	c.RegisterRoutes(r)
 	want := map[string]bool{
-		"GET /experiences/{eventID}/boost/estimate":                 false,
-		"POST /boosts/{boostID}/payments/{paymentID}/verify":        false,
-		"DELETE /boosts/{boostID}/creatives/{creativeID}":           false,
-		"GET /host/premium":                                         false,
+		"GET /experiences/{eventID}/boost/estimate":          false,
+		"POST /boosts/{boostID}/payments/{paymentID}/verify": false,
+		"DELETE /boosts/{boostID}/creatives/{creativeID}":    false,
+		"GET /host/premium":   false,
+		"GET /boost/settings": false,
 		"POST /admin/boosts/{boostID}/payments/{paymentID}/reverse": false,
 		"PUT /admin/boosts/{boostID}/spend":                         false,
 		"POST /admin/premium/{hostID}/grant":                        false,

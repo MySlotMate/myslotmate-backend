@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -469,4 +470,33 @@ func TestDBRepoSmoke(t *testing.T) {
 	check("by link", err)
 	_, err = r.TicketsPerDay(ctx, id)
 	check("tickets per day", err)
+}
+
+func TestDBHostActivity(t *testing.T) {
+	f := boostDB(t)
+	ctx := context.Background()
+	id := f.acceptedBudgetBoost(t, f.eventID, f.hostID, time.Now().Add(24*time.Hour))
+	r := f.svc.repo
+	for _, a := range []struct{ kind, action, details string }{
+		{"admin", "proposed", `{}`}, {"host", "accepted", `{}`}, {"admin", "declined", `{"reason":"no"}`},
+	} {
+		if err := r.Log(ctx, id, a.kind, "x", a.action, map[string]any{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.PremiumLog(ctx, f.hostID, "admin", "x", "grant", nil); err != nil {
+		t.Fatal(err)
+	}
+	items, err := f.svc.HostActivity(ctx, f.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actions []string
+	for _, it := range items {
+		actions = append(actions, it.Action)
+	}
+	got := strings.Join(actions, ",")
+	if got != "grant,declined,proposed" {
+		t.Fatalf("actions = %s (the host's own accept must not show)", got)
+	}
 }

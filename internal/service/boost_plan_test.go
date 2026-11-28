@@ -122,7 +122,6 @@ func TestBudgetBandRange(t *testing.T) {
 	}
 }
 
-
 func TestCreativeSizeLimit(t *testing.T) {
 	st := &models.BoostSettings{CreativeImageMaxMB: 20, CreativeVideoMaxMB: 200, CreativeOtherMaxMB: 50}
 	for _, c := range []struct {

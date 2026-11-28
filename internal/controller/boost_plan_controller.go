@@ -36,6 +36,7 @@ func (c *BoostController) registerPlanRoutes(r chi.Router, user func(http.Handle
 	// planner checks what the backend will.
 	r.With(user).Get("/boost/settings", c.GetSettings)
 	r.With(user).Get("/host/premium", c.HostPremium)
+	r.With(user).Get("/host/boost-activity", c.HostActivity)
 	r.With(user).Post("/host/premium/apply", c.ApplyPremium)
 }
 
@@ -267,6 +268,16 @@ func (c *BoostController) HostPremium(w http.ResponseWriter, r *http.Request) {
 	}
 	m, err := c.boosts.HostPremium(r.Context(), userID)
 	reply(w, http.StatusOK, m, err)
+}
+
+// HostActivity is the host's Boost and Premium notifications.
+func (c *BoostController) HostActivity(w http.ResponseWriter, r *http.Request) {
+	userID, ok := c.caller(w, r)
+	if !ok {
+		return
+	}
+	list, err := c.boosts.HostActivity(r.Context(), userID)
+	reply(w, http.StatusOK, list, err)
 }
 
 func (c *BoostController) ApplyPremium(w http.ResponseWriter, r *http.Request) {

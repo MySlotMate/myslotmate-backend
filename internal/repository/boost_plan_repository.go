@@ -681,3 +681,47 @@ func (r *BoostRepository) CountPremium(ctx context.Context) (map[string]int, err
 	}
 	return out, rows.Err()
 }
+
+// ActivityRow is one log entry on a host's Boost or Premium membership.
+type ActivityRow struct {
+	ID         int64
+	Source     string // boost | premium
+	BoostID    *uuid.UUID
+	EventID    *uuid.UUID
+	EventTitle string
+	EventSlug  string
+	ActorKind  string
+	Action     string
+	Details    []byte
+	CreatedAt  time.Time
+}
+
+// HostActivity lists what happened on the host's Boosts and Premium
+// membership since since, newest first: everything the team or the system
+// did, plus payments (whoever made them).
+func (r *BoostRepository) HostActivity(ctx context.Context, hostID uuid.UUID, since time.Time, limit int) ([]ActivityRow, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT * FROM (
+			SELECT l.id, 'boost' AS source, b.id, e.id, e.title, COALESCE(e.slug, ''), l.actor_kind, l.action, l.details, l.created_at
+			  FROM event_boost_log l JOIN event_boosts b ON b.id = l.boost_id JOIN events e ON e.id = b.event_id
+			 WHERE b.host_id = $1 AND l.created_at >= $2
+			   AND (l.actor_kind IN ('admin', 'system') OR l.action = 'payment_paid')
+			UNION ALL
+			SELECT p.id, 'premium', NULL, NULL, '', '', p.actor_kind, p.action, p.details, p.created_at
+			  FROM premium_membership_log p
+			 WHERE p.host_id = $1 AND p.created_at >= $2 AND p.actor_kind IN ('admin', 'system')
+		) a ORDER BY a.created_at DESC LIMIT $3`, hostID, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActivityRow
+	for rows.Next() {
+		var a ActivityRow
+		if err := rows.Scan(&a.ID, &a.Source, &a.BoostID, &a.EventID, &a.EventTitle, &a.EventSlug, &a.ActorKind, &a.Action, &a.Details, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}

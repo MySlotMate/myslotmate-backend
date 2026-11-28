@@ -54,11 +54,11 @@ func (s *BoostService) WithPlan(p BoostPayments, f BoostFiles, b *BillingService
 }
 
 const (
-	mb               = int64(1024 * 1024)
-	boostNoteMax     = 1000
-	boostTitleMax    = 200
-	spendEntriesMax  = 200
-	budgetWarnBps    = 8000 // email the host once 80% of the budget is spent
+	mb              = int64(1024 * 1024)
+	boostNoteMax    = 1000
+	boostTitleMax   = 200
+	spendEntriesMax = 200
+	budgetWarnBps   = 8000 // email the host once 80% of the budget is spent
 )
 
 /* ------------------------------------------------------------------ */

@@ -1,9 +1,12 @@
 package service
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -498,5 +501,67 @@ func TestDBHostActivity(t *testing.T) {
 	got := strings.Join(actions, ",")
 	if got != "grant,declined,proposed" {
 		t.Fatalf("actions = %s (the host's own accept must not show)", got)
+	}
+}
+
+// fakeFiles serves every key as its own name, for the ZIP test.
+type fakeFiles struct{}
+
+func (fakeFiles) PresignBoostUpload(context.Context, string, string, int64) (string, error) {
+	return "", nil
+}
+func (fakeFiles) SignBoostDownload(k, _ string) string   { return "view:" + k }
+func (fakeFiles) SignBoostAttachment(k, _ string) string { return "save:" + k }
+func (fakeFiles) OpenBoostObject(_ context.Context, k string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("bytes of " + k)), nil
+}
+func (fakeFiles) HeadBoostObject(context.Context, string) (int64, string, error) {
+	return 1, "image/png", nil
+}
+
+func TestDBCreativesZip(t *testing.T) {
+	f := boostDB(t)
+	ctx := context.Background()
+	f.svc.files = fakeFiles{}
+	id := f.acceptedBudgetBoost(t, f.eventID, f.hostID, time.Now().Add(24*time.Hour))
+	mk := func(typ string, at time.Time, names ...string) uuid.UUID {
+		c := &models.BoostCreative{ID: uuid.New(), BoostID: id, Type: typ, Channels: []string{}, UploadedByKind: "host",
+			UploadedBy: "h", Status: models.CreativeSubmitted, CreatedAt: at}
+		for _, n := range names {
+			c.Files = append(c.Files, models.StoredFile{Key: "boosts/" + id.String() + "/creatives/x/" + n, Name: n, MimeType: "image/png", Size: 1})
+		}
+		if err := f.svc.repo.CreateCreative(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		return c.ID
+	}
+	now := time.Now()
+	mk("post", now.Add(-time.Hour), "a.png", "b.png")
+	story := mk("story", now, "c.png")
+
+	read := func(only *uuid.UUID) []string {
+		var buf bytes.Buffer
+		if err := f.svc.AdminCreativesZip(ctx, id, only, &buf); err != nil {
+			t.Fatal(err)
+		}
+		zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, e := range zr.File {
+			names = append(names, e.Name)
+		}
+		return names
+	}
+	if got := strings.Join(read(nil), ","); got != "01-post-host/01-a.png,01-post-host/02-b.png,02-story-host/01-c.png" {
+		t.Fatalf("all = %s", got)
+	}
+	if got := strings.Join(read(&story), ","); got != "02-story-host/01-c.png" {
+		t.Fatalf("one = %s", got)
+	}
+	list, _ := f.svc.AdminCreatives(ctx, id)
+	if list[0].Files[0].DownloadURL == "" || !strings.HasPrefix(list[0].Files[0].DownloadURL, "save:") {
+		t.Fatalf("download_url = %q", list[0].Files[0].DownloadURL)
 	}
 }

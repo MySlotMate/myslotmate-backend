@@ -311,14 +311,35 @@ func (s *UploadService) PresignBoostUpload(ctx context.Context, key, contentType
 }
 
 // SignBoostDownload returns a one-hour signed GET link for a file under
-// boosts/, served as an attachment named name.
+// boosts/, shown in the browser (inline) under name.
 func (s *UploadService) SignBoostDownload(key, name string) string {
+	return s.signBoost(key, name, "inline")
+}
+
+// SignBoostAttachment is SignBoostDownload saved as a file instead of shown.
+func (s *UploadService) SignBoostAttachment(key, name string) string {
+	return s.signBoost(key, name, "attachment")
+}
+
+// OpenBoostObject streams a file under boosts/ (the caller closes it).
+func (s *UploadService) OpenBoostObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	if !boostKeyOK(key) {
+		return nil, fmt.Errorf("refusing to read %q outside %s", key, boostFolder)
+	}
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	if err != nil {
+		return nil, err
+	}
+	return out.Body, nil
+}
+
+func (s *UploadService) signBoost(key, name, disposition string) string {
 	if !boostKeyOK(key) {
 		return ""
 	}
 	in := &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)}
 	if name != "" {
-		in.ResponseContentDisposition = aws.String(fmt.Sprintf("inline; filename=%q", sanitizeFilename(name)))
+		in.ResponseContentDisposition = aws.String(fmt.Sprintf("%s; filename=%q", disposition, sanitizeFilename(name)))
 	}
 	req, err := s3.NewPresignClient(s.client).PresignGetObject(context.Background(), in, s3.WithPresignExpires(time.Hour))
 	if err != nil {

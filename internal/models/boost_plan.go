@@ -25,12 +25,12 @@ const (
 
 // BoostSettings are the budget rules the team can change.
 type BoostSettings struct {
-	MinDailyBudgetCents int64     `json:"min_daily_budget_cents"`
-	BudgetStepCents     int64     `json:"budget_step_cents"`
-	MinDays             int       `json:"min_days"`
-	PaymentWindowDays   int       `json:"payment_window_days"`
-	BudgetGSTBps        int       `json:"budget_gst_bps"`
-	BudgetRequired      bool      `json:"budget_required"`
+	MinDailyBudgetCents int64 `json:"min_daily_budget_cents"`
+	BudgetStepCents     int64 `json:"budget_step_cents"`
+	MinDays             int   `json:"min_days"`
+	PaymentWindowDays   int   `json:"payment_window_days"`
+	BudgetGSTBps        int   `json:"budget_gst_bps"`
+	BudgetRequired      bool  `json:"budget_required"`
 	// Upload limits, MB per file.
 	CreativeImageMaxMB int       `json:"creative_image_max_mb"`
 	CreativeVideoMaxMB int       `json:"creative_video_max_mb"`
@@ -143,11 +143,12 @@ const (
 
 // StoredFile is one uploaded file; URL is a short-lived signed download link.
 type StoredFile struct {
-	Key      string `json:"key"`
-	URL      string `json:"url"`
-	Name     string `json:"name"`
-	MimeType string `json:"mime_type"`
-	Size     int64  `json:"size"`
+	Key         string `json:"key"`
+	URL         string `json:"url"`
+	DownloadURL string `json:"download_url,omitempty"` // saves the file instead of showing it
+	Name        string `json:"name"`
+	MimeType    string `json:"mime_type"`
+	Size        int64  `json:"size"`
 }
 
 // BoostCreative is one item in a Boost's creatives space.

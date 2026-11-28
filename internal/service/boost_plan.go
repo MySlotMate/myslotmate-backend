@@ -1,10 +1,12 @@
 package service
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"net/http"
 	"path"
@@ -43,6 +45,8 @@ type BoostWhatsApp interface {
 type BoostFiles interface {
 	PresignBoostUpload(ctx context.Context, key, contentType string, size int64) (string, error)
 	SignBoostDownload(key, name string) string
+	SignBoostAttachment(key, name string) string
+	OpenBoostObject(ctx context.Context, key string) (io.ReadCloser, error)
 	HeadBoostObject(ctx context.Context, key string) (int64, string, error)
 }
 
@@ -1333,6 +1337,7 @@ func (s *BoostService) signFiles(files []models.StoredFile) []models.StoredFile 
 	for i, f := range files {
 		if s.files != nil {
 			f.URL = s.files.SignBoostDownload(f.Key, f.Name)
+			f.DownloadURL = s.files.SignBoostAttachment(f.Key, f.Name)
 		}
 		out[i] = f
 	}
@@ -2229,4 +2234,51 @@ func (s *BoostService) mailHostID(ctx context.Context, hostID uuid.UUID, subject
 			log.Printf("[BOOST] host email %q: %v", subject, err)
 		}
 	}()
+}
+
+// AdminCreativesZip writes the Boost's creatives (or only creativeID's, when
+// set) to w as a ZIP: one folder per creative, "01-post-host/<file>". It
+// streams each file from storage, so a large reel is never held in memory.
+func (s *BoostService) AdminCreativesZip(ctx context.Context, boostID uuid.UUID, creativeID *uuid.UUID, w io.Writer) error {
+	if s.files == nil {
+		return errPlanOff
+	}
+	list, err := s.repo.ListCreatives(ctx, boostID)
+	if err != nil {
+		return err
+	}
+	zw := zip.NewWriter(w)
+	n := 0
+	for i := len(list) - 1; i >= 0; i-- { // oldest first, numbered in upload order
+		c := list[i]
+		n++
+		if creativeID != nil && c.ID != *creativeID {
+			continue
+		}
+		dir := fmt.Sprintf("%02d-%s-%s", n, c.Type, c.UploadedByKind)
+		for j, f := range c.Files {
+			body, err := s.files.OpenBoostObject(ctx, f.Key)
+			if err != nil {
+				return fmt.Errorf("open %s: %w", f.Key, err)
+			}
+			name := fmt.Sprintf("%s/%02d-%s", dir, j+1, safeName(f.Name))
+			// Images and videos are already compressed: store, don't deflate.
+			fw, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store, Modified: c.CreatedAt})
+			if err == nil {
+				_, err = io.Copy(fw, body)
+			}
+			body.Close()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return zw.Close()
+}
+
+// CreativesExist reports whether a Boost has any creative (to answer 404
+// before a ZIP starts streaming).
+func (s *BoostService) CreativesExist(ctx context.Context, boostID uuid.UUID) (bool, error) {
+	list, err := s.repo.ListCreatives(ctx, boostID)
+	return len(list) > 0, err
 }

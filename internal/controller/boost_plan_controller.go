@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -48,6 +50,7 @@ func (c *BoostController) registerAdminPlanRoutes(r chi.Router) {
 	r.Put("/{boostID}/spend", c.AdminSpend)
 	r.Get("/{boostID}/results", c.AdminResults)
 	r.Get("/{boostID}/creatives", c.AdminCreatives)
+	r.Get("/{boostID}/creatives/download", c.AdminCreativesZip)
 	r.Post("/{boostID}/creatives/upload-url", c.AdminCreativeUploadURL)
 	r.Post("/{boostID}/creatives", c.AdminSaveCreative)
 	r.Post("/{boostID}/creatives/{creativeID}/status", c.AdminCreativeStatus)
@@ -371,6 +374,38 @@ func (c *BoostController) AdminCreatives(w http.ResponseWriter, r *http.Request)
 	}
 	list, err := c.boosts.AdminCreatives(r.Context(), id)
 	reply(w, http.StatusOK, list, err)
+}
+
+// AdminCreativesZip downloads the Boost's creatives as one ZIP, or one
+// creative's files with ?creative_id=.
+func (c *BoostController) AdminCreativesZip(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(w, r, "boostID")
+	if !ok {
+		return
+	}
+	var only *uuid.UUID
+	if v := r.URL.Query().Get("creative_id"); v != "" {
+		cid, err := uuid.Parse(v)
+		if err != nil {
+			RespondError(w, http.StatusBadRequest, "Invalid creative_id")
+			return
+		}
+		only = &cid
+	}
+	if ok, err := c.boosts.CreativesExist(r.Context(), id); err != nil || !ok {
+		if err == nil {
+			RespondJSON(w, http.StatusNotFound, APIResponse{Success: false, Error: "no_creatives", Message: "This Boost has no creatives yet."})
+		} else {
+			respondBoost(w, err)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", "boost-"+id.String()[:8]+"-creatives.zip"))
+	if err := c.boosts.AdminCreativesZip(r.Context(), id, only, w); err != nil {
+		// Headers are gone; all we can do is stop and log.
+		log.Printf("[BOOST] creatives zip %s: %v", id, err)
+	}
 }
 
 func (c *BoostController) AdminCreativeUploadURL(w http.ResponseWriter, r *http.Request) {

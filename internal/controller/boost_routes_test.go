@@ -22,6 +22,7 @@ func TestBoostPlanRoutesRegister(t *testing.T) {
 		"GET /boost/settings":      false,
 		"GET /host/boost-activity": false,
 		"POST /admin/boosts/{boostID}/payments/{paymentID}/reverse": false,
+		"GET /admin/boosts/{boostID}/creatives/download":            false,
 		"PUT /admin/boosts/{boostID}/spend":                         false,
 		"POST /admin/premium/{hostID}/grant":                        false,
 		"PUT /admin/boost-settings":                                 false,

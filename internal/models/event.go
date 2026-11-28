@@ -96,9 +96,11 @@ type Event struct {
 	GalleryURLs   pq.StringArray `db:"gallery_urls" json:"gallery_urls"`
 
 	// ── Logistics ───────────────────────────────────────────────────────────
-	IsOnline        bool     `db:"is_online" json:"is_online"`
-	MeetingLink     *string  `db:"meeting_link" json:"meeting_link,omitempty"` // for online events (zoom, teams, google meet, etc.)
-	Location        *string  `db:"location" json:"location,omitempty"`         // address/landmark
+	IsOnline bool `db:"is_online" json:"is_online"`
+	// MeetingLink is never sent with an event: only the host, an admin or a
+	// guest with a confirmed booking gets it, from GET /events/{id}/join.
+	MeetingLink     *string  `db:"meeting_link" json:"-"`              // for online events (zoom, teams, google meet, etc.)
+	Location        *string  `db:"location" json:"location,omitempty"` // address/landmark
 	LocationLat     *float64 `db:"location_lat" json:"location_lat,omitempty"`
 	LocationLng     *float64 `db:"location_lng" json:"location_lng,omitempty"`
 	GoogleMapsURL   *string  `db:"google_maps_url" json:"google_maps_url,omitempty"` // direct link to Google Maps location

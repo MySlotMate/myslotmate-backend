@@ -236,6 +236,7 @@ func (c *EventController) RegisterRoutes(r chi.Router) {
 			r.Get("/today/{hostID}", c.GetTodaySchedule)
 			r.Get("/{eventID}/attendees", c.GetEventAttendees)
 			r.Get("/{eventID}/attention", c.GetEventAttention)
+			r.Get("/{eventID}/join", c.GetJoinLink)
 		})
 
 		// Everything that changes an experience needs a signed-in host, or an
@@ -687,6 +688,64 @@ func (c *EventController) GetEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	RespondSuccess(w, http.StatusOK, evt)
+}
+
+// GetJoinLink returns an online event's meeting link. The link is never sent
+// with the event itself, so only people who should join can see it: the host
+// (or an accepted co-host), an admin, or a guest with a confirmed booking.
+func (c *EventController) GetJoinLink(w http.ResponseWriter, r *http.Request) {
+	evt, err := c.eventService.GetEventBySlugOrID(r.Context(), chi.URLParam(r, "eventID"))
+	if err != nil {
+		RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if evt == nil {
+		RespondError(w, http.StatusNotFound, "Event not found")
+		return
+	}
+
+	allowed := auth.IsAdminCaller(r)
+	if !allowed {
+		uid, _ := r.Context().Value(auth.ContextKeyUID).(string)
+		if uid == "" || c.userRepo == nil {
+			RespondError(w, http.StatusUnauthorized, "Sign in to get the join link")
+			return
+		}
+		user, uerr := c.userRepo.GetByAuthUID(r.Context(), uid)
+		if uerr != nil {
+			RespondError(w, http.StatusInternalServerError, uerr.Error())
+			return
+		}
+		if user == nil {
+			RespondError(w, http.StatusUnauthorized, "Sign in to get the join link")
+			return
+		}
+		if c.hostRepo != nil {
+			if host, herr := c.hostRepo.GetByUserID(r.Context(), user.ID); herr == nil && host != nil {
+				if ok, merr := c.eventService.HostCanManageEvent(r.Context(), evt.ID, host.ID); merr == nil && ok {
+					allowed = true
+				}
+			}
+		}
+		if !allowed {
+			ok, berr := c.eventService.UserHasConfirmedBooking(r.Context(), evt.ID, user.ID)
+			if berr != nil {
+				RespondError(w, http.StatusInternalServerError, berr.Error())
+				return
+			}
+			allowed = ok
+		}
+	}
+	if !allowed {
+		RespondError(w, http.StatusForbidden, "Book this experience to get the join link")
+		return
+	}
+
+	link := ""
+	if evt.IsOnline && evt.MeetingLink != nil {
+		link = strings.TrimSpace(*evt.MeetingLink)
+	}
+	RespondSuccess(w, http.StatusOK, map[string]string{"meeting_link": link})
 }
 
 // UnlockEvent is the dry-run behind the guest's passkey prompt for a private

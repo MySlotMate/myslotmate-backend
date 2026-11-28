@@ -254,8 +254,10 @@ func (d *DataIngestionEngine) loadEvents(ctx context.Context) ([]Document, error
 		if location != "" {
 			contentLines = append(contentLines, fmt.Sprintf("Location: %s", location))
 		}
+		// The meeting link is for booked guests only, so it never goes into the
+		// assistant's index (anyone can ask the assistant).
 		if meetingLink != "" {
-			contentLines = append(contentLines, fmt.Sprintf("Meeting Link: %s", meetingLink))
+			contentLines = append(contentLines, "Online: join link shared with guests after booking")
 		}
 		if mapsURL != "" {
 			contentLines = append(contentLines, fmt.Sprintf("Map URL: %s", mapsURL))
